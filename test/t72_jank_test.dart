@@ -109,22 +109,112 @@ Future<void> _mount(WidgetTester t, {void Function()? onLiveChannels}) async {
   await t.pump();
 }
 
-void main() {
-  setUpAll(() {
-    /*
-     * ★ 必须给**显式路径** —— `flutter test` 的进程里没有 libmpv 的
-     *   DLL 搜索路径（真机运行由 runner 目录提供），
-     *   不传路径就是 `Cannot find libmpv-2.dll in your system %PATH%`。
-     *   与 `.probe/probe_tests/t72_jank_probe_test.dart` 逐字同一做法。
-     */
-    final dll = File('build/windows/x64/libmpv/libmpv-2.dll');
-    if (dll.existsSync()) {
-      MediaKit.ensureInitialized(libmpv: dll.absolute.path);
-    } else {
-      // ★ 不静默跳过：没有 DLL 时页面建不起来，下面每条都会红得莫名其妙
-      fail('libmpv 夹具缺失：${dll.absolute.path} 不存在');
+// ══════════════════════════════════════════════════════════════════════════
+//  libmpv 夹具：跨平台探测 + 缺夹具时**跳过**（不是假红）
+// ══════════════════════════════════════════════════════════════════════════
+//
+// ★ 为什么必须给**显式路径**：`media_kit` 的
+//   `NativeLibrary.ensureInitialized()` 只按**默认名**搜系统路径 ——
+//   Windows 找 `libmpv-2.dll`、macOS 找 `Mpv.framework/Mpv`
+//   （`media_kit-1.2.6/lib/src/player/native/core/native_library.dart:49-69`）
+//   —— 而 `flutter test` 的进程里两者都**不在**搜索路径上 ⇒ 不传路径
+//   就是 `Cannot find libmpv-2.dll in your system %PATH%`。
+//
+// ★ 为什么是**两套**路径：libmpv 由 media_kit 的 libs 包在**构建期**下载，
+//   两端落点不同：
+//     · Windows：CMake 下到 `build/windows/x64/libmpv/libmpv-2.dll`
+//     · macOS  ：Makefile 下 `Mpv.xcframework`，构建后进 app 包的
+//                `Contents/Frameworks/libmpv-2.dylib`
+//   ⇒ 只认 Windows 那条路径的话，macOS 上永远探不到（即使夹具真的在）。
+//
+// ★ 为什么缺夹具是 **skip** 而不是 fail：`build/` 被 `.gitignore:36`
+//   忽略、从不入库，而 CI 的 `flutter test` 排在
+//   `flutter build windows|macos` **之前** ⇒ 没跑过构建的机器上夹具
+//   **必然缺席**。那是环境前提，不是本文件的缺陷。
+//
+// ⚠️ 不是「放宽断言」：夹具在的机器上（例如本地跑过
+//   `flutter build windows`）下面的断言一条都不会少跑。
+// ⚠️ **不能**改成 `@Tags(['native-media'])`：`dart_test.yaml` 把该标签
+//   默认 skip ⇒ 本文件的 ★★★ 契约守卫会从默认套件里**整个消失**
+//   —— 那是移除覆盖，不是加守卫。
+//
+// ★ 本文件 **5 条**用例全都挂 `PlayerPage` ⇒ 全都依赖播放器。
+// ══════════════════════════════════════════════════════════════════════════
+
+/// libmpv 的候选路径（**跨平台** —— 别只写 Windows 那一条）
+List<String> _libmpvCandidates() {
+  if (Platform.isWindows) {
+    return <String>[
+      r'build\windows\x64\libmpv\libmpv-2.dll',
+      r'build\windows\x64\runner\Release\libmpv-2.dll',
+    ];
+  }
+  if (Platform.isMacOS) {
+    final out = <String>[
+      // pod 的 vendored framework（`pod install` 之后）
+      'macos/Pods/media_kit_libs_macos_video/Frameworks/'
+          'Mpv.xcframework/macos-arm64_x86_64/libmpv-2.dylib',
+      'macos/Pods/media_kit_libs_macos_video/Frameworks/'
+          'Mpv.xcframework/macos-arm64/libmpv-2.dylib',
+    ];
+    // `flutter build macos` 之后 libmpv 就在 app 包里
+    // （★ app 名不一定是 `sourin_spike` —— 发布版是中文「源影」⇒ 扫目录）
+    for (final cfg in const <String>['Release', 'Debug', 'Profile']) {
+      final dir = Directory('build/macos/Build/Products/$cfg');
+      if (!dir.existsSync()) continue;
+      for (final e in dir.listSync()) {
+        if (e is Directory && e.path.endsWith('.app')) {
+          out.add('${e.path}/Contents/Frameworks/libmpv-2.dylib');
+        }
+      }
     }
-  });
+    return out;
+  }
+  // Linux / 其它：libmpv 由系统包管理器提供
+  return <String>[
+    '/usr/lib/x86_64-linux-gnu/libmpv.so.2',
+    '/usr/lib/libmpv.so.2',
+  ];
+}
+
+/// 探测到的 libmpv **绝对**路径；`null` = 夹具缺失
+String? _libmpv;
+
+/// 夹具准备（`setUpAll` 用）：探到就初始化 MediaKit，探不到**什么都不做**。
+///
+/// ⚠️ 探不到时这里**绝不 fail** —— 理由见文件头；守卫下沉到
+///   `_requireLibmpv()`，由每个**依赖播放器**的用例自己调。
+void _prepareLibmpvFixture() {
+  for (final rel in _libmpvCandidates()) {
+    final f = File(rel);
+    if (f.existsSync()) {
+      _libmpv = f.absolute.path;
+      MediaKit.ensureInitialized(libmpv: _libmpv);
+      // ignore: avoid_print
+      print('[LIBMPV] 夹具 = $_libmpv');
+      return;
+    }
+  }
+  // ignore: avoid_print
+  print('[LIBMPV] 夹具**缺失** ⇒ 依赖播放器的用例将 markTestSkipped；'
+      '候选 = ${_libmpvCandidates()}');
+}
+
+/// 依赖播放器的用例开头调用：`if (!_requireLibmpv()) return;`
+///
+/// 返回 `true` = 夹具就绪可继续；`false` = **已标记跳过，调用方必须 return**
+/// （`markTestSkipped` 只打标记，**不会**中断当前函数 —— 本地实测：标记之后
+/// 的代码照常执行，所以必须紧跟 `return`）。
+bool _requireLibmpv() {
+  if (_libmpv != null) return true;
+  markTestSkipped('libmpv 夹具缺失 ⇒ 播放器建不起来，本条无从断言。'
+      '手动跑：先 `flutter build windows`（或 macOS 上 `flutter build macos`）'
+      '；候选路径 = ${_libmpvCandidates()}');
+  return false;
+}
+
+void main() {
+  setUpAll(_prepareLibmpvFixture);
   setUp(() => RemoteBridge.instance.stop());
   tearDown(() {
     _uninstall();
@@ -133,6 +223,7 @@ void main() {
 
   // ═══ 仪器自检 ════════════════════════════════════════════════════════
   testWidgets('P0 仪器自检：阴性对照 0/0 + 阳性对照 >=1', (t) async {
+    if (!_requireLibmpv()) return;
     await _mount(t);
 
     _install();
@@ -152,6 +243,7 @@ void main() {
 
   // ═══ 候选 A：hover 不再整页重建 ══════════════════════════════════════
   testWidgets('PA 控制条已可见时，60 次鼠标移动 ⇒ 0 次整页重建', (t) async {
+    if (!_requireLibmpv()) return;
     await _mount(t);
 
     // 先建立 device state（首帧让 MouseTracker 认识这个指针）
@@ -175,6 +267,7 @@ void main() {
 
   // ═══ 候选 B：位置 tick 只在"显示的那一秒"变化时重建 ══════════════════
   testWidgets('PB 180 次位置 tick（跨 3 秒）⇒ 3 次整页重建', (t) async {
+    if (!_requireLibmpv()) return;
     await _mount(t);
 
     // ★ 走**生产代码自己的**处理路径（`_onPositionTick`）——
@@ -203,6 +296,7 @@ void main() {
 
   // ═══ 候选 C：抽屉关着时不现取频道列表 ════════════════════════════════
   testWidgets('PC 抽屉关着：整页重建 N 次 ⇒ onLiveChannels 调 0 次；开着 ⇒ >=1', (t) async {
+    if (!_requireLibmpv()) return;
     var calls = 0;
     await _mount(t, onLiveChannels: () => calls++);
 
@@ -233,6 +327,7 @@ void main() {
 
   // ═══ 回归：关闭时的退出动画期间**不能空白** ══════════════════════════
   testWidgets('PD 抽屉关闭 ⇒ 退出动画期间列表仍在（不是「所有直播（0）」）', (t) async {
+    if (!_requireLibmpv()) return;
     await _mount(t, onLiveChannels: () {});
 
     final opened = debugPlayerOpenLiveChannelsForProbe();

@@ -390,7 +390,9 @@ void main() {
   //   → ffi.dart:197         static String get version { _ensureBound(); ... }
   //   → ffi.dart:182         static void _ensureBound()
   //   → ffi.dart:169         _lib = DynamicLibrary.open('sourin_core.dll');
-  // ⇒ 测试进程里没有这个 DLL ⇒ 抛
+  // ⇒ 测试进程里没有这个核心库 ⇒ 抛
+  //   ★ 库名**随平台**变（见下面 L467 那条断言的注释）——
+  //     本文件原来把 macOS 也当 Windows 写死了，所以在 macOS 上假红。
   // ```
   //
   // ★ 这一行在 `ListView.children` 里 ⇒ 它一抛，**整个 ListView 元素**
@@ -409,7 +411,7 @@ void main() {
   //   理由（铁律：一条永远为真的断言比没有断言更危险）：
   //   若哪天有人给设置页补了注入口/兜底，本用例会**变红**，
   //   那时就该把滚动读数补回来，而不是继续报「合成侧量不到」。
-  testWidgets('PB 设置页：合成侧挂不上（真因 = 缺 sourin_core.dll）⇒ 必须真机量',
+  testWidgets('PB 设置页：合成侧挂不上（真因 = 缺核心库）⇒ 必须真机量',
       (t) async {
     await sizeView(t, _size);
     await t.pumpWidget(host(const SettingsPage(), _size));
@@ -464,10 +466,25 @@ void main() {
             '也没有 ErrorWidget ⇒ 页面去哪了？读数无法解释'
             '  噪声=$noise');
 
-    // ★ 真因必须是「缺 DLL」，不能是别的原因（否则本用例在守一个错误的机制）
+    /*
+     * ★ 真因必须是「缺核心库」，不能是别的原因
+     *   （否则本用例在守一个错误的机制）
+     *
+     * ★★ 断言里的库名**必须平台无关**：`lib/core/ffi.dart:165-179`
+     *    `_openLibrary()` 是按平台分派的 ——
+     *      Windows          → `sourin_core.dll`
+     *      Android / Linux  → `libsourin_core.so`
+     *      macOS / iOS      → `libsourin_core.dylib`
+     *    ⇒ 写死 `'sourin_core.dll'` 的话，macOS 上噪声里是
+     *      `Failed to load dynamic library 'libsourin_core.dylib'`，
+     *      这条**必然**假红（2026-10-08 macOS CI 实测）。
+     *    ★ 判据没变：仍然是「真因 = 缺核心库」—— 不是放宽。
+     */
     final joined = noise.join(' | ');
-    expect(joined.contains('sourin_core.dll'), isTrue,
-        reason: '★ 真因不是缺 sourin_core.dll ⇒ 设置页挂不上另有原因，'
+    expect(joined.contains('sourin_core'), isTrue,
+        reason: '★ 真因不是缺核心库（Windows `sourin_core.dll` / '
+            'macOS `libsourin_core.dylib` / Linux `libsourin_core.so`）'
+            ' ⇒ 设置页挂不上另有原因，'
             '本用例记录的机制是错的，必须重新定位'
             '  噪声=$joined');
 
