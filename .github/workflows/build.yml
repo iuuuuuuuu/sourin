@@ -265,14 +265,21 @@ jobs:
           }
           # ★ 版本号从 tag 注入（tag 形如 v1.0.0 ⇒ 1.0.0）
           $ver = $tag -replace '^v',''
+          # ★★ 产物**必须落在 build/ 下**，不能留在 installer/ ——
+          #   `upload-artifact` 会剥掉所有上传路径的**共同祖先**：
+          #     macOS 传 build/x.zip + build/x.dmg  ⇒ 祖先 build/  ⇒ 包里是 x.zip / x.dmg（对）
+          #     改前的 Windows 传 build/x.zip + installer/s.exe ⇒ 祖先是仓库根 ⇒
+          #       包里变成 build/x.zip 与 installer/s.exe 两个**子目录**
+          #   ⇒ publish job 在 rel/ 根下找不到它们，静默只发了 macOS+Android。
+          #   实测：run 37802958581 的 rel/ 里是 `rel/build/...zip` 与 `rel/installer/...exe`。
           $outfile = "Sourin-Setup-$ver.exe"
           "版本 = $ver，产物名 = $outfile"
           Set-Location installer
           # ★ 用上一步交下来的绝对路径（不靠 PATH，理由见上一步的注释）
-          & $env:MAKENSIS /V2 "/DAPP_VERSION=$ver" "/DOUTFILE=$outfile" sourin.nsi
+          & $env:MAKENSIS /V2 "/DAPP_VERSION=$ver" "/DOUTFILE=../build/$outfile" sourin.nsi
           if ($LASTEXITCODE -ne 0) { throw "makensis 失败（exit $LASTEXITCODE）" }
           Set-Location ..
-          $exe = "installer/$outfile"
+          $exe = "build/$outfile"
           $i = Get-Item $exe
           "安装包 = $($i.Length) 字节"
           # ★ 自检：安装包体积必须 > 20MB（payload 约 130MB，压缩后约 28MB）。
@@ -294,9 +301,11 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: rel-windows-${{ inputs.release_tag }}
+          # ★ 两个文件必须在**同一个父目录**下，否则 artifact 里会多出子目录
+          #   （upload-artifact 剥的是共同祖先）。理由逐字见上面编译那一步的注释。
           path: |
             build/sourin-windows-${{ inputs.release_tag }}.zip
-            installer/Sourin-Setup-*.exe
+            build/Sourin-Setup-*.exe
           retention-days: 1
 
   # ═════════════════════════════════════════════════════════════════════
@@ -866,6 +875,27 @@ jobs:
           else echo "· Android 未构建（job=${{ needs.android.result }}）—— 不发布 APK"; fi
           if [ -z "$FILES" ]; then
             echo "::error::三个平台都没有可用产物，拒绝发空 Release"; exit 1
+          fi
+          # ★★ 硬断言：rel/ 根下不许出现**子目录**。
+          #   这是 run 37802958581 那次的静默漏发：Windows 的 artifact 里带了
+          #   `build/` 与 `installer/` 两个子目录（因为上传的两个路径共同祖先
+          #   是仓库根），于是 `[ -f "rel/sourin-windows-$TAG.zip" ]` 为假 ⇒
+          #   那两条 `✗ Windows 包不可用` 只打了行日志，Release 照发不误 ——
+          #   用户看到的是一个**少了 Windows 包**的版本，而 CI 全绿。
+          #   ⇒ 有子目录就直接红，绝不静默少发。
+          SUBS=$(find rel -mindepth 1 -type d | head -20)
+          if [ -n "$SUBS" ]; then
+            echo "::error::rel/ 下出现了子目录 —— artifact 的路径结构不对，会有包被静默漏发："
+            echo "$SUBS"
+            find rel -type f | head -40
+            exit 1
+          fi
+          # ★ 再断言：Windows 那一份**必须**在（它是必跑 job）
+          if [ "${{ needs.windows.result }}" = "success" ] && [ ! -f "$W" ]; then
+            echo "::error::Windows job 成功但 $W 不在 —— 不接受「少发一个平台」"; exit 1
+          fi
+          if [ "${{ needs.windows.result }}" = "success" ] && [ ! -f "$SETUP" ]; then
+            echo "::error::Windows job 成功但安装包 $SETUP 不在 —— 不接受只发免安装版"; exit 1
           fi
           echo "files=$FILES" >> "$GITHUB_OUTPUT"
           # ★ 校验和清单（用户拿到包能自己核对完整性）
