@@ -211,10 +211,13 @@ jobs:
           #   `Get-Command makensis` **仍然找不到** —— nsis 包只解压文件，
           #   **不往 PATH 里加目录**（不像某些包会调 Install-ChocolateyPath）。
           #   ⇒ 直接按已知安装位置找，PATH 只作为兜底。
+          # ⚠️ PowerShell **不允许数组字面量的尾逗号**（C/JS/Python 都允许，PS 不行）：
+          #    `$c = @('a','b',)` ⇒ ParserError: Missing expression after ','.
+          #    实测踩过：run 37794997959 的「装 NSIS」就是被这个尾逗号整步挂掉的。
           $candidates = @(
             'C:\Program Files (x86)\NSIS\makensis.exe',
             'C:\Program Files\NSIS\makensis.exe',
-            'C:\ProgramData\chocolatey\lib\nsis\tools\makensis.exe',
+            'C:\ProgramData\chocolatey\lib\nsis\tools\makensis.exe'
           )
           $mk = $null
           foreach ($c in $candidates) {
