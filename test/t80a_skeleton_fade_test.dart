@@ -225,6 +225,15 @@ Future<SearchPageState> seedSearch(WidgetTester t) async {
 void main() {
   tearDownAll(() {
     final f = File('.probe/t80a_four_points.txt');
+    /*
+     * ★ 目录不存在就先建（2026-10-08 加）。
+     *
+     * `.probe/` 是开发期本地目录，**不在仓库里**（见 .gitignore）。
+     * 在干净检出（CI / 别人的机器）上它不存在 ⇒ 直接 write 会抛
+     * PathNotFoundException，把一条本该通过的测试变成失败。
+     * 这与本仓铁律「先问是不是我的仪器错」同源。
+     */
+    if (!f.parent.existsSync()) f.parent.createSync(recursive: true);
     f.writeAsStringSync('${report.join('\n')}\n');
     // ignore: avoid_print
     print('★ 读数已落盘：${f.absolute.path}');

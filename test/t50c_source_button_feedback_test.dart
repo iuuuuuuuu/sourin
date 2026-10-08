@@ -86,7 +86,23 @@ const int kSettleIndex = 15;
 /// 这条常数存在的意义：它是**算出来的**，不是"看着差不多"定的。
 const double kC3Step1 = 0.0505012133;
 
-final File _log = File('.probe/t50c_source_points.txt');
+/// 读数落盘 —— 目录不存在就**先建**。
+///
+/// ★ 为什么需要这一层（2026-10-08 加）：
+///   `.probe/` 是**开发期的本地目录**，它**不在仓库里**（见 .gitignore）。
+///   在干净的检出（CI、别人的机器）上它根本不存在 ⇒ 直接
+///   `writeAsStringSync` 会抛 `PathNotFoundException`，
+///   **把一条本该通过的动画断言变成失败**（而且报错位置在落盘那一行，
+///   看起来像断言挂了，实际是**仪器故障**）。
+///   ★ 这与本仓的一条铁律同源：先问「是我的仪器错了吗」。
+File _ensureLog(String path) {
+  final f = File(path);
+  final d = f.parent;
+  if (!d.existsSync()) d.createSync(recursive: true);
+  return f;
+}
+
+final File _log = _ensureLog('.probe/t50c_source_points.txt');
 
 void _rec(String line) {
   // ignore: avoid_print

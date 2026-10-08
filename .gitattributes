@@ -1,52 +1,76 @@
 # ═══════════════════════════════════════════════════════════════════════
-#  行尾规范化 —— 必须存在，不是可选优化
+#  行尾规范化 —— 必须存在，但不是「一律 LF」
 # ═══════════════════════════════════════════════════════════════════════
 #
-# # 为什么这个文件是**必需**的（不是「顺手加的」）
+# # 背景：有两处 Rust 测试直接读源码文本，判据里带换行字面量
 # ```text
-# 有两处 Rust 测试**直接读自己的源码文本**做断言，判据里带换行字面量：
-#
 #   rust/sourin_core/src/home.rs:202
 #       let end = rest.find("
 }
 ").unwrap_or(rest.len());
-#     ⇒ 找不到时 end = rest.len()，body 变成「整个文件剩余部分」
-#       ⇒ 断言 !body.contains(".map_err(|e| e.message)?") 必然失败
-#
 #   rust/sourin_core/src/tvbox.rs:2941
 #       let end = rest.find("
     }
-")
-#           .expect("找不到 try_parsers 的函数体结尾");
-#     ⇒ 直接 panic
+").expect("找不到 try_parsers 的函数体结尾");
 # ```
+# ★ Windows 上 `core.autocrlf` 默认是 true ⇒ 重新检出时 LF 全变 CRLF
+#   ⇒ 上面两个字面量永远匹配不到 ⇒ CI 上这两条必红。
+#   而本地看不出来（工作区本来就是 LF，只有重新检出才会被转）——
+#   现象是「本地全绿、CI 全红」，且红的是两条看起来毫不相干的测试。
 #
-# ★ 在 Windows 上（`core.autocrlf=true`，这是 Git for Windows 的默认值）
-#   检出时会把 LF 全部转成 CRLF ⇒ 上面两个 `"
-"` 字面量**永远匹配不到**
-#   ⇒ CI 上这两条测试必红。
-#
-# ⚠️ 这个坑之所以在本地看不出来：本地工作区的文件本来就是 LF 的
-#    （仓库里的 blob 也是 LF），只有**重新检出**时才会被转成 CRLF。
-#    所以「本地全绿、CI 全红」—— 而且红的是两条看起来毫不相干的测试。
-#
-# ⇒ 用 `eol=lf` 强制所有文本文件**无论在哪台机器检出都是 LF**，
-#   从根上消掉这个平台差异。
-#
-# # 为什么是 `* text=auto eol=lf` 而不是逐个扩展名列
+# # ⚠️ 但**不能**简单写 `* text=auto eol=lf` —— 那样会踩第二个坑
 # ```text
-# 逐列扩展名要维护一份清单，加新文件类型时会漏 —— 而漏了的后果
-# （在 Windows 上被转成 CRLF）正是这个文件要防的事。
-# `text=auto` 让 git 自己判断哪些是文本（二进制不动），
-# `eol=lf` 让所有文本一律以 LF 落盘。
+# 本仓有一个文件是**有意保持 CRLF** 的：
+#   lib/ui/live_page.dart   （2876 行，整文件 CRLF）
+# 而 test/t74_cover_image_test.dart:462-476 有一条断言专门钉这件事：
+#
+#   test("E1 live_page.dart 保持 CRLF，另四个保持 LF（不许整文件被重写）")
+#     expect(live.contains("\r\n"), isTrue);          ← 必须是 CRLF
+#     expect(live.replaceAll("\r\n", "").contains("\n"), isFalse);
+#     for (final p in [cover_image, poster_card, follow_page, detail_page])
+#       expect(_src(p).contains("\r"), isFalse);        ← 这四个必须纯 LF
+#
+# ⇒ `eol=lf` 会把它强行改成 LF ⇒ 这条断言在 CI 上必红。
+# ⇒ 正确做法：**默认保持仓库原样**（`text=auto` 只做 CRLF→LF 的入库归一，
+#   检出时按平台还原），只对「被测试读源码」的那几类显式钉 `eol=lf`。
 # ```
 
-# 默认：文本一律 LF
-* text=auto eol=lf
+# 默认：git 自己判断文本/二进制，**不强制检出时的行尾**
+# （不写 `eol=` ⇒ 按平台默认；配合下面的显式钉，跨平台行为就稳定了）
+* text=auto
 
-# 显式再钉一遍关键类型 —— 它们要么被测试读源码，要么被构建工具解析
+# ── ★ 显式钉 LF：这些会被测试当**文本**读，换行必须可预测 ─────────────
+#
+# Rust 侧：home.rs / tvbox.rs 等直接 include_str! 自己再 find("
+…")
 *.rs        text eol=lf
+#
+# Dart 侧：有大量「读源码做断言」的测试（grep 字面量、数出现次数、
+# 切片配平）。它们对 `
+` 敏感 ⇒ 必须 LF。
+# ⚠️ 唯一的例外见下面那两行 —— 覆盖顺序是**后面的赢**。
 *.dart      text eol=lf
+
+# ── ★★ 例外：这个文件必须保持 CRLF ────────────────────────────────────
+#
+# t74_cover_image_test.dart:462 的 E1 断言要求它「整文件 CRLF、不混裸 LF」。
+# 它为什么会是 CRLF：历史原因（早期在 Windows 上被某个工具重写过），
+# 而那条断言的用意是「**不许有人再整文件重写它**」—— 因为那样会让
+# git blame 全部失效，而 live_page.dart 是本仓被改得最多的文件之一。
+lib/ui/live_page.dart       -text -eol
+#
+# ⚠️ 必须**同时**写 `-text` 与 `-eol`：`*.dart` 那条已经设了 `eol=lf`，
+#   而 `-text` 只管 `text` 属性、不会清掉 `eol` ⇒ 只写 `-text` 的话
+#   `git check-attr` 会显示 `text: unset` 但 `eol: lf`，仍有被转换的风险。
+#
+# ⚠️ 用 `-text` 而不是 `text eol=crlf`：
+#   `text eol=crlf` 会在**入库时**把 CRLF 归一成 LF（blob 里是 LF），
+#   检出时再还原成 CRLF。那样 blob 与工作区不一致，
+#   而本仓的测试读的是**工作区文件** —— 只要检出后是 CRLF 就够。
+#   `-text` 则完全退出行尾转换：blob 里存什么就是什么，最可控。
+#   ★ 实测：仓库里 live_page.dart 的 blob 就是 CRLF（2876 个 CRLF）。
+
+# ── 配置文件：一律 LF（工具解析它们，跨平台要一致）───────────────────
 *.yaml      text eol=lf
 *.yml       text eol=lf
 *.json      text eol=lf
@@ -56,8 +80,13 @@
 *.cmake     text eol=lf
 *.gradle    text eol=lf
 *.js        text eol=lf
+*.sh        text eol=lf
+# Windows 批处理必须是 CRLF（cmd.exe 对 LF 的 .bat 有已知问题）
+*.bat       text eol=crlf
+*.cmd       text eol=crlf
+*.ps1       text eol=crlf
 
-# ── 二进制：**绝不能**被当文本处理（否则会被改字节） ──────────────────
+# ── 二进制：**绝不能**被当文本处理（否则会被改字节）──────────────────
 *.png       binary
 *.jpg       binary
 *.jpeg      binary
@@ -70,6 +99,7 @@
 *.exe       binary
 *.dll       binary
 *.so        binary
+*.dylib     binary
 *.db        binary
 *.mp4       binary
 *.mkv       binary
