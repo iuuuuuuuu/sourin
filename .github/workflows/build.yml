@@ -216,6 +216,36 @@ jobs:
               echo "::error::$APP 缺少 $k 权限 —— 播放会失败"; exit 1
             fi
           done
+          # ★★ Rust 核心必须真的在包里 —— 少了它 macOS 版能启动但**所有功能都挂**
+          #   （只能看到详情页的 _ErrorView）。
+          #
+          #   背景（2026-10-08 实测确证）：`macos/` 整棵树对 `sourin_core` **零引用**，
+          #   pbxproj 里只有 Flutter 自带的两个 ShellScript 阶段 ⇒ 产物里确实没有这个 dylib。
+          #   而 `lib/core/ffi.dart:173-174` 是 `DynamicLibrary.open('libsourin_core.dylib')`
+          #   ⇒ 一调核心就抛。对照 Windows 侧有机制（`windows/CMakeLists.txt:122-133` 的
+          #   `install(FILES ...)`），macOS 侧原本没有。
+          #   ⚠️ `README.md:525-526` 写的「由 macos/ 的 Xcode 工程自动带上」—— 那个「自动」并不存在。
+          #
+          #   ★ 为什么必须是**硬门禁**而不是 warning：这个缺陷**已经在 CI 里绿着通过了**。
+          #     只警告 = 假门禁，比红更糟（红会被看见，警告会被忽略）——
+          #     与 android job 里那条 `grep LEANBACK_LAUNCHER` 永远为假是同一类病。
+          CORE="$APP/Contents/Frameworks/libsourin_core.dylib"
+          if [ ! -f "$CORE" ]; then
+            echo "::error::$APP 里没有 Rust 核心 $CORE"
+            echo "  期望来源：rust/sourin_core/target/release/libsourin_core.dylib"
+            echo "  嵌入方式：pbxproj 的 Run Script 阶段（Embed Rust Core）"
+            echo "  Frameworks 实际内容：$(ls -1 "$APP/Contents/Frameworks" 2>/dev/null || echo '(无 Frameworks 目录)')"
+            echo "  Resources 实际内容：$(ls -1 "$APP/Contents/Resources" 2>/dev/null || echo '(无 Resources 目录)')"
+            exit 1
+          fi
+          # ★ 再核验导出符号数：编了个旧的/空的 dylib 同样会让功能全挂。
+          #   （`nm -gU` 列出外部符号；Rust 侧导出 7 个 `sourin_*`，见 README「Rust 侧只导出 7 个符号」。）
+          n=$(nm -gU "$CORE" 2>/dev/null | grep -c '_sourin_' || true)
+          echo "Rust 核心导出符号数：$n"
+          if [ "$n" -lt 7 ]; then
+            echo "::error::Rust 核心只有 $n 个 sourin_ 符号（应 >= 7）—— 编了个旧的/空的？"
+            exit 1
+          fi
           echo "产物大小："; du -sh "$APP"
 
       - name: 上传 macOS 产物
