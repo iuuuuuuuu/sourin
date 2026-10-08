@@ -1,0 +1,81 @@
+# ═══════════════════════════════════════════════════════════════════════
+#  行尾规范化 —— 必须存在，不是可选优化
+# ═══════════════════════════════════════════════════════════════════════
+#
+# # 为什么这个文件是**必需**的（不是「顺手加的」）
+# ```text
+# 有两处 Rust 测试**直接读自己的源码文本**做断言，判据里带换行字面量：
+#
+#   rust/sourin_core/src/home.rs:202
+#       let end = rest.find("
+}
+").unwrap_or(rest.len());
+#     ⇒ 找不到时 end = rest.len()，body 变成「整个文件剩余部分」
+#       ⇒ 断言 !body.contains(".map_err(|e| e.message)?") 必然失败
+#
+#   rust/sourin_core/src/tvbox.rs:2941
+#       let end = rest.find("
+    }
+")
+#           .expect("找不到 try_parsers 的函数体结尾");
+#     ⇒ 直接 panic
+# ```
+#
+# ★ 在 Windows 上（`core.autocrlf=true`，这是 Git for Windows 的默认值）
+#   检出时会把 LF 全部转成 CRLF ⇒ 上面两个 `"
+"` 字面量**永远匹配不到**
+#   ⇒ CI 上这两条测试必红。
+#
+# ⚠️ 这个坑之所以在本地看不出来：本地工作区的文件本来就是 LF 的
+#    （仓库里的 blob 也是 LF），只有**重新检出**时才会被转成 CRLF。
+#    所以「本地全绿、CI 全红」—— 而且红的是两条看起来毫不相干的测试。
+#
+# ⇒ 用 `eol=lf` 强制所有文本文件**无论在哪台机器检出都是 LF**，
+#   从根上消掉这个平台差异。
+#
+# # 为什么是 `* text=auto eol=lf` 而不是逐个扩展名列
+# ```text
+# 逐列扩展名要维护一份清单，加新文件类型时会漏 —— 而漏了的后果
+# （在 Windows 上被转成 CRLF）正是这个文件要防的事。
+# `text=auto` 让 git 自己判断哪些是文本（二进制不动），
+# `eol=lf` 让所有文本一律以 LF 落盘。
+# ```
+
+# 默认：文本一律 LF
+* text=auto eol=lf
+
+# 显式再钉一遍关键类型 —— 它们要么被测试读源码，要么被构建工具解析
+*.rs        text eol=lf
+*.dart      text eol=lf
+*.yaml      text eol=lf
+*.yml       text eol=lf
+*.json      text eol=lf
+*.md        text eol=lf
+*.toml      text eol=lf
+*.nsi       text eol=lf
+*.cmake     text eol=lf
+*.gradle    text eol=lf
+*.js        text eol=lf
+
+# ── 二进制：**绝不能**被当文本处理（否则会被改字节） ──────────────────
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.ico       binary
+*.ttf       binary
+*.otf       binary
+*.zip       binary
+*.7z        binary
+*.apk       binary
+*.exe       binary
+*.dll       binary
+*.so        binary
+*.db        binary
+*.mp4       binary
+*.mkv       binary
+
+# ── Git 自己的账本 ────────────────────────────────────────────────────
+# 语言统计时别把生成物算进去（GitHub 的 Linguist）
+pubspec.lock          linguist-generated=true
+*.g.dart              linguist-generated=true
+
