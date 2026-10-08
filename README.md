@@ -301,6 +301,7 @@ Android 那个 job 默认关掉：它最慢（要 NDK + 三个 target 交叉编�
 ② 提交     git commit
 ③ 开 PR    git push -u origin <branch> → GitHub 上开 PR
 ④ 自动评审 CI 跑起来；CodeRabbit 几分钟内贴出评审
+           ★ 触发条件：App 已装 + PR 目标 main + 非草稿 + 标题未命中排除词
 ⑤ 完善     逐条判断：真问题就修，误报就回帖说明并 resolve
 ⑥ 再评审   推新 commit 后自动复审增量
 ⑦ 合并     意见都处理完 + CI 全绿 → 合并
@@ -331,8 +332,8 @@ Android 那个 job 默认关掉：它最慢（要 NDK + 三个 target 交叉编�
 
 **在 PR 里可用的命令**：
 ```text
-@coderabbitai review          重新评审
-@coderabbitai full review     完整评审（不只看增量）
+@coderabbitai review          重新评审（增量：不重看已评过的提交）
+@coderabbitai full review     完整评审（重看所有文件）
 @coderabbitai resolve         把它的评论标记为已解决
 @coderabbitai configuration   打印当前生效的完整配置
 @coderabbitai help            全部命令
@@ -341,6 +342,11 @@ Android 那个 job 默认关掉：它最慢（要 NDK + 三个 target 交叉编�
 > ⚠️ 处理评审意见的纪律（写在 CONTRIBUTING.md 里，这里再强调一次）：
 > **不许**用「加 ignore 注释」「放宽断言」「删掉那行」来消掉意见。
 > 本仓已有一条同类教训 —— 为了让 CI 变绿而放宽断言，等于把缺陷藏进绿里。
+
+**已实测有效**（2026-10-09，PR #1）：CodeRabbit 在 PR 里贴出了 3 条行内意见，
+其中一条指出本文档里一处**错误的技术论断**，我按它的指引做了对照实验，
+**实测确认它是对的、我写错了**（详见 `.coderabbit.yaml` 里那段「实测读数」）。
+这说明它不是只会说「建议优化」的复读机。
 
 ---
 

@@ -147,10 +147,22 @@ reviews:
         1. **不要建议删掉那些看起来啰嗦的步骤或注释** —— 它们对应真实的坑
            （例如 `export PATH="$NDKBIN:$PATH"`：NDK 的 bin 里只有 `llvm-ar`，
            cc-rs 探测失败会退化成不存在的 `<triple>-ar`）。
-        2. **`if:` 条件要检查事件守卫**。本仓踩过：`inputs.release_tag != ''`
-           在 `push` 事件下 `inputs` 是 **null 不是空串** ⇒ 条件恒真。
-           凡是读 `inputs.*` 的 `if:`，都必须同时有
-           `github.event_name == 'workflow_dispatch'`。
+        2. **读 `inputs.*` 的 `if:` 必须带事件守卫。**
+           ★ 注意：**不要**把它说成「`push` 下 `inputs` 是 null ⇒ 条件恒真」——
+           那是我写错过的一条（CodeRabbit 在 PR #1 指出，我在
+           `.github/workflows/_expr_probe.yml` 里实测推翻了它）。
+           实测读数（真的 push 触发的 run）：
+           ```text
+           github.event_name = push
+           inputs.release_tag          -> []        ← 空字符串，不是 null
+           toJSON(inputs)              -> {}        ← 是空对象
+           toJSON(github.event.inputs) -> null      ← null 的是这个（不同字段）
+           inputs.release_tag != ''    => false     ← 不是恒真
+           ```
+           ⇒ 真正的理由是**语义**而非真值：该步骤的意图是「发版时打包」，
+           只有在 `workflow_dispatch` 下才成立；`push` 下就算表达式恰好为假，
+           依赖这种"恰好"也是脆弱的（一旦将来给 push 也配上同名 input 就会变）。
+           所以守卫是**事件范围约束**，不是"防恒真"。
         3. **`upload-artifact` 会剥掉所有上传路径的共同祖先**。两个 path 不在
            同一父目录时，artifact 里会多出子目录 ⇒ 下游 `[ -f ... ]` 为假 ⇒
            **静默少发包**。新增上传路径时请检查这一点。
