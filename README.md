@@ -548,12 +548,29 @@ flutter build macos --release -t lib/shell.dart
 | 平台 | 路径 |
 |---|---|
 | Windows | `%APPDATA%\app.sourin.player` |
-| Android | 应用私有目录（`path_provider` 给的） |
-| macOS | `~/Library/Application Support/app.sourin.player` |
-| Linux | `~/.local/share/app.sourin.player` |
+| Android | 应用私有目录（`path_provider` 的 `getApplicationSupportDirectory()`） |
+| macOS | `~/Library/Containers/app.sourin.player/Data/app.sourin.player` |
+| Linux | `$HOME/app.sourin.player` |
 
 > Windows 上**与原版 Tauri 用同一个目录** —— 这样从原版迁过来的用户，
 > 收藏 / 历史 / 进度 / 插件全都还在。
+
+> ⚠️ **macOS 那行按文档推断，未经真机核实**（本机没有 Mac）——
+> 依据是 Apple 的 App Sandbox 文档与微软的 Mac Catalyst 文档都写着
+> 「沙箱内 `$HOME` 解析为 `~/Library/Containers/<bundle-id>/Data`」。
+> 真机跑一次 `echo $HOME` 就能确认；若实测不是这样，**以实测为准**并回来改这一行。
+>
+> 它之所以长这样，是因为**沙箱会把 `$HOME` 重定向**：
+> 桌面端分支用的是 `Platform.environment['APPDATA'] ?? Platform.environment['HOME']`
+>（`lib/shell.dart` 的 `_resolveDataDir()`），而 macOS 版**开着 App Sandbox**
+>（`macos/Runner/*.entitlements` 的 `com.apple.security.app-sandbox`）⇒
+> `$HOME` 不再是 `/Users/<你>`，而是
+> `~/Library/Containers/<bundle-id>/Data`。
+> 又因为代码会再拼一层 `app.sourin.player`，所以最终落在
+> `Data/app.sourin.player`（目录名重复一层是正常的，不是 bug）。
+>
+> Linux 上同理：那里没有 `APPDATA`，于是取 `HOME` 直接拼 ——
+> **不是** XDG 的 `~/.local/share`。
 
 ### 数据目录里都有什么
 
