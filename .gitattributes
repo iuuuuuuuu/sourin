@@ -6,12 +6,12 @@
 # ```text
 #   rust/sourin_core/src/home.rs:202
 #       let end = rest.find("
-}
-").unwrap_or(rest.len());
+# }
+# ").unwrap_or(rest.len());
 #   rust/sourin_core/src/tvbox.rs:2941
 #       let end = rest.find("
-    }
-").expect("找不到 try_parsers 的函数体结尾");
+#     }
+# ").expect("找不到 try_parsers 的函数体结尾");
 # ```
 # ★ Windows 上 `core.autocrlf` 默认是 true ⇒ 重新检出时 LF 全变 CRLF
 #   ⇒ 上面两个字面量永远匹配不到 ⇒ CI 上这两条必红。
@@ -42,12 +42,12 @@
 # ── ★ 显式钉 LF：这些会被测试当**文本**读，换行必须可预测 ─────────────
 #
 # Rust 侧：home.rs / tvbox.rs 等直接 include_str! 自己再 find("
-…")
+# …")
 *.rs        text eol=lf
 #
 # Dart 侧：有大量「读源码做断言」的测试（grep 字面量、数出现次数、
 # 切片配平）。它们对 `
-` 敏感 ⇒ 必须 LF。
+# ` 敏感 ⇒ 必须 LF。
 # ⚠️ 唯一的例外见下面那两行 —— 覆盖顺序是**后面的赢**。
 *.dart      text eol=lf
 
