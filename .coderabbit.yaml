@@ -1,0 +1,217 @@
+# ═══════════════════════════════════════════════════════════════════════
+#  CodeRabbit 配置 —— 源影（Sourin）
+# ═══════════════════════════════════════════════════════════════════════
+#
+# # 这个文件是干什么的
+#
+# CodeRabbit 是一个 GitHub App：装了它之后，每个 PR 都会自动收到一份
+# AI 代码评审（总结 + 逐行问题 + 修复建议）。默认配置是「英文、通用」的，
+# 这个文件把它调成**贴合本仓**的样子。
+#
+# # 为什么值得加（不是「为了用工具而用工具」）
+#
+# 本仓的 CI 能拦住的是**机械问题**（编译不过、测试红、静态分析 error）。
+# 它拦不住的是**设计问题**：
+#   · 一个 if 分支在某种平台组合下永远走不到
+#   · 一条断言其实恒真（本仓真踩过：`grep LEANBACK_LAUNCHER` 在
+#     `aapt dump badging` 的输出里永远不匹配 ⇒ 门禁是假门禁）
+#   · 改了 A 忘了同步 B（例如 .nsi 的安装侧与卸载侧）
+#   · 并发/时序问题（本仓真踩过：测试改**进程级**环境变量，
+#     与并发跑的其他测试抢同一个全局量 ⇒ CI 随机红）
+# 这几类恰好是 CodeRabbit 擅长的。
+#
+# # 权限与费用
+#
+# 它需要 contents / pull_requests / checks 等权限（见
+# https://github.com/apps/coderabbitai 的权限列表）。
+# **公开仓库免费**（本仓是 public）。私有仓库没有免费档。
+#
+# # 怎么用
+#
+# 装好之后，开 PR 就自动评审。在 PR 里发这些命令可以交互：
+#   @coderabbitai review          重新评审
+#   @coderabbitai full review     完整评审（不只看增量）
+#   @coderabbitai resolve         把它的评论标记为已解决
+#   @coderabbitai configuration   打印当前生效的完整配置
+#   @coderabbitai help            全部命令
+#
+# # 参考
+#
+# 完整配置项：https://docs.coderabbit.ai/reference/configuration
+
+language: "zh-CN"          # 本仓的注释、提交信息、文档全是中文，评审也用中文
+tone_instructions: "用中文写评审。语气直接、具体，不要客套话。指出问题时给出可验证的判据（能跑的命令、能看的读数），不要只说「建议优化」。如果某个问题只是风格偏好而非缺陷，明确标出来，不要混在真问题里。"
+
+reviews:
+  # ── 评审风格 ────────────────────────────────────────────────────────
+  # "chill" = 只报真问题，不逐行挑刺；"assertive" = 更啰嗦。
+  # 本仓注释密度很高（有意为之），assertive 会淹没真问题。
+  profile: "chill"
+  request_changes_workflow: false   # 不用它 block 合并 —— 最终是否合并由人决定
+  high_level_summary: true
+  high_level_summary_placeholder: "@coderabbitai summary"
+  poem: false                       # 不要打油诗，本仓是正经工程仓
+  review_status: true
+  collapse_walkthrough: false
+  sequence_diagrams: false          # 本仓改动多在 UI/构建脚本，时序图用处不大
+
+  auto_review:
+    enabled: true
+    drafts: false                   # 草稿 PR 不评审（还没写完，评了是浪费额度）
+    base_branches:
+      - "main"
+    # ★ 这些关键词的 PR 标题直接跳过整个评审（不是「少评一点」）
+    ignore_title_keywords:
+      - "WIP"
+      - "DO NOT MERGE"
+      - "chore(release)"
+
+  # ── 逐行评论里不要出现的东西 ────────────────────────────────────────
+  # 本仓是**单人开发**，不存在「给同事补 docstring / 补单测」的场景，
+  # 这类评论只会变成噪声。
+  finishing_touches:
+    docstrings:
+      enabled: false
+    unit_tests:
+      enabled: false
+
+  tools:
+    # 本仓 Rust 侧没在 CI 里跑 clippy（跑的是 cargo test）
+    # ⇒ 让 CodeRabbit 带上 clippy，等于免费多一层。
+    clippy:
+      enabled: true
+    # 本仓刻意保留了大量 info 级 lint（flutter analyze 用
+    # --no-fatal-infos --no-fatal-warnings 放行，只让 error 卡 CI）。
+    # 若让 CodeRabbit 也逐条报这些，等于把已决定接受的东西再报一遍。
+    markdownlint:
+      enabled: false
+    # 下面这些本仓没有对应配置，开着只会误报
+    eslint:
+      enabled: false
+    biome:
+      enabled: false
+    ruff:
+      enabled: false
+    shellcheck:
+      enabled: false
+    yamllint:
+      enabled: true              # 本仓有 .github/workflows/*.yml，值得查
+
+  path_filters:
+    # ── 不评审的路径 ──────────────────────────────────────────────────
+    # ★ .probe/ 是本仓的**开发脚手架目录**（探针脚本、实验产物、恢复出来的
+    #   历史文件），它在 .gitignore 里、不进版本库。写在这里是防御性的：
+    #   万一将来有人误提交，也不该触发评审。
+    - "!.probe/**"
+    # ★ dist-deliver/ 是打包产物目录（.gitignore 里）
+    - "!dist-deliver/**"
+    # 二进制与资源：改了它们也没有「代码」可评
+    - "!**/*.png"
+    - "!**/*.ico"
+    - "!**/*.ttf"
+    - "!**/*.otf"
+    - "!**/*.zip"
+    - "!**/*.dmg"
+    - "!**/*.apk"
+
+  path_instructions:
+    # ── 按目录给额外指令：这是本配置里最有价值的部分 ────────────────
+    #
+    # 本仓有几条**反直觉的硬约束**，不了解就会给出错误的「优化建议」。
+    # 这些指令就是为了避免那种误报。
+
+    - path: "rust/sourin_core/**"
+      instructions: |
+        这是产品后端核心（Rust cdylib），Flutter 侧通过 dart:ffi 直接调用，**没有 IPC**。
+
+        评审时请特别检查这几条本仓硬约束：
+
+        1. **绝不能在 runtime().spawn() 的 worker 里 block_on**。
+           正确路径是 `sourin_call_async` → `spawn_blocking` → `dispatch_blocking`
+           （见 src/ffi.rs 顶部注释）。在 worker 里 block_on 会饿死线程池 ——
+           本仓实测过：8 个并发调用全部 120s 超时。
+        2. **不要引入「进程级可变全局状态」**。本仓踩过一次：某个开关用
+           `std::env::var` 每次请求现读，而 A/B 测试用 `set_var` 改它做对照，
+           于是与**并发跑的其它测试**抢同一个全局量 ⇒ CI 随机红 3 条。
+           这类开关应该做成**实例字段**。
+        3. **同步 vs 异步状态访问**要分清：`with_state`（同步）与
+           `with_state_async`（异步）。在异步上下文里调同步版本会阻塞 runtime。
+        4. 新增导出符号会让 README 里「Rust 侧只导出 N 个符号」那句失准 ——
+           如果改了导出集，提醒同步 README 与 CI 里那条 `nm | grep -c '_sourin_'` 门禁。
+
+    - path: ".github/workflows/**"
+      instructions: |
+        这是三端构建的 CI 定义（Windows / macOS / Android），**每一条都是被真实
+        故障打磨出来的**，注释里通常写着「为什么必须这样」。评审时：
+
+        1. **不要建议删掉那些看起来啰嗦的步骤或注释** —— 它们对应真实的坑
+           （例如 `export PATH="$NDKBIN:$PATH"`：NDK 的 bin 里只有 `llvm-ar`，
+           cc-rs 探测失败会退化成不存在的 `<triple>-ar`）。
+        2. **读 `inputs.*` 的 `if:` 必须带事件守卫。**
+           ★ 注意：**不要**把它说成「`push` 下 `inputs` 是 null ⇒ 条件恒真」——
+           那是我写错过的一条（CodeRabbit 在 PR #1 指出，我在
+           `.github/workflows/_expr_probe.yml` 里实测推翻了它）。
+           实测读数（真的 push 触发的 run）：
+           ```text
+           github.event_name = push
+           inputs.release_tag          -> []        ← 空字符串，不是 null
+           toJSON(inputs)              -> {}        ← 是空对象
+           toJSON(github.event.inputs) -> null      ← null 的是这个（不同字段）
+           inputs.release_tag != ''    => false     ← 不是恒真
+           ```
+           ⇒ 真正的理由是**语义**而非真值：该步骤的意图是「发版时打包」，
+           只有在 `workflow_dispatch` 下才成立；`push` 下就算表达式恰好为假，
+           依赖这种"恰好"也是脆弱的（一旦将来给 push 也配上同名 input 就会变）。
+           所以守卫是**事件范围约束**，不是"防恒真"。
+        3. **`upload-artifact` 会剥掉所有上传路径的共同祖先**。两个 path 不在
+           同一父目录时，artifact 里会多出子目录 ⇒ 下游 `[ -f ... ]` 为假 ⇒
+           **静默少发包**。新增上传路径时请检查这一点。
+        4. 任何「只打 warning 不 exit 1」的门禁都是**假门禁**，本仓明令禁止
+           （红会被看见，警告会被忽略）。发现问题请直接指出应该改成硬失败。
+        5. shell 步骤里的 PowerShell 代码：**数组字面量不能有尾逗号**
+           （`@('a','b',)` 是解析期错误，整个脚本一行都不执行）。
+
+    - path: "installer/**"
+      instructions: |
+        Windows 安装包（NSIS）的定义。`sourin.nsi` 必须带 **UTF-8 BOM**，
+        否则 makensis 按系统 ANSI 读、遇到中文注释直接报 Bad text encoding。
+        安装侧与卸载侧要**对称**：卸载段删的每一样东西，安装段都该建过；
+        反之安装段建的每一样，卸载段都该删（本仓踩过桌面快捷方式只删不建，
+        空转了几个月）。
+
+    - path: "test/**"
+      instructions: |
+        Dart 测试。本仓测试的特点是**大量「读源码文本做断言」**（grep 字面量、
+        数出现次数、切片配平），这是有意为之 —— 用于锁住「某段代码必须长这样」。
+
+        ⚠️ 因此：**不要建议用 `dart format` 或任何会重排超宽行的工具**。
+        本仓踩过：`dart format` 按 80 列重排，静默打断了 7 条以字面量锚定的断言，
+        而失败信息完全看不出是格式化造成的。
+
+        另外：`test/` 里有标了 `native-media` 标签的文件，它们在
+        `dart_test.yaml` 里被 `skip:`，要用
+        `--run-skipped --tags native-media --concurrency=1` 才跑。
+
+    - path: "lib/**"
+      instructions: |
+        Flutter UI 层。本仓的注释密度**远高于一般项目**，而且注释里经常写着
+        「为什么不能那样做」（记录踩过的坑）。评审时：
+
+        · 不要因为「注释太长」建议精简 —— 那是本仓有意的约定。
+        · 移动/动画统一走 `lib/ui/tokens.dart` 的 token（Motion.fast/base/slow、
+          OverlayMotion.*），**不要硬编码 Duration**。
+        · 弹窗统一走 `lib/ui/widgets/overlay_motion.dart` 的 `showAppDialog`，
+          **不要直接用裸 `showDialog`**。
+        · 加了新的 UI 文案/图标时，检查 README 的对应章节是否要同步。
+
+chat:
+  auto_reply: true
+
+knowledge_base:
+  # 让 CodeRabbit 读本仓的文档作为评审依据 —— 本仓 README 里写了大量
+  # 「为什么这么做」，是很好的上下文来源。
+  opt_out: false
+  web_search:
+    enabled: true
+  learnings:
+    scope: "auto"
