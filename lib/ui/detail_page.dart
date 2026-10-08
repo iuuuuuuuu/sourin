@@ -527,6 +527,31 @@ class _DetailPageState extends State<DetailPage> {
     setState(() => _resume = p);
   }
 
+  /// 注入一条**错误信息**（widget 测试用）
+  ///
+  /// ★ 与 [debugSetDetail] / [debugSetResume] 同一手法：绕过的只是
+  ///   「FFI 调用失败」那一步，渲染的是**真的 `_ErrorView`**。
+  ///
+  /// # 为什么需要它（2026-10-08，macOS CI 逼出来的）
+  /// ```text
+  /// macOS 上缺 libsourin_core.dylib ⇒ DetailPage 落进 _ErrorView，
+  /// 而 dlopen 的失败文本是**平台相关**的：
+  ///   Windows ≈100 字符（`… (error code: 126)`）⇒ 塞得下
+  ///   macOS   ≈1500 字符（一长串 `tried: '…' (no such file), …`）⇒ 溢出 580px
+  /// ⇒ 同一段布局代码只在 macOS 溢出，本地怎么跑都是绿的。
+  /// ```
+  /// 有了这个注入口，就能**直接构造等长的文本**在两端复现，
+  /// 不再依赖「本机恰好缺哪个库、报错文本恰好多长」这种偶然。
+  ///
+  /// ⚠️ 与上面两个 debug 方法一样：**生产代码无调用点**（`@visibleForTesting`）。
+  @visibleForTesting
+  void debugSetError(String message) {
+    setState(() {
+      _error = message;
+      _loading = false;
+    });
+  }
+
   /// 线路树（带真实 title / count / nested）
   ///
   /// ★ 直接就是 `MediaDetail.sources` —— 不再有"原始 JSON 的第二份读取"。
@@ -3290,12 +3315,59 @@ class _ErrorView extends StatelessWidget {
               ),
             ),
             const SizedBox(height: Sp.x2),
-            Text(
-              message,
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                fontSize: FontSizes.sm,
-                color: colors.onSurfaceVariant,
+            /*
+             * ══════════════════════════════════════════════════════════
+             * ★★★ 2026-10-08（macOS CI 逼出来的）：错误文本必须**可滚动**
+             * ══════════════════════════════════════════════════════════
+             *
+             * # 症状（macOS CI 实测，不是推理）
+             * ```text
+             * A RenderFlex overflowed by 580 pixels on the bottom.
+             * Column Column:file:///…/lib/ui/detail_page.dart:3279:16
+             * creator: Column ← Padding ← Center ← _ErrorView ← Stack ← …
+             * constraints: BoxConstraints(0.0<=w<=320.0, 0.0<=h<=736.0)
+             * ```
+             * t59 有 6 条 ★★★、t97 有 1 条，在 macOS 上全红 ——
+             * 而**断言本身是通过的**（`[T60] embedded ColoredBox colors = [… surface]`），
+             * 红在同一次 pump 抛的溢出异常上。
+             *
+             * # 为什么只有 macOS 红（真因不在主题/布局）
+             * ```text
+             * macOS 上缺 libsourin_core.dylib ⇒ DetailPage 落进本组件，
+             * 而 dlopen 失败文本是**平台相关**的：
+             *   Windows : `Failed to load dynamic library … (error code: 126)`
+             *             ≈ 100 字符 ⇒ 塞得下 ⇒ 不溢出 ⇒ 同组在 Windows 绿
+             *   macOS   : `dlopen(…, 0x0001): tried: '…' (no such file),
+             *              '/System/Volumes/Preboot/…' (no such file), …`
+             *             ≈ 1500 字符，列出一长串搜索路径 ⇒ 必然溢出
+             * ```
+             * ⇒ 这是**真的产品缺陷**，不是测试环境问题：任何一条足够长的
+             *   错误信息（插件报错、HTTP 报错体、路径很长的加载失败）
+             *   在窄面板下都会溢出。macOS 只是把它逼出来了。
+             *
+             * # 修法
+             * ```text
+             * 包一层 `Flexible` + `SingleChildScrollView`：
+             *   · `Flexible` 让它**参与** Column 的高度分配（不撑破父级）；
+             *   · `SingleChildScrollView` 让超长文本**可滚动**，
+             *     信息一个字都不丢（比截断/省略号诚实）。
+             * ★ 没有改成 `TextOverflow.ellipsis` —— 那会**隐藏**用户
+             *   排查所需的真实原因（本仓一贯纪律：不吞错误）。
+             * ```
+             *
+             * ⚠️ 不要把它换成 `Expanded`：`Column` 是 `mainAxisSize: min`，
+             *    用 `Expanded` 会在无界高度下断言失败。
+             */
+            Flexible(
+              child: SingleChildScrollView(
+                child: Text(
+                  message,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: FontSizes.sm,
+                    color: colors.onSurfaceVariant,
+                  ),
+                ),
               ),
             ),
             const SizedBox(height: Sp.x6),
