@@ -295,6 +295,10 @@ jobs:
           ndk-version: r27
           link-to-sdk: true
 
+      # ⚠️ 手动触发 android 时**必然同时重跑 windows 与 macOS** ——
+      #   它们是这个 workflow 的必跑 job（`if:` 只加在 android 上）。
+      #   所以「只想验 android」也要按一次三端的时间预算（约 30-50 分钟）。
+
       - name: 编 Android 的 Rust 核心
         shell: bash
         working-directory: rust/sourin_core
@@ -307,6 +311,43 @@ jobs:
           export CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER="$NDKBIN/armv7a-linux-androideabi24-clang"
           export CC_aarch64_linux_android="$CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER"
           export CC_armv7_linux_androideabi="$CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER"
+          # ★★★ NDKBIN 必须进 PATH —— 少了这行 `ring` 起不来（2026-10-08 实测，见下）
+          #
+          #   cc-rs 找**归档器**（ar/ranlib）的逻辑（`cc-1.4.7/src/lib.rs:3801-3820`）：
+          #     target.os == "android" ⇒ 先试 `llvm-ar --version`；探测失败才退到
+          #     `{raw_target.replace("armv7","arm")}-ar` 这种**根本不存在**的名字。
+          #   NDK 的 bin 目录里**只有** `llvm-ar`，**没有** `aarch64-linux-android-ar`
+          #   （本机实测：`llvm-ar.exe` exists=True / `aarch64-linux-android-ar` exists=False，
+          #     r27 与 r28 都一样）⇒ 不把 NDKBIN 放进 PATH，那个探测必然失败。
+          #
+          #   ★ 实测报错逐字（run 37759463600 的「编 Android 的 Rust 核心」步）：
+          #       error: failed to run custom build command for `ring v0.17.14`
+          #         error occurred in cc-rs: failed to find tool "aarch64-linux-android-ar":
+          #         No such file or directory (os error 2)
+          #     `ring` 是 reqwest 的 rustls-tls 依赖，**绕不过去**。
+          #
+          #   ★ 这也正是 `.cargo/config.toml.example` 里记的本机做法
+          #     （`$env:PATH = "$ndk;$env:PATH"`）—— CI 先前漏了这一步。
+          export PATH="$NDKBIN:$PATH"
+          # ★ 再加一条**显式兜底**（不依赖 PATH）：cc-rs 的 `target_envs`
+          #   （`cc-1.4.7/src/lib.rs:4296-4311`）第一批优先级就是 `AR_<target_下划线>`。
+          #   两套并存：PATH 让 cc-rs 走它设计好的 `llvm-ar` 探测路径，
+          #   `AR_*` 保证即使哪天 PATH 被人改坏也仍然能找到归档器。
+          #   （对照实验：两组**各自单独**都够用 —— 只加 PATH 得 0，只加 AR_* 也得 0，
+          #     都不加必红 exit=101。两条并存是防御性的。）
+          #
+          #   ⚠️ 调试这个问题的坑：cc-rs 只在 `AR_*` 这类**具名**环境变量上 emit
+          #     `cargo:rerun-if-env-changed`（`cc-1.4.7/src/lib.rs:4249-4251`，`v != "PATH"`）
+          #     ⇒ **改 PATH 不会触发 ring 重建**。靠改 PATH 做对照实验时，
+          #     必须先手动删 `target/*/release/build/ring-*` 与 `.fingerprint/ring-*`，
+          #     否则看到的永远是缓存里的旧结果。
+          export AR_aarch64_linux_android="$NDKBIN/llvm-ar"
+          export AR_armv7_linux_androideabi="$NDKBIN/llvm-ar"
+          export RANLIB_aarch64_linux_android="$NDKBIN/llvm-ranlib"
+          export RANLIB_armv7_linux_androideabi="$NDKBIN/llvm-ranlib"
+          echo "PATH 里的归档器：llvm-ar = $(command -v llvm-ar || echo '(找不到！') )"
+          echo "                llvm-ranlib = $(command -v llvm-ranlib || echo '(找不到！') )"
+          echo "显式 ARCHIVER  = $AR_aarch64_linux_android / $AR_armv7_linux_androideabi"
           cargo build --release --target aarch64-linux-android
           cargo build --release --target armv7-linux-androideabi
 
@@ -362,6 +403,11 @@ jobs:
       #      `*.apk` 全量上传 ⇒ 用户会拿到一个**静默残废**的包。
       #      ⇒ 宁可不构建，也不产出一个缺核心库的 APK。
       - name: 构建 APK（按 ABI 拆分 —— arm64 + armv7）
+        # ⚠️ 这里的 ABI 列表必须与上面「拷进 jniLibs」的目录列表**保持一致**：
+        #   那边只有 arm64-v8a 与 armeabi-v7a（没有 x86_64）⇒ 若这里加回三个 ABI，
+        #   x86_64 那个 APK 里就会**不含 libsourin_core.so**，而下面「上传 APK」是
+        #   `*.apk` 全量上传 ⇒ 用户会拿到一个**静默残废**的包（装上一调核心就 open 失败）。
+        #   要加 x86_64，必须先在「拷进 jniLibs」里加上 x86_64 的交叉编译与拷贝。
         run: flutter build apk --release --no-pub --split-per-abi --target-platform android-arm64,android-arm -t lib/shell.dart
 
       - name: 核验 APK 的 Android TV 入口（手机入口 + TV 入口都要在）
