@@ -13,11 +13,12 @@
 |---|---|---|
 | **Windows 10/11 (x64)** | `Sourin-Setup-__VERSION__.exe` | **安装版**（推荐）：双击 → 下一步 → 开始菜单与桌面快捷方式、可在「应用和功能」里卸载。免管理员权限 |
 | **Windows 10/11 (x64)** | `sourin-windows-v__VERSION__.zip` | **免安装版**：解压到任意目录 → 双击 `sourin_spike.exe` |
-| **macOS 12+** | `sourin-macos-v__VERSION__.zip` | 解压后把 `sourin_spike.app` 拖进「应用程序」。⚠️ 见下方【macOS 首次打开】 |
+| **macOS 12+** | `sourin-macos-v__VERSION__.dmg` | **安装镜像**（推荐）：双击打开 → 把 `sourin_spike.app` 拖进 `Applications` → 完成。⚠️ 见下方【macOS 首次打开】 |
+| **macOS 12+** | `sourin-macos-v__VERSION__.zip` | 压缩包版（给脚本 / CI / 受限环境）。解压后手动把 `.app` 放进「应用程序」 |
 | **Android 手机 / 平板** | `sourin-android-arm64-v__VERSION__.apk` | 现代设备（近 5 年基本都是这个） |
 | **Android TV / 电视盒子** | `sourin-android-armv7-v__VERSION__.apk` | 较老的 32 位设备；TV 版**同一个 APK**，装上即出现在 TV 主界面 |
 
-### 安装版与免安装版有什么区别
+### Windows 安装版与免安装版有什么区别
 
 | | 安装版（`Sourin-Setup-*.exe`） | 免安装版（`.zip`） |
 |---|---|---|
@@ -28,6 +29,7 @@
 | 数据目录 | 同一个 `%APPDATA%\app.sourin.player` | 同一个 |
 
 **两个版本的内容完全一样**（同一个 commit 构建，同一份 Release 目录打出来的）。
+macOS 侧的 `.dmg` 与 `.zip` 同理 —— 内容同源，只是分发形态不同。
 装过一次之后想换成免安装版，直接卸载再解压即可，**收藏/历史/进度都不会丢**
 （它们在 `%APPDATA%` 下，安装与卸载都不碰）。
 
