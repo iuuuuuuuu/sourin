@@ -1,0 +1,50 @@
+# ═══════════════════════════════════════════════════════════════════════
+#  Android 交叉编译配置 —— **模板文件**
+# ═══════════════════════════════════════════════════════════════════════
+#
+# # 怎么用
+# ```powershell
+# Copy-Item .cargo\config.toml.example .cargo\config.toml
+# # 然后把下面的 <NDK> 换成你本机的 NDK 路径，例如：
+# #   C:/Users/你的用户名/AppData/Local/Android/Sdk/ndk/27.0.12077973
+# ```
+#
+# # 为什么要显式指定链接器
+# ```text
+# Rust 默认不知道 Android NDK 在哪。不配这个会报：
+#   error: linker `cc` not found
+# ```
+#
+# # 三个 target 的用途
+# ```text
+# x86_64-linux-android      模拟器 / BlueStacks
+# aarch64-linux-android     真机、电视盒子（★ 交付主要用这个）
+# armv7-linux-androideabi   老设备（32 位 ARM）
+# ```
+#
+# ⚠️ Android NDK 的 clang 需要 `--target` 参数才能正确选择 ABI，
+#    这里直接在 wrapper 里带上（`…-android24-clang.cmd`）。
+#
+# ⚠️⚠️ **改完 `ffi.rs` 必须重新构建这三个 target 并拷贝 jniLibs**
+#    `jniLibs/*/libsourin_core.so` 是**手动拷贝**的产物，不在 Flutter 构建链里。
+#    漏了会在 Android 上看到：
+#    ```text
+#    [SHELL] ★ 核心启动失败: Failed to lookup symbol 'sourin_call_stream'
+#    ```
+#    然后所有命令都超时（看起来像网络问题，实际是旧的 .so 里没有新符号）。
+#
+# 验证方法：
+# ```powershell
+# strings android/app/src/main/jniLibs/x86_64/libsourin_core.so | Select-String "^sourin_"
+# # 应当看到 7 个：sourin_core_version / sourin_start / sourin_call /
+# #              sourin_call_async / sourin_call_stream / sourin_cancel_stream / sourin_free
+# ```
+
+[target.x86_64-linux-android]
+linker = "<NDK>/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin/x86_64-linux-android24-clang.cmd"
+
+[target.aarch64-linux-android]
+linker = "<NDK>/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android24-clang.cmd"
+
+[target.armv7-linux-androideabi]
+linker = "<NDK>/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin/armv7a-linux-androideabi24-clang.cmd"

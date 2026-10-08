@@ -1,0 +1,413 @@
+﻿cargo :    Compiling sourin_core v0.1.0 (D:\WishProject\sourin-flutter-spike\rust\sourin_core)
+At line:2 char:1
++ cargo test --release --lib 2>&1 | Out-File -Encoding utf8 .test_out.t ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling so...st\sourin_core):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+warning: use of deprecated macro `async_with`
+    --> src\plugins\mod.rs:1124:19
+     |
+1124 |         let out = async_with!(ctx => |ctx| {
+     |                   ^^^^^^^^^^
+     |
+     = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated macro `rquickjs::async_with`
+  --> src\plugins\mod.rs:35:16
+   |
+35 | use rquickjs::{async_with, AsyncContext, AsyncRuntime, Function, Object, Promise};
+   |                ^^^^^^^^^^
+
+warning: variable does not need to be mutable
+   --> src\providers\cctv.rs:791:13
+    |
+791 |         let mut consume = |list: &[Value],
+    |             ----^^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `first_len`
+    --> src\streamproxy.rs:1268:9
+     |
+1268 |     let first_len = first_window.len() as u64;
+     |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_first_len`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+    --> src\streamproxy.rs:3327:13
+     |
+3327 |         let mut resp = reqwest::Client::new()
+     |             ----^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src\remote\mod.rs:1111:13
+     |
+1111 |         let mut rx1 = h.resubscribe_shutdown();
+     |             ----^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: `sourin_core` (lib test) generated 6 warnings (run `cargo fix --lib -p sourin_core --tests` to apply 4 suggest
+ions)
+    Finished `release` profile [optimized] target(s) in 7m 29s
+     Running unittests src\lib.rs (target\release\deps\sourin_core-3fd8c5319416a66d.exe)
+
+running 349 tests
+test args::tests::accepts_camel_case_from_frontend ... ok
+test args::tests::camel_case_conversion_rules ... ok
+test args::tests::camel_case_works_for_all_types ... ok
+test args::tests::defaults_work ... ok
+test args::tests::integer_tolerates_float_form ... ok
+test args::tests::string_list_points_at_bad_index ... ok
+test args::tests::negative_rejected ... ok
+test args::tests::null_snake_falls_back_to_camel ... ok
+test args::tests::null_value_treated_as_missing ... ok
+test args::tests::reads_required_string ... ok
+test args::tests::missing_arg_error_is_diagnostic ... ok
+test args::tests::missing_args_entirely ... ok
+test args::tests::snake_case_takes_priority ... ok
+test args::tests::wrong_type_is_rejected ... ok
+test args::tests::wrong_type_for_bool_and_list_also_clear ... ok
+test args::tests::non_integral_number_rejected ... ok
+test args::tests::string_list_works ... ok
+test args::tests::wrong_type_must_not_be_reported_as_missing ... ok
+test ffi::tests::error_classification_matches_frontend_rules ... ok
+test ffi::tests::free_accepts_null ... ok
+test ffi::tests::is_started_probe_needs_no_state ... ok
+test ffi::tests::errors_are_valid_json ... ok
+test ffi::tests::missing_arg_reports_clear_error ... ok
+test ffi::tests::panic_is_caught_and_converted ... ok
+test backup::tests::default_name_is_filesystem_safe ... ok
+test ffi::tests::ping_works ... ok
+test ffi::tests::state_commands_without_start_give_actionable_error ... ok
+test ffi::tests::successful_result_is_not_wrapped ... ok
+test ffi::tests::version_is_callable_and_nul_terminated ... ok
+test ffi::tests::unimplemented_command_reports_unsupported ... ok
+test follow::tests::first_check_sets_baseline_without_alerting ... ok
+test follow::tests::detects_new_episodes ... ok
+test commands::tests::corrupt_disabled_list_means_all_enabled ... ok
+test home::tests::get_home_must_not_propagate_single_provider_error ... ok
+test model::stream_kind_tests::content_type_hls_variants ... ok
+test model::stream_kind_tests::content_type_unknown_returns_none ... ok
+test backup::tests::missing_watch_data_is_tolerated ... ok
+test backup::tests::rejects_future_version ... ok
+test backup::tests::rejects_path_traversal_in_backup ... ok
+test model::stream_kind_tests::content_type_wins_over_extension ... ok
+test model::stream_kind_tests::dash_is_dash ... ok
+test model::stream_kind_tests::disguised_mp3_extension_is_not_audio_only ... ok
+test model::stream_kind_tests::extensionless_http_is_not_assumed_hls ... ok
+test model::stream_kind_tests::hls_with_query_is_hls ... ok
+test model::stream_kind_tests::signed_mp4_direct_link_is_mp4 ... ok
+test model::tests::media_id_accepts_legacy_object_form ... ok
+test model::tests::media_id_handles_colon_in_native ... ok
+test model::tests::media_id_rejects_garbage ... ok
+test model::tests::media_id_roundtrips ... ok
+test model::tests::media_id_serializes_as_prefixed_string ... ok
+test follow::tests::no_update_returns_none ... ok
+test follow::tests::unread_accumulates_across_checks ... ok
+test backup::tests::roundtrip_preserves_plugin_bytes ... ok
+test commands::tests::order_roundtrip ... ok
+test backup::tests::write_backup_to_vec_matches_write_backup_bytes ... ok
+test plugins::tests::builds_provider_from_valid_source ... ok
+test commands::tests::disabled_roundtrip ... ok
+test persist::tests::missing_file_is_empty_not_error ... ok
+test plugins::tests::all_optional_methods_are_bridged ... ok
+test commands::tests::saves_are_atomic ... ok
+test plugins::tests::auto_login_chain_is_bridged ... ok
+test commands::tests::disabled_and_order_use_different_files ... ok
+test plugins::tests::converts_camel_case_to_snake_recursively ... ok
+test plugins::tests::converts_github_url_to_cdn ... ok
+test persist::tests::corrupt_file_degrades_to_empty ... ok
+test backup::tests::plugin_import_is_idempotent ... ok
+test plugins::tests::converts_headers_object_to_pairs ... ok
+test plugins::tests::archive_sanitizes_version_in_filename ... ok
+test plugins::tests::converts_snake_case_to_camel_for_plugin_args ... ok
+test plugins::tests::defaults_version_when_missing ... ok
+test plugins::tests::field_sanitize_degrades_bad_declarations ... ok
+test plugins::tests::keeps_path_and_branch_for_blob_url ... ok
+test plugins::tests::maps_prefixed_js_errors ... ok
+test backup::tests::plugin_same_name_gets_renamed_not_overwritten ... ok
+test plugins::tests::hydrates_capabilities_including_multiword ... ok
+test plugins::tests::naming_helpers_are_correct ... ok
+test plugins::tests::non_media_objects_are_not_prefixed ... ok
+test plugins::tests::parses_meta_multi_line ... ok
+test plugins::tests::parses_meta_on_single_line ... ok
+test plugins::tests::plugin_can_fetch_and_parse_real_http ... ignored, 需要网络
+test plugins::tests::passes_through_direct_urls ... ok
+test plugins::tests::plugin_exception_maps_to_error_kind ... ok
+test plugins::tests::plugin_returns_paged_items ... ok
+test plugins::tests::missing_optional_methods_degrade_gracefully ... ok
+test plugins::tests::plugin_returns_sections_without_network ... ok
+test plugins::tests::post_sends_json_content_type ... ignored, 需要网络
+test plugins::tests::prefix_added_even_when_id_contains_colon ... ok
+test plugins::tests::prefix_and_strip_are_inverse ... ok
+test plugins::tests::prefix_is_idempotent ... ok
+test plugins::tests::prefix_of_other_provider_is_not_treated_as_own ... ok
+test plugins::tests::prefix_only_applies_to_media_items ... ok
+test backup::tests::plugin_updates_existing_import_slot ... ok
+test persist::tests::atomic_write_leaves_no_tmp_file ... ok
+test plugins::tests::rejects_plugin_without_id ... ok
+test plugins::tests::rejects_plugin_without_name ... ok
+test persist::tests::save_load_roundtrip ... ok
+test plugins::tests::bad_plugin_does_not_block_others ... ok
+test plugins::tests::rejects_unrecognizable_input ... ok
+test plugins::tests::same_content_normalizes_line_endings ... ok
+test plugins::tests::save_plugin_rejects_path_traversal ... ok
+test plugins::tests::shipped_demo_is_loadable ... ok
+test plugins::tests::syntax_error_is_not_reported_as_timeout ... ok
+test plugins::tests::version_compare_is_numeric ... ok
+test provider::session_expiry_tests::base64url_decodes_unpadded_and_padded ... ok
+test provider::session_expiry_tests::bearer_prefix_is_stripped ... ok
+test provider::session_expiry_tests::expiry_boundary_is_inclusive ... ok
+test provider::session_expiry_tests::explicit_expires_at_wins_over_jwt ... ok
+test provider::session_expiry_tests::falls_back_to_jwt_exp_when_expires_at_missing ... ok
+test provider::session_expiry_tests::jwt_without_exp_is_not_treated_as_expired ... ok
+test provider::session_expiry_tests::malformed_jwt_is_not_treated_as_expired ... ok
+test provider::session_expiry_tests::opaque_token_is_not_treated_as_expired ... ok
+test plugins::tests::unimplemented_epg_and_timeshift_degrade_gracefully ... ok
+test providers::cctv::tests::builds_client_without_proxy ... ok
+test providers::cctv::tests::channel_table_uses_alias_for_cctv9_and_14 ... ok
+test providers::cctv::tests::dynamic_columns_have_content ... ignored, 需要网络
+test providers::cctv::tests::episode_parser_handles_chinese_punctuation ... ok
+test providers::cctv::tests::extracts_guid_from_imglink ... ok
+test providers::cctv::tests::home_columns_are_dynamic_not_hardcoded ... ignored, 需要网络
+test providers::cctv::tests::guid_extraction_rejects_malformed_imglink ... ok
+test providers::cctv::tests::live_returns_real_url_not_placeholder ... ignored, 需要网络
+test providers::cctv::tests::manifest_advertises_search ... ok
+test providers::cctv::tests::manifest_advertises_timeshift ... ok
+test providers::cctv::tests::parses_episode_titles ... ok
+test providers::cctv::tests::parses_topic_id_from_column_page ... ok
+test providers::cctv::tests::search_aggregates_tv_series_into_one_item ... ignored, 需要网络
+test providers::cctv::tests::search_and_detail_agree_on_episode_count ... ignored, 需要网络
+test providers::cctv::tests::rejects_non_episode_titles ... ok
+test providers::cctv::tests::search_returns_usable_results ... ignored, 需要网络
+test providers::cctv::tests::search_empty_keyword_returns_empty_without_network ... ok
+test providers::cctv::tests::strip_html_handles_entities_and_plain_text ... ok
+test providers::cctv::tests::strips_search_highlight_tags ... ok
+test providers::cctv::tests::topic_id_parser_rejects_non_topic_pages ... ok
+test providers::cctv::tests::vod_resolve_produces_candidates ... ignored, 需要网络
+test providers::cycani::tests::completed_badge_shows_full_count ... ignored, 需要网络
+test providers::cycani::tests::detail_exposes_play_from_as_sources ... ignored, 需要网络
+test providers::cycani::tests::fresh_session_does_not_need_refresh ... ignored, 需要网络且已登录
+test providers::cycani::tests::health_check_passes ... ignored, 需要网络
+test plugins::tests::save_plugin_writes_expected_file ... ok
+test providers::cctv::tests::uses_proxy_store_when_injected ... ok
+test providers::cycani::tests::item_parses_id_from_detail_shape ... ok
+test providers::cycani::tests::item_parses_video_id_from_list_shape ... ok
+test providers::cycani::tests::ongoing_badge_matches_available_episodes ... ignored, 需要网络
+test providers::cycani::tests::manifest_requires_login_and_advertises_multi_source ... ok
+test providers::cycani::tests::order_by_score_is_sorted ... ignored, 需要网络
+test providers::cycani::tests::refresh_session_renews_token ... ignored, 需要网络且已保存凭据
+test providers::cycani::tests::required_headers_include_app_name ... ok
+test providers::cycani::tests::resolve_without_login_reports_unauthorized ... ignored, 需要网络
+test providers::cycani::tests::search_accepts_q_param ... ignored, 需要网络
+test providers::cycani::tests::tag_filter_actually_filters ... ignored, 需要网络
+test providers::cycani::tests::zones_are_reachable_with_required_headers ... ignored, 需要网络
+test providers::cycani::tests::token_prefix_is_not_doubled ... ok
+test providers::declarative::tests::jsonpath_subset_works ... ok
+test providers::declarative::tests::build_url_substitutes_params ... ok
+test providers::declarative::tests::accepts_valid_spec ... ok
+test providers::declarative::tests::rejects_invalid_spec ... ok
+test providers::declarative::tests::tvbox_play_url_separators_parsed ... ok
+test providers::http::tests::deserialize_error_is_actionable ... ok
+test providers::http::tests::parses_full_remote_manifest_with_camel_case ... ok
+test providers::http::tests::parses_minimal_remote_manifest ... ok
+test providers::http::tests::placeholder_defaults_are_stable ... ok
+test providers::http::tests::rejects_future_api_version_with_clear_message ... ok
+test proxy::tests::changing_config_invalidates_client_cache ... ok
+test providers::http::tests::rejects_bad_scheme ... ok
+test proxy::tests::config_serialization_never_contains_password ... ok
+test proxy::tests::custom_proxy_reaches_google ... ignored, 需要网络与代理
+test providers::http::tests::rejects_empty_base ... ok
+test proxy::tests::custom_requires_url ... ok
+test proxy::tests::custom_without_url_does_not_use_proxy ... ok
+test proxy::tests::default_is_direct_and_api_only ... ok
+test proxy::tests::direct_mode_still_builds_client ... ignored, 需要网络
+test proxy::tests::direct_client_builds_and_is_cached ... ok
+test proxy::tests::set_rejects_invalid_url_and_keeps_old_value ... ok
+test proxy::tests::system_mode_always_uses_proxy ... ok
+test proxy::tests::validates_proxy_schemes ... ok
+test registry::tests::default_impl_is_safe_for_unimplemented_provider ... ok
+test registry::tests::does_not_refresh_fresh_session ... ok
+test registry::tests::expired_provider_is_hidden_from_home ... ok
+test registry::tests::falls_back_to_auto_login ... ok
+test registry::tests::home_excludes_broken_source ... ok
+test registry::tests::home_excludes_source_with_dead_session ... ok
+test registry::tests::home_keeps_source_that_can_auto_login ... ok
+test registry::tests::home_keeps_source_with_valid_session ... ok
+test registry::tests::home_keeps_source_without_login_requirement ... ok
+test registry::tests::no_login_required_passes_through ... ok
+test registry::tests::no_session_no_cred_is_expired ... ok
+test registry::tests::open_provider_is_usable ... ok
+test registry::tests::optional_login_reports_active_after_login ... ok
+test registry::tests::recoverable_provider_stays_usable ... ok
+test registry::tests::refreshes_expiring_session ... ok
+test registry::tests::reorder_applies_user_order ... ok
+test registry::tests::reorder_handles_duplicate_ids ... ok
+test registry::tests::reorder_ignores_unknown_ids ... ok
+test registry::tests::reorder_puts_unmentioned_at_end ... ok
+test registry::tests::reorder_with_empty_list_is_noop ... ok
+test registry::tests::reports_failure_when_all_recovery_fails ... ok
+test registry::tests::required_login_without_session_is_still_expired ... ok
+test plugins::tests::meta_roundtrip_and_missing_is_ok ... ok
+test plugins::tests::config_and_store_do_not_collide ... ok
+test plugins::tests::config_persists_across_instances ... ok
+test registry::tests::unknown_provider_returns_none ... ok
+test registry::tests::search_all_error_isolation_survives_concurrency ... ok
+test remote::server::tests::stopped_hub_rejects_everything ... ok
+test remote::tests::both_fixed_and_random_pin_work ... ok
+test remote::tests::clearing_fixed_pin_revokes_it ... ok
+test remote::tests::cmd_body_flatten_accepts_flat_move_provider ... ok
+test plugins::tests::config_rejects_wrong_type ... ok
+test remote::tests::cmd_body_requires_pin ... ok
+test remote::tests::command_queue_is_bounded_and_drops_oldest ... ok
+test remote::tests::commands_keep_order ... ok
+test remote::tests::fake_ip_ranges_are_detected ... ok
+test remote::tests::fixed_pin_validation ... ok
+test remote::tests::move_provider_boundaries_do_not_panic ... ok
+test remote::tests::move_provider_wire_format_is_flat_snake_case ... ok
+test remote::tests::pin_check_is_exact ... ok
+test remote::tests::pin_is_six_digits ... ok
+test remote::tests::lan_ip_is_usable_or_loopback ... ok
+test remote::tests::bind_addr_is_not_unspecified ... ok
+test plugins::tests::versions_archive_list_and_prune ... ok
+test remote::tests::probe_targets_prioritize_private_gateways ... ok
+test remote::tests::provider_entries_roundtrip_with_names ... ok
+test remote::tests::refresh_pin_invalidates_old ... ok
+test remote::tests::remote_state_without_providers_still_parses ... ok
+test remote::tests::refresh_pin_keeps_fixed_pin ... ok
+test plugins::tests::config_select_value_must_be_in_options ... ok
+test remote::tests::state_roundtrip ... ok
+test remote::tests::shutdown_signal_resets_between_runs ... ok
+test remote::tests::unknown_kind_is_still_rejected ... ok
+test remote::tests::usable_lan_ip_requires_private_and_real ... ok
+test remote::tests::remote_url_is_clickable ... ok
+test remote::tests::port_is_free_reflects_real_bindability ... ok
+test store::tests::empty_title_must_not_overwrite_existing ... ok
+test store::tests::empty_title_on_first_insert_stays_empty ... ok
+test plugins::tests::config_returns_default_until_set ... ok
+test store::tests::episode_number_fixture_matches_dart ... ok
+test store::tests::favorite_roundtrip ... ok
+test store::tests::follow_list_and_unread ... ok
+test store::tests::history_and_platform_backup_are_separate_planes ... ok
+test store::tests::follow_only_row_is_listed_in_following_not_favorites ... ok
+test store::tests::meta_roundtrip ... ok
+test store::tests::nonempty_title_and_cover_still_update ... ok
+test store::tests::real_user_data_repoint_laojiu ... ignored, 依赖 .probe/dbcopy-t67c/ 取证件；用 --ignored 显式跑
+test store::tests::progress_continue_watching_filters_early_exit ... ok
+test store::tests::repoint_carries_when_both_sides_have_no_episode_number ... ok
+test store::tests::repoint_carries_whole_row_when_target_has_no_row ... ok
+test store::tests::repoint_does_not_carry_when_episode_numbers_differ ... ok
+test store::tests::repoint_does_not_carry_when_only_one_side_has_episode_number ... ok
+test store::tests::repoint_is_idempotent_and_noop_when_source_missing ... ok
+test store::tests::repoint_leaves_no_tombstone_in_favorites ... ok
+test registry::tests::search_stream_cancel_returns_immediately ... ok
+test store::tests::repoint_merges_when_target_row_already_exists_laojiu_case ... ok
+test store::tests::repoint_moves_all_four_tables_and_deletes_old_rows ... ok
+test store::tests::split_item_key_handles_colons_inside_native_id ... ok
+test store::tests::split_item_key_keeps_double_prefixed_native_id_intact ... ok
+test store::tests::repoint_position_takes_max_when_to_is_larger_mushoku_case ... ok
+test store::tests::repoint_skip_markers_prefers_from_and_fills_from_to ... ok
+test store::tests::tombstone_hides_but_keeps ... ok
+test store::tests::tombstone_only_after_both_states_off ... ok
+test store::tests::unfavorite_does_not_touch_following ... ok
+test store::tests::tombstone_purge_respects_cutoff ... ok
+test streamproxy::tests::bili_cdn_reqwest_with_referer ... ignored, 需要联网，手动跑：cargo test --lib -- --ignored bili_cdn
+test streamproxy::tests::content_range_parses ... ok
+test streamproxy::tests::cloned_client_shares_the_pool ... ok
+test store::tests::unfollow_does_not_touch_favorited ... ok
+test streamproxy::tests::first_window_split_is_exact_and_head_is_small ... ok
+test plugins::tests::config_ignores_undeclared_keys ... ok
+test streamproxy::tests::hls_segments_never_prefetched ... ok
+test streamproxy::tests::no_range_support_falls_back ... ok
+test streamproxy::tests::non_range_upstream_streams_correctly_without_prefetch ... ok
+test streamproxy::tests::only_not_web_ready_streams_are_proxied ... ok
+test streamproxy::tests::origin_extraction ... ok
+test streamproxy::tests::playlist_handles_empty_and_tags_only ... ok
+test streamproxy::tests::playlist_handles_protocol_relative ... ok
+test streamproxy::tests::playlist_keeps_query_in_uri ... ok
+test streamproxy::tests::playlist_rewrites_all_uri_forms ... ok
+test streamproxy::tests::playlist_rewrites_key_uri_attribute ... ok
+test streamproxy::tests::prefetch_enabled_for_range_capable_mp4 ... ok
+test plugins::tests::plugin_store_survives_corrupt_file ... ok
+test plugins::tests::plugin_store_roundtrip ... ok
+test state::tests::disabled_third_party_source_stays_disabled_after_boot ... ok
+test state::tests::corrupt_manifest_does_not_break_boot ... ok
+test streamproxy::tests::proxy_forwards_range_header ... ok
+test streamproxy::tests::proxy_url_is_loopback_only ... ok
+test streamproxy::tests::segments_cover_exactly_without_gap ... ok
+test streamproxy::tests::proxy_forwards_registered_headers ... ok
+test streamproxy::tests::small_files_are_not_prefetched ... ok
+test state::tests::broken_source_does_not_block_the_next_one ... ok
+test streamproxy::tests::subpath_absolute_starts_from_domain_root ... ok
+test streamproxy::tests::subpath_handles_degenerate_url ... ok
+test streamproxy::tests::subpath_joins_into_directory ... ok
+test streamproxy::tests::subpath_keeps_its_own_query ... ok
+test streamproxy::tests::subpath_leading_slash_is_absolute ... ok
+test streamproxy::tests::subpath_strips_query_from_base ... ok
+test streamproxy::tests::subpath_supports_nested_paths ... ok
+test streamproxy::tests::tokens_are_opaque_and_unique ... ok
+test streamproxy::tests::upstream_timeout_is_applied ... ok
+test streamproxy::tests::window_bounds_respect_end ... ok
+test sync::tests::is_snapshot_name_requires_non_empty_middle ... ok
+test state::tests::third_party_declarative_is_registered_on_boot ... ok
+test streamproxy::tests::table_is_bounded ... ok
+test sync::tests::jsonl_ignores_blank_lines ... ok
+test sync::tests::jsonl_roundtrip ... ok
+test sync::tests::jsonl_skips_bad_lines_but_keeps_good ... ok
+test sync::tests::legacy_jsonl_without_new_fields_still_parses ... ok
+test sync::tests::merge_is_commutative_for_distinct_timestamps ... ok
+test sync::tests::newer_local_wins ... ok
+test sync::tests::newer_remote_wins ... ok
+test sync::tests::normalize_enforces_tombstone_invariant ... ok
+test sync::tests::progress_uses_same_lww ... ok
+test sync::tests::prune_keeps_at_least_one_even_with_zero_retain ... ok
+test sync::tests::prune_never_touches_non_snapshot_names ... ok
+test sync::tests::public_json_hides_internal_signatures ... ok
+test sync::tests::pulled_counts_only_new_to_local ... ok
+test sync::tests::pushed_counts_only_genuinely_new_or_newer ... ok
+test sync::tests::tie_prefers_local_and_is_idempotent ... ok
+test sync::tests::tombstone_beats_older_alive_record ... ok
+test sync::tests::union_of_both_sides ... ok
+test sync::webdav::tests::config_serialization_omits_password ... ok
+test sync::webdav::tests::ensure_dir_builds_single_slash_paths ... ok
+test sync::webdav::tests::if_match_semantics_are_distinct ... ok
+test sync::webdav::tests::normalizes_base_url ... ok
+test sync::webdav::tests::parse_etag_accepts_any_prefix_and_case ... ok
+test sync::webdav::tests::parse_etag_decodes_xml_entities ... ok
+test sync::webdav::tests::parse_list_accepts_arbitrary_prefix ... ok
+test sync::webdav::tests::parse_list_accepts_bare_tags ... ok
+test sync::webdav::tests::parse_list_accepts_uppercase_d_prefix ... ok
+test sync::webdav::tests::parse_list_does_not_match_responsedescription ... ok
+test sync::webdav::tests::parse_list_handles_empty_multistatus ... ok
+test sync::webdav::tests::parse_list_handles_mixed_prefixes_without_duplicating ... ok
+test sync::webdav::tests::parse_list_skips_collections_and_keeps_only_files ... ok
+test sync::webdav::tests::parse_list_tolerates_missing_optional_props ... ok
+test sync::webdav::tests::parse_list_url_decodes_chinese_names ... ok
+test sync::webdav::tests::parses_getetag_from_propfind_xml ... ok
+test sync::webdav::tests::parses_webdav_error_message ... ok
+test sync::webdav::tests::rejects_bad_base_url ... ok
+test sync::webdav::tests::url_join_is_correct ... ok
+test sync::tests::load_settings_never_fails_on_broken_input ... ok
+test streamproxy::tests::shared_client_reuses_connections ... ok
+test streamproxy::tests::hls_segment_requests_are_not_parallelized ... ok
+test registry::tests::search_all_also_runs_concurrently ... ok
+test registry::tests::search_stream_runs_concurrently_not_serially ... ok
+test streamproxy::tests::prefetch_fetches_concurrently_and_bytes_are_exact ... ok
+test streamproxy::tests::first_byte_arrives_before_the_whole_window ... ok
+test streamproxy::tests::prefetch_window_is_parallel_not_serial ... ok
+test registry::tests::search_stream_emits_first_result_immediately ... ok
+test follow::tests::check_all_isolates_failures ... ok
+test streamproxy::tests::deterministic_before_after_same_upstream_same_throttle ... ok
+test streamproxy::tests::probe_small_range_first_byte_cost ... ok
+test plugins::tests::infinite_loop_is_interrupted_quickly ... ok
+test plugins::tests::real_infinite_loop_reports_timeout ... ok
+
+test result: ok. 325 passed; 0 failed; 24 ignored; 0 measured; 0 filtered out; finished in 10.04s
+

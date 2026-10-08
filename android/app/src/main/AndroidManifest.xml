@@ -1,0 +1,158 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!--
+      ★ 存储读写权限（2026-09-22）
+
+      实测症状：media_kit 在 Android 上初始化成功，但打开
+      `/sdcard/Download/x.mp4` 报 `Permission denied`。
+
+      原因：Android 9 及以下，读外部存储要**显式声明**这两个权限，
+      系统才会允许（即使只是读自己 push 进去的文件）。
+      ```text
+      Android 9  (API 28) 及以下 → 声明即可，安装时自动授予
+      Android 10 (API 29) 起     → 需要用 MediaStore / SAF，
+                                   或加 requestLegacyExternalStorage
+      ```
+      ⚠️ 正式做播放器时，用户选的是**网络流**为主，本地文件是少数场景；
+         但 WebDAV / 离线缓存会用到，所以现在就声明上。
+
+      ★ 另外还要 INTERNET —— 播放器天生要联网
+    -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
+
+    <!--
+      ★ 投屏（DLNA/UPnP）需要：收 SSDP 的组播应答（2026-10-05）
+
+      # 为什么必须声明
+
+      Android 的 Wi-Fi 栈**默认把组播包丢给内核**，不交给应用 ——
+      这是省电设计。要收到 M-SEARCH 的组播应答，必须：
+      ```text
+      ① 声明本权限（否则连申请 MulticastLock 都会抛 SecurityException）
+      ② 在运行时真的持有 WifiManager.MulticastLock
+      ```
+      两条缺一不可。只声明不持锁 = 照样收不到组播。
+
+      # 运行时那一半在哪
+
+      MainActivity.kt 的 sourin/net 通道（acquireMulticastLock / releaseMulticastLock），
+      由 Dart 侧在 SSDP 扫描期间持有（见 lib/core/dlna/ssdp.dart）。
+
+      ⚠️ **未在真机验证**：本机只有 x86_64 模拟器，而模拟器的网络是 QEMU 用户态栈
+      （组播包计数恒为 0，实测见 .probe/cast/TASK27-REPORT.md）⇒
+      「真机上到底还需不需要这把锁」在本仓库**没有实证**，只有 Android 官方文档依据。
+    -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+
+    <!--
+      ★★ Android TV 支持（2026-09-22）
+
+      # 不加这两条的后果（实测确认）
+
+      ```text
+      APK 能装到 Android TV 上，但**电视的启动器里根本看不到它** ——
+      `aapt dump badging` 不会出现 leanback-launchable-activity。
+      用户装完了却找不到应用，等于没装。
+      ```
+
+      # 三条声明的分工
+
+      (三条声明的分工见下方 uses-feature 与 intent-filter 的注释)
+      | `uses-feature leanback` | 声明本应用**支持**遥控器操作（TV 的判据） |
+      | `uses-feature touchscreen required=false` | ⚠️ 关键：手机/平板必备触摸屏，TV **没有**触摸屏；不声明 `required=false` 的话，Play 会认为 TV 不兼容 |
+      | `LEANBACK_LAUNCHER` category | 让应用出现在 **TV 主界面**（而不是只在「设置→应用」里） |
+
+      # 为什么同时保留 LAUNCHER
+
+      ```text
+      LAUNCHER          → 手机/平板的桌面图标（必须保留，否则手机装完没图标）
+      LEANBACK_LAUNCHER → Android TV 主界面
+      ```
+      两个 category 写在同一个 intent-filter 里是标准做法。
+
+      # 实测依据
+
+      原工程 `DEVELOPMENT.md` L3332 记录过同样的结论：
+      ```
+      aapt dump badging 显示这个 APK 已经声明了 leanback 启动器：
+        leanback-launchable-activity: name='...MainActivity'
+      所以它装上 Android TV 会在电视的启动器里出现，不需要额外改清单。
+      ```
+    -->
+    <uses-feature
+        android:name="android.software.leanback"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.touchscreen"
+        android:required="false" />
+
+    <application
+        android:label="sourin_spike"
+        android:name="${applicationName}"
+        android:icon="@mipmap/ic_launcher"
+        android:banner="@mipmap/ic_launcher">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:taskAffinity=""
+            android:theme="@style/LaunchTheme"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:hardwareAccelerated="true"
+            android:windowSoftInputMode="adjustResize"
+            android:supportsPictureInPicture="true"
+            android:resizeableActivity="true">
+            <!-- Specifies an Android theme to apply to this Activity as soon as
+                 the Android process has started. This theme is visible to the user
+                 while the Flutter UI initializes. After that, this theme continues
+                 to determine the Window background behind the Flutter UI. -->
+            <meta-data
+              android:name="io.flutter.embedding.android.NormalTheme"
+              android:resource="@style/NormalTheme"
+              />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <!-- 手机/平板桌面图标 -->
+                <category android:name="android.intent.category.LAUNCHER"/>
+                <!-- ★ Android TV 主界面（缺这条电视上找不到应用） -->
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER"/>
+            </intent-filter>
+        </activity>
+
+        <!--
+          ★ 关掉 Impeller / Vulkan（2026-09-22 排查白屏）
+
+          Flutter 3.47 在 Android 上默认用 **Impeller + Vulkan**。
+          而 BlueStacks 是虚拟 GPU（EGL_emulation + gralloc.default），
+          Vulkan 走不通 —— 表现是 **纯白屏、无任何 Dart 异常**，
+          logcat 只有一行线索：
+          ```text
+          D FlutterRenderer: Width is zero. 0,0
+          ```
+          强制回退到 OpenGL ES（Impeller 的 GLES 后端）即可。
+        -->
+        <meta-data
+            android:name="io.flutter.embedding.android.EnableImpeller"
+            android:value="false" />
+
+        <!-- Don't delete the meta-data below.
+             This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
+        <meta-data
+            android:name="flutterEmbedding"
+            android:value="2" />
+    </application>
+    <!-- Required to query activities that can process text, see:
+         https://developer.android.com/training/package-visibility and
+         https://developer.android.com/reference/android/content/Intent#ACTION_PROCESS_TEXT.
+
+         In particular, this is used by the Flutter engine in io.flutter.plugin.text.ProcessTextPlugin. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.PROCESS_TEXT"/>
+            <data android:mimeType="text/plain"/>
+        </intent>
+    </queries>
+</manifest>

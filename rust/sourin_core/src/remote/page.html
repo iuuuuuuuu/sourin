@@ -1,0 +1,1033 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0b0d12">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>遥控 · DSH Media</title>
+<style>
+/*
+ * 手机遥控页面 —— 单文件，无外部依赖（断网/内网环境也能用）
+ *
+ * 设计取舍：
+ *   · **深色**：遥控时多半在暗环境看片，亮屏刺眼
+ *   · **大按钮**：躺着单手操作，42px 以下点不准（触控目标下限）
+ *   · **底部固定操作区**：拇指自然落点，不用够顶部
+ *   · 不引任何前端框架 —— 内网加载要快，且少一个失败点
+ */
+:root{
+  --bg:#0b0d12; --panel:#151922; --panel2:#1c2130;
+  --line:rgba(255,255,255,.09);
+  --fg:#eef1f7; --dim:#98a2b8; --dim2:#6b7488;
+  --brand:#7c8cff; --brand2:#a78bfa; --ok:#34d399; --warn:#fbbf24; --err:#f87171;
+  --r:14px; --tap:46px;
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%}
+body{
+  background:var(--bg); color:var(--fg);
+  font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+  display:flex; flex-direction:column; overflow:hidden;
+  padding-bottom:env(safe-area-inset-bottom);
+}
+
+/* ── 顶栏 ── */
+header{
+  flex:0 0 auto; display:flex; align-items:center; gap:10px;
+  padding:12px 14px; padding-top:calc(12px + env(safe-area-inset-top));
+  border-bottom:1px solid var(--line); background:var(--panel);
+}
+.logo{font-weight:700;font-size:15px;letter-spacing:.2px}
+.logo span{background:linear-gradient(135deg,var(--brand),var(--brand2));
+  -webkit-background-clip:text;background-clip:text;color:transparent}
+#conn{margin-left:auto;font-size:12px;color:var(--dim2);display:flex;align-items:center;gap:5px}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--dim2);transition:background .2s}
+.dot.on{background:var(--ok);box-shadow:0 0 8px var(--ok)}
+.dot.off{background:var(--err)}
+
+/* ── 主区 ── */
+main{flex:1 1 auto;overflow-y:auto;overscroll-behavior:contain;padding:12px 14px 8px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:13px}
+.card+.card{margin-top:10px}
+
+/* 正在播放 */
+.now__title{font-size:16px;font-weight:650;line-height:1.35;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.now__meta{margin-top:5px;font-size:12.5px;color:var(--dim);display:flex;gap:10px;flex-wrap:wrap}
+.now__bar{margin-top:11px;height:5px;background:var(--panel2);border-radius:3px;overflow:hidden}
+.now__fill{height:100%;width:0;background:linear-gradient(90deg,var(--brand),var(--brand2));
+  border-radius:3px;transition:width .45s linear}
+.now__time{margin-top:6px;display:flex;justify-content:space-between;font-size:11.5px;color:var(--dim2);font-variant-numeric:tabular-nums}
+.idle{color:var(--dim);text-align:center;padding:22px 8px;font-size:13.5px;line-height:1.7}
+
+/* 按钮 */
+.row{display:flex;gap:8px}
+button{
+  font:inherit; color:var(--fg); background:var(--panel2);
+  border:1px solid var(--line); border-radius:11px;
+  min-height:var(--tap); flex:1; cursor:pointer;
+  display:flex;align-items:center;justify-content:center;gap:6px;
+  transition:transform .08s,background .15s,opacity .15s;
+}
+button:active{transform:scale(.96);background:#252b3d}
+button:disabled{opacity:.35;cursor:not-allowed}
+button.primary{background:linear-gradient(135deg,var(--brand),var(--brand2));border-color:transparent;font-weight:650}
+button.icon{flex:0 0 var(--tap);font-size:19px}
+button.big{min-height:56px;font-size:17px}
+button.on{border-color:var(--brand);color:var(--brand)}
+
+/* 分段 */
+.seg{display:flex;gap:6px;background:var(--panel);border:1px solid var(--line);
+  border-radius:12px;padding:4px;margin-bottom:10px}
+.seg button{background:transparent;border:0;min-height:38px;font-size:13.5px;color:var(--dim)}
+.seg button[aria-selected="true"]{background:var(--panel2);color:var(--fg);font-weight:600}
+
+/* 搜索 */
+.search{display:flex;gap:8px}
+input[type=search],input[type=tel]{
+  flex:1;min-height:var(--tap);padding:0 13px;font:inherit;
+  background:var(--panel2);border:1px solid var(--line);border-radius:11px;color:var(--fg);
+  min-width:0;
+}
+input::placeholder{color:var(--dim2)}
+input:focus{outline:none;border-color:var(--brand)}
+
+/* 列表 */
+.list{margin-top:11px;display:flex;flex-direction:column;gap:7px}
+.item{display:flex;gap:11px;align-items:center;padding:8px;border-radius:11px;
+  background:var(--panel2);border:1px solid transparent;cursor:pointer;text-align:left;
+  min-height:64px}
+.item:active{border-color:var(--brand)}
+.item__cover{flex:0 0 40px;height:54px;border-radius:7px;object-fit:cover;background:#242a3a}
+.item__body{flex:1;min-width:0}
+.item__title{font-size:14px;line-height:1.35;display:-webkit-box;
+  -webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.item__sub{margin-top:3px;font-size:11.5px;color:var(--dim2);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* 剧集网格 */
+.eps{display:grid;grid-template-columns:repeat(auto-fill,minmax(58px,1fr));gap:7px;margin-top:11px}
+.ep{min-height:42px;background:var(--panel2);border:1px solid var(--line);border-radius:9px;
+  font-size:13px;display:flex;align-items:center;justify-content:center;cursor:pointer}
+.ep[aria-current="true"]{background:linear-gradient(135deg,var(--brand),var(--brand2));
+  border-color:transparent;font-weight:650}
+
+/* 底部固定操作条 */
+footer{
+  flex:0 0 auto;padding:9px 14px;padding-bottom:calc(9px + env(safe-area-inset-bottom));
+  background:var(--panel);border-top:1px solid var(--line);
+  display:flex;gap:8px;
+}
+
+/* 配对层 */
+#gate{position:fixed;inset:0;background:var(--bg);z-index:50;
+  display:flex;flex-direction:column;justify-content:center;padding:26px;gap:13px}
+#gate h1{margin:0;font-size:21px}
+#gate p{margin:0;color:var(--dim);font-size:13.5px;line-height:1.65}
+/*
+ * ⚠️ 这里必须 `flex:0 0 auto` + `width:100%`。
+ *
+ * 全局 `button{flex:1}` / `input{flex:1}` 是为了让**横排**按钮等宽，
+ * 但在 `#gate` 这种**纵向** flex 容器里 `flex:1` 会变成
+ * 「向上撑满高度」—— 实测表现为输入框和按钮高得占满整屏。
+ *
+ * 只写 `flex:0 0 auto` 又会让 input 退回「按 size 属性的固有宽度」，
+ * 配合 `letter-spacing` 会横向溢出（实测右边超出屏幕）。
+ * 所以两个都要写。
+ */
+#gate button,#gate input{flex:0 0 auto;width:100%}
+#pin{font-size:27px;letter-spacing:11px;text-align:center;font-variant-numeric:tabular-nums;
+  min-height:60px;padding-left:11px}
+#gateErr{color:var(--err);font-size:13px;min-height:19px}
+.hint{font-size:12px;color:var(--dim2);text-align:center;line-height:1.7}
+
+.toast{position:fixed;left:50%;bottom:calc(84px + env(safe-area-inset-bottom));transform:translateX(-50%);
+  background:#2a3145;color:var(--fg);padding:9px 17px;border-radius:20px;font-size:13px;
+  opacity:0;pointer-events:none;transition:opacity .22s;z-index:60;max-width:86vw;text-align:center}
+.toast.show{opacity:1}
+.hidden{display:none!important}
+
+/* ── 片头 / 片尾 ── */
+
+/* 已设置的值：两行，左边标签右边时间 */
+.skipnow{display:flex;flex-direction:column;gap:3px;margin-top:6px;font-size:13px}
+.skipnow__row{display:flex;justify-content:space-between;gap:8px}
+.skipnow__row b{color:var(--fg);font-weight:600}
+.skipnow__empty{color:var(--dim2);font-size:12.5px}
+
+/*
+ * 微调按钮：3 列 × 2 行
+ *
+ * 为什么 3 列而不是 6 列：
+ *   6 列在 390px 宽的屏上每格只有 ~58px，
+ *   而「−1min」这种文案需要约 52px —— 加上 padding 就挤了。
+ *   3 列每格 ~120px，手指也更容易点中。
+ */
+.skipnudge{display:grid;grid-template-columns:repeat(3,1fr);gap:7px}
+.skipnudge button{min-height:44px;font-size:14px;font-variant-numeric:tabular-nums}
+
+/*
+ * 「取消跳过」用警示色 —— 它是**破坏性操作**（清除本剧设置）
+ *
+ * ⚠️ 只在边框和文字上着色，不用红底：
+ *    红底在深色主题下太刺眼，而且这个操作可恢复（重新设一次即可），
+ *    不需要那么强的警示。
+ */
+button.danger{border-color:color-mix(in srgb,var(--err) 55%,transparent);color:var(--err)}
+button.danger:active{background:color-mix(in srgb,var(--err) 18%,transparent)}
+
+/* ── 内容源排序（遥控端）── */
+
+/*
+ * 为什么是 ↑↓ 按钮而不是拖拽
+ *
+ * Owner 原话是「内容源调整顺序也要支持**可拖动排序**」——
+ * 拖动排序在**客户端**（Flutter 设置页）做。遥控端这里是另一回事：
+ *
+ *   整个 page.html 是**零依赖纯手写**（无任何 CDN）——
+ *   引一个拖拽库就多一个「内网加载失败」的失败点，
+ *   而且 HTML5 拖拽在触屏上支持很差（要自己处理 touch 事件序列）。
+ *
+ * 所以用 ↑↓：与原版手机端「片头片尾」的微调按钮**同一形态**，
+ * 一行一个按钮、点一下动一格，手指不会点错。
+ */
+.ordlist{margin-top:9px;display:flex;flex-direction:column;gap:6px}
+.ordrow{display:flex;align-items:center;gap:7px;background:var(--panel2);
+  border:1px solid var(--line);border-radius:10px;padding:5px 7px}
+/*
+ * 触控目标 44px —— 文件头部写明了「42px 以下点不准」，
+ * 这里取 44（Apple HIG 的下限）而不是全局的 46：
+ * 排序列表可能有二十多行，每行再高就要滑很久。
+ */
+.ordrow button{flex:0 0 44px;min-height:44px;font-size:17px;line-height:1;padding:0}
+.ordrow__no{flex:0 0 18px;font-size:11.5px;color:var(--dim2);text-align:right;
+  font-variant-numeric:tabular-nums}
+.ordrow__name{flex:1;min-width:0;font-size:14px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ordrow__id{font-size:11px;color:var(--dim2);margin-left:5px}
+/* 停用的源仍在列表里（保留位置），只是暗一点 */
+.ordrow--off .ordrow__name{color:var(--dim2)}
+.ordnote{margin-top:7px;font-size:12px;color:var(--dim2);line-height:1.6}
+</style>
+</head>
+<body>
+
+<!-- ── 配对 ── -->
+<div id="gate">
+  <h1>连接你的播放器</h1>
+  <p>请查看客户端 <b>设置 → 局域网遥控</b>，把配对码输进来（随机码或固定码都行）。</p>
+  <!--
+    ⚠️ maxlength 必须给到 8 —— 固定配对码允许 4~8 位。
+    写死 6 会让设了 7、8 位固定码的用户**根本输不进去**
+    （客户端显示的是 8 位码，手机上却只能打 6 位）。
+  -->
+  <input id="pin" type="tel" inputmode="numeric" maxlength="8" placeholder="••••" autocomplete="off">
+  <button class="primary big" id="gateBtn">连接</button>
+  <div id="gateErr"></div>
+  <div class="hint">只在同一局域网内有效<br>随机码每次启动都会变；也可在客户端设一个固定码</div>
+</div>
+
+<header>
+  <div class="logo"><span>DSH</span> 遥控</div>
+  <div id="conn"><i class="dot" id="dot"></i><span id="connText">连接中</span></div>
+</header>
+
+<main>
+  <!-- 正在播放 -->
+  <section class="card" id="nowCard">
+    <div id="idle" class="idle">播放器上还没有打开视频<br>去客户端选一个，或用下面的搜索</div>
+    <div id="now" class="hidden">
+      <div class="now__title" id="nTitle">—</div>
+      <div class="now__meta">
+        <span id="nEp"></span>
+        <span id="nSrc"></span>
+      </div>
+      <div class="now__bar"><div class="now__fill" id="nFill"></div></div>
+      <div class="now__time"><span id="nPos">0:00</span><span id="nDur">0:00</span></div>
+    </div>
+  </section>
+
+  <!-- 播放控制 -->
+  <section class="card" id="ctlCard">
+    <div class="row" style="margin-bottom:8px">
+      <button class="icon" id="bPrev" title="上一集">⏮</button>
+      <button class="icon" id="bBack" title="后退 10 秒">⟲</button>
+      <button class="primary big" id="bPlay" style="flex:2">⏯</button>
+      <button class="icon" id="bFwd" title="前进 10 秒">⟳</button>
+      <button class="icon" id="bNext" title="下一集">⏭</button>
+    </div>
+    <div class="row">
+      <button class="icon" id="bMute" title="静音">🔊</button>
+      <button id="bVolDown" title="音量 -">音量 −</button>
+      <button id="bVolUp" title="音量 +">音量 ＋</button>
+    </div>
+    <!--
+      ★ 直播切频道（task-39）—— 与上面"上一集/下一集"分开一行：
+        ① 语义不同（剧集 vs 频道）
+        ② 循环语义不同（最后一集停下 vs 最后一个频道回到第一个）
+        ③ 只在对**直播**有意义，单独一行更清楚
+    -->
+    <div class="row" style="margin-top:8px">
+      <button id="bChPrev" title="上一个直播频道">⏮ 上一个频道</button>
+      <button id="bChNext" title="下一个直播频道">下一个频道 ⏭</button>
+    </div>
+  </section>
+
+  <!-- 选集 -->
+  <section class="card hidden" id="epsCard">
+    <div class="now__meta" style="margin:0 0 2px"><b id="epsTitle">选集</b></div>
+    <div class="eps" id="eps"></div>
+  </section>
+
+  <!-- 线路 -->
+  <section class="card hidden" id="srcCard">
+    <div class="now__meta" style="margin:0 0 2px"><b>播放线路</b></div>
+    <div class="row" id="srcs" style="flex-wrap:wrap;margin-top:9px"></div>
+  </section>
+
+  <!--
+    ══════════════════════════════════════════════════════════════
+    ★★ 片头 / 片尾（Owner 要求「遥控端也要能配置 + 能取消」）
+    ══════════════════════════════════════════════════════════════
+
+    设计来自 docs/片头片尾设置草稿.html §二：
+
+      · 手机上**不用滑块** ——
+        草稿原话：「手机上的滑块很难精确到秒，
+                  而片头位置差 1 秒就会切掉正片开头」
+        所以用按钮微调：−1min / −10s / −1s / +1s / +10s / +1min
+
+      · 手机上拖，**电视上出画面**（方案 A，草稿推荐）——
+        「电视屏幕大，看画面比手机小屏准得多；
+         而且电视本来就开着」
+
+      · 「取消跳过」也要能在手机上做（Owner 明确要求）
+  -->
+  <section class="card hidden" id="skipCard">
+    <div class="now__meta" style="margin:0 0 2px">
+      <b>片头 / 片尾</b>
+      <span id="skipState" class="muted"></span>
+    </div>
+
+    <!-- 已设置的值 -->
+    <div class="skipnow" id="skipNow"></div>
+
+    <!-- 正在编辑哪一项 -->
+    <div class="skipedit hidden" id="skipEdit">
+      <div class="muted" id="skipHint" style="margin:8px 0 6px"></div>
+
+      <!--
+        微调按钮
+        ⚠️ 用按钮而不是滑块 —— 见上面的草稿原话。
+        触控目标 ≥44px（手机手指）
+      -->
+      <div class="skipnudge">
+        <button id="skM60">−1min</button>
+        <button id="skM10">−10s</button>
+        <button id="skM1">−1s</button>
+        <button id="skP1">+1s</button>
+        <button id="skP10">+10s</button>
+        <button id="skP60">+1min</button>
+      </div>
+
+      <div class="row" style="margin-top:9px">
+        <button class="primary" id="skConfirm" style="flex:1">确认这个位置</button>
+        <button id="skCancel" style="flex:0 0 74px">取消</button>
+      </div>
+    </div>
+
+    <!-- 两个入口 + 开关 + 取消跳过 -->
+    <div class="row" style="margin-top:9px;flex-wrap:wrap">
+      <button id="skSetIntro">设置片头结束</button>
+      <button id="skSetOutro">设置片尾开始</button>
+    </div>
+
+    <div class="row" style="margin-top:9px">
+      <button id="skToggleAuto">自动跳过：开</button>
+      <button id="skClear" class="danger">取消跳过（清除本剧设置）</button>
+    </div>
+  </section>
+
+  <!--
+    ════════════════════════════════════════════════════════
+    ★★ 内容源排序（Owner 要求「也可以通过遥控面板来排序」）
+    ════════════════════════════════════════════════════════
+
+    发的命令（扁平结构，与 switch_source 同一形态）：
+      {"kind":"move_provider","id":"cycani","delta":-1}   ↑ 上移一格
+      {"kind":"move_provider","id":"cycani","delta": 1}   ↓ 下移一格
+
+    ⚠️ 本区块与「播放线路」（#srcCard）**不是一回事**，别混：
+      播放线路  当前这部片子的第几路流（随片子变）
+      内容源    全局的内容站点先后（与在播什么无关）
+
+    所以它不在 `if (has)` 里面 —— 没在放视频时也能排。
+  -->
+  <section class="card hidden" id="ordCard">
+    <div class="now__meta" style="margin:0 0 2px">
+      <b>内容源顺序</b>
+      <span id="ordState" class="muted"></span>
+    </div>
+    <div class="ordlist" id="ordList"></div>
+    <div class="ordnote">用 ↑↓ 调整各个内容源的先后 · 改完自动保存，与客户端设置里的一致</div>
+  </section>
+
+  <!-- 搜索 -->
+  <section class="card">
+    <div class="search">
+      <input id="q" type="search" placeholder="搜索影片…" autocomplete="off" enterkeyhint="search">
+      <button class="primary" id="bSearch" style="flex:0 0 74px">搜索</button>
+    </div>
+    <div class="list" id="results"></div>
+  </section>
+</main>
+
+<footer>
+  <button id="bDiscover">发现</button>
+  <button id="bTop">回到正在播放</button>
+</footer>
+
+<div class="toast" id="toast"></div>
+
+<script>
+/*
+ * 遥控逻辑
+ *
+ * 与服务端的分工：
+ *   · 状态：客户端每 800ms 上报，本页每 800ms 拉一次
+ *   · 命令：POST 后立即生效，无需等下一次轮询（乐观反馈）
+ */
+(function(){
+'use strict';
+
+var $ = function(id){ return document.getElementById(id); };
+var PIN_KEY = 'dsh_remote_pin';
+var pin = localStorage.getItem(PIN_KEY) || '';
+var timer = null;
+var lastSig = '';       // 状态签名，变了才重绘（避免打断用户滚动）
+var searching = false;
+
+// ── 工具 ──
+function fmt(sec){
+  sec = Math.max(0, Math.floor(sec || 0));
+  var m = Math.floor(sec / 60), s = sec % 60;
+  if (m >= 60) { return Math.floor(m/60) + ':' + String(m%60).padStart(2,'0') + ':' + String(s).padStart(2,'0'); }
+  return m + ':' + String(s).padStart(2,'0');
+}
+var toastTimer;
+function toast(msg){
+  var t = $('toast'); t.textContent = msg; t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(function(){ t.classList.remove('show'); }, 1900);
+}
+function setConn(ok, text){
+  $('dot').className = 'dot ' + (ok ? 'on' : 'off');
+  $('connText').textContent = text;
+}
+
+// ── 与客户端通信 ──
+function api(path, opts){
+  return fetch(path, opts).then(function(r){
+    if (r.status === 401) { throw new Error('PIN'); }
+    if (!r.ok) { throw new Error('HTTP ' + r.status); }
+    return r.json();
+  });
+}
+
+/** 下发命令。失败时会提示并回到配对页（配对码可能已被刷新） */
+function cmd(obj){
+  var body = Object.assign({ pin: pin }, obj);
+  return api('/api/cmd', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  }).catch(function(e){
+    if (e.message === 'PIN') { needPin('配对码已失效，请重新输入'); }
+    else { toast('发送失败'); }
+  });
+}
+
+// ── 配对 ──
+function needPin(msg){
+  clearInterval(timer); timer = null;
+  localStorage.removeItem(PIN_KEY);
+  pin = '';
+  $('gate').classList.remove('hidden');
+  $('gateErr').textContent = msg || '';
+  setConn(false, '未连接');
+}
+
+$('gateBtn').onclick = function(){
+  var v = ($('pin').value || '').trim();
+  if (!/^\d{6}$/.test(v)) { $('gateErr').textContent = '请输入 6 位数字'; return; }
+  $('gateErr').textContent = '';
+  $('gateBtn').disabled = true;
+  api('/api/pin', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ pin: v })
+  }).then(function(){
+    pin = v;
+    localStorage.setItem(PIN_KEY, v);
+    $('gate').classList.add('hidden');
+    $('pin').value = '';
+    setConn(true, '已连接');
+    start();
+  }).catch(function(e){
+    $('gateErr').textContent = e.message === 'PIN' ? '配对码不正确' : '连接失败，确认在同一局域网';
+  }).finally(function(){ $('gateBtn').disabled = false; });
+};
+$('pin').addEventListener('keydown', function(e){ if (e.key === 'Enter') $('gateBtn').click(); });
+
+// ── 轮询状态 ──
+function start(){
+  if (timer) return;
+  poll();
+  timer = setInterval(poll, 800);
+}
+
+function poll(){
+  api('/api/state').then(function(s){
+    setConn(true, '已连接');
+    render(s);
+  }).catch(function(e){
+    setConn(false, e.message === 'PIN' ? '需重新配对' : '连接断开');
+    if (e.message === 'PIN') needPin('配对码已失效，请重新输入');
+  });
+}
+
+// ── 渲染 ──
+function render(s){
+  var has = !!s.has_media;
+  $('idle').classList.toggle('hidden', has);
+  $('now').classList.toggle('hidden', !has);
+  $('epsCard').classList.toggle('hidden', !(s.episodes && s.episodes.length > 1));
+  $('srcCard').classList.toggle('hidden', !(s.sources && s.sources.length > 1));
+
+  /*
+   * ★ 内容源排序面板 —— 注意它在 `if (has)` **之外**
+   *
+   * 它是全局设置（与当前在播什么无关）——
+   * 没在放视频时也能排，这正是遥控排序的意义。
+   */
+  renderOrd(s);
+
+  if (has){
+    $('nTitle').textContent = s.title || '—';
+    $('nEp').textContent = s.episode_count > 1
+      ? ('第 ' + s.episode_order + ' / ' + s.episode_count + ' 集') : '';
+    $('nSrc').textContent = s.current_source ? ('线路 ' + s.current_source) : '';
+    var pct = s.duration > 0 ? (s.position / s.duration * 100) : 0;
+    $('nFill').style.width = Math.min(100, pct) + '%';
+    $('nPos').textContent = fmt(s.position);
+    $('nDur').textContent = fmt(s.duration);
+    $('bPlay').textContent = s.playing ? '⏸' : '▶';
+    $('bMute').textContent = s.muted ? '🔇' : '🔊';
+    $('bMute').classList.toggle('on', !!s.muted);
+
+    // 选集（只在集数变化时重建，避免打断点击）
+    var sig = (s.episodes||[]).length + '/' + s.episode_order;
+    if (sig !== lastSig && s.episodes && s.episodes.length){
+      lastSig = sig;
+      var box = $('eps'); box.innerHTML = '';
+      s.episodes.forEach(function(e){
+        var b = document.createElement('div');
+        b.className = 'ep';
+        b.textContent = e[0];
+        b.title = e[1] || ('第' + e[0] + '集');
+        if (e[0] === s.episode_order) b.setAttribute('aria-current','true');
+        b.onclick = function(){ cmd({ kind:'goto_episode', order: e[0] }); toast('切到第 ' + e[0] + ' 集'); };
+        box.appendChild(b);
+      });
+      $('epsTitle').textContent = '选集（共 ' + s.episodes.length + ' 集）';
+    }
+
+    // 线路
+    var ssig = (s.sources||[]).map(function(x){return x[0];}).join(',');
+    if ($('srcs').dataset.sig !== ssig){
+      $('srcs').dataset.sig = ssig;
+      var sb = $('srcs'); sb.innerHTML = '';
+      (s.sources||[]).forEach(function(x){
+        var b = document.createElement('button');
+        b.textContent = x[1] || x[0];
+        if (x[0] === s.current_source) b.classList.add('on');
+        b.onclick = function(){ cmd({ kind:'switch_source', code: x[0] }); toast('切换到 ' + (x[1]||x[0])); };
+        sb.appendChild(b);
+      });
+    }
+
+    renderSkip(s);
+  }
+}
+
+/*
+ * ══════════════════════════════════════════════════════════════════
+ * 片头 / 片尾（Owner 要求「遥控端也要能配置 + 能取消」）
+ * ══════════════════════════════════════════════════════════════════
+ *
+ * 设计来自 docs/片头片尾设置草稿.html §二。
+ *
+ * 关键交互：**手机上拖，电视上出画面**（草稿的方案 A，也是它推荐的）——
+ * 因为「电视屏幕大，看画面比手机小屏准得多；而且电视本来就开着」。
+ *
+ * 所以微调按钮发 `skip_preview` → 客户端把电视画面跳过去 →
+ * 用户看着电视确认满意了，再点「确认这个位置」发 `skip_confirm`。
+ */
+
+/** 当前正在编辑哪一项（null = 没在编辑） */
+var skipEditing = null;
+
+/** 本地预览位置（手机侧记着，用于显示"正在调到 03:12"） */
+var skipPreviewPos = null;
+
+function renderSkip(s){
+  var has = !!s.has_media;
+  $('skipCard').classList.toggle('hidden', !has);
+  if (!has) return;
+
+  var intro = (s.intro_skip === null || s.intro_skip === undefined) ? null : s.intro_skip;
+  var outro = (s.outro_skip === null || s.outro_skip === undefined) ? null : s.outro_skip;
+
+  // 已设置的值
+  var box = $('skipNow');
+  if (intro === null && outro === null){
+    box.innerHTML = '<div class="skipnow__empty">还没有设置过 —— 点下面的按钮开始</div>';
+  } else {
+    var rows = [];
+    if (intro !== null) rows.push('<div class="skipnow__row"><span class="muted">片头结束</span><b>' + fmt(intro) + '</b></div>');
+    if (outro !== null) rows.push('<div class="skipnow__row"><span class="muted">片尾开始</span><b>' + fmt(outro) + '</b></div>');
+    box.innerHTML = rows.join('');
+  }
+
+  // 状态行
+  $('skipState').textContent = skipEditing
+    ? ('正在设置' + (skipEditing === 'intro' ? '片头' : '片尾'))
+    : '';
+
+  /*
+   * 编辑中：显示微调面板
+   *
+   * ⚠️ 用**服务端回的 skip_editing** 与**本地 skipEditing** 的并集：
+   *    本地状态让用户点了按钮立刻看到面板（不用等 800ms 轮询），
+   *    服务端状态保证"在电脑上打开的弹窗"手机也能看到。
+   */
+  var editing = skipEditing || s.skip_editing || null;
+  if (editing){
+    skipEditing = editing;
+    $('skipEdit').classList.remove('hidden');
+    var cur = editing === 'intro' ? intro : outro;
+    var showPos = skipPreviewPos !== null ? skipPreviewPos : (cur !== null ? cur : s.position);
+    $('skipHint').textContent = '微调到「' + (editing === 'intro' ? '片头结束' : '片尾开始') +
+      '」的那一帧 · 电视上会同步显示 · 当前 ' + fmt(showPos);
+  } else {
+    $('skipEdit').classList.add('hidden');
+  }
+
+  // 开关文案
+  $('skToggleAuto').textContent = '自动跳过：' + (s.auto_skip ? '开' : '关');
+  $('skToggleAuto').classList.toggle('on', !!s.auto_skip);
+  $('skToggleAuto').dataset.on = s.auto_skip ? '1' : '0';
+
+  // 「取消跳过」只在设过时可用
+  $('skClear').disabled = (intro === null && outro === null);
+}
+
+/** 微调：本地记位置 + 让电视跳过去 */
+function skipNudge(delta){
+  if (!skipEditing) return;
+  // 用上一次预览位置作基准（没有就用当前播放位置）
+  var base = skipPreviewPos !== null ? skipPreviewPos : 0;
+  if (skipPreviewPos === null){
+    // 第一次微调：从服务端上次给的位置起步
+    base = lastState ? (skipEditing === 'intro'
+      ? (lastState.intro_skip !== null && lastState.intro_skip !== undefined ? lastState.intro_skip : lastState.position)
+      : (lastState.outro_skip !== null && lastState.outro_skip !== undefined ? lastState.outro_skip : lastState.position)) : 0;
+  }
+  var next = Math.max(0, base + delta);
+  skipPreviewPos = next;
+  cmd({ kind:'skip_preview', position: next });
+  // 立刻更新文案（不等下一次轮询）
+  $('skipHint').textContent = '微调到「' + (skipEditing === 'intro' ? '片头结束' : '片尾开始') +
+    '」的那一帧 · 电视上会同步显示 · 当前 ' + fmt(next);
+}
+
+$('skSetIntro').onclick = function(){
+  skipEditing = 'intro'; skipPreviewPos = null;
+  cmd({ kind:'skip_config_open', target:'intro' });
+  toast('在电视上设置片头 —— 用下面的按钮微调');
+};
+$('skSetOutro').onclick = function(){
+  skipEditing = 'outro'; skipPreviewPos = null;
+  cmd({ kind:'skip_config_open', target:'outro' });
+  toast('在电视上设置片尾 —— 用下面的按钮微调');
+};
+$('skM60').onclick = function(){ skipNudge(-60); };
+$('skM10').onclick = function(){ skipNudge(-10); };
+$('skM1').onclick  = function(){ skipNudge(-1); };
+$('skP1').onclick  = function(){ skipNudge(1); };
+$('skP10').onclick = function(){ skipNudge(10); };
+$('skP60').onclick = function(){ skipNudge(60); };
+
+$('skConfirm').onclick = function(){
+  if (!skipEditing) return;
+  cmd({ kind:'skip_confirm', target: skipEditing });
+  toast('已设为' + (skipEditing === 'intro' ? '片头' : '片尾'));
+  skipEditing = null; skipPreviewPos = null;
+};
+
+$('skCancel').onclick = function(){
+  skipEditing = null; skipPreviewPos = null;
+  $('skipEdit').classList.add('hidden');
+};
+
+$('skToggleAuto').onclick = function(){
+  var on = $('skToggleAuto').dataset.on !== '1';
+  cmd({ kind:'skip_toggle_auto', on: on });
+  toast('自动跳过已' + (on ? '开启' : '关闭'));
+};
+
+$('skClear').onclick = function(){
+  if (!confirm('清除本剧的片头片尾设置？')) return;
+  cmd({ kind:'skip_clear' });
+  skipEditing = null; skipPreviewPos = null;
+  toast('已清除本剧设置');
+};
+
+/*
+ * ══════════════════════════════════════════════════════════════════
+ * 内容源排序（遥控端）
+ * ══════════════════════════════════════════════════════════════════
+ *
+ * 发的是 `move_provider`（**相对移动一格**）而不是完整顺序 ——
+ * 手机端看到的列表是**上一次轮询的快照**，可能已经过期
+ * （用户刚在客户端装/删了一个源）。发完整顺序会把
+ * 客户端多出来的那个源**静默丢掉**；发「把 X 上移一格」则天然安全。
+ *
+ * ★ 本地先动、服务端没确认就如实退回
+ *
+ * 手机上点 ↑ 之后要等客户端（轮询 + 写盘）才真正换位。
+ * 这段时间界面不动的话，用户会以为没点上然后连点 ——
+ * 而连点会把同一个源推好几格（每一格都是合法命令）。
+ * 所以先本地换位给出即时反馈，**确认窗口内服务端顺序
+ * 没变就如实退回**并提示「未生效」—— 不假装成功。
+ */
+
+/** 上一次**按服务端顺序**渲染的签名（变了才重建 DOM） */
+var ordSig = '';
+/** 服务端的顺序（本地乐观顺序被推翻时回到它） */
+var ordNow = [];
+/** 本地乐观顺序（点了 ↑↓ 之后、服务端确认之前）；null = 没有待确认的改动 */
+var ordLocal = null;
+/** 乐观顺序的「确认窗口」定时器 */
+var ordRevert = null;
+/** 确认窗口（毫秒）—— 客户端轮询 800ms，给它 3 个周期 */
+var ORD_WAIT_MS = 2600;
+
+function renderOrd(s){
+  var list = (s && s.providers) || [];
+  $('ordCard').classList.toggle('hidden', list.length === 0);
+  if (!list.length){ ordSig = ''; ordNow = []; ordLocal = null; return; }
+
+  var sig = '';
+  for (var i = 0; i < list.length; i++) sig += list[i].id + '|';
+
+  /*
+   * ⚠️ 只在**服务端顺序变了**时重建 —— 否则每 800ms 一次轮询都会
+   *    重建整个列表，用户按到一半的按钮会被换掉（与选集网格同理）。
+   */
+  if (sig === ordSig) return;
+
+  ordSig = sig;
+  ordNow = list;
+  ordLocal = null;
+  clearTimeout(ordRevert); ordRevert = null;
+  $('ordState').textContent = '';
+  buildOrd(list);
+}
+
+/** 按给定顺序重建整个排序列表 */
+function buildOrd(list){
+  var box = $('ordList');
+  box.innerHTML = '';
+  list.forEach(function(p, i){
+    var row = document.createElement('div');
+    row.className = 'ordrow' + (p.enabled === false ? ' ordrow--off' : '');
+
+    var no = document.createElement('span');
+    no.className = 'ordrow__no';
+    no.textContent = (i + 1);
+
+    /*
+     * 用 textContent 而不是 innerHTML —— 源名是**外部数据**
+     * （插件里声明的），拼字符串会引入注入面。
+     */
+    var name = document.createElement('span');
+    name.className = 'ordrow__name';
+    name.textContent = p.name || p.id;
+    name.title = (p.name ? p.name + ' · ' : '') + p.id;
+    if (p.enabled === false){
+      var off = document.createElement('span');
+      off.className = 'ordrow__id';
+      off.textContent = '已停用';
+      name.appendChild(off);
+    }
+
+    var up = document.createElement('button');
+    up.textContent = '↑';
+    up.title = '上移';
+    /*
+     * 边界：第一项的 ↑ / 最后一项的 ↓ **直接禁用**
+     *
+     * 这是与 `PrevEpisode` 对齐的做法：第一集时上一集就是一个
+     * 「拿不到上一集」的 no-op，界面上也不给你点（按钮置灰）。
+     * 服务端（Rust）仍然会接受越界命令 —— 双保险，不依赖单边。
+     */
+    up.disabled = (i === 0);
+    up.onclick = function(){ moveProvider(p.id, -1); };
+
+    var dn = document.createElement('button');
+    dn.textContent = '↓';
+    dn.title = '下移';
+    dn.disabled = (i === list.length - 1);
+    dn.onclick = function(){ moveProvider(p.id, 1); };
+
+    row.appendChild(no);
+    row.appendChild(name);
+    row.appendChild(up);
+    row.appendChild(dn);
+    box.appendChild(row);
+  });
+}
+
+/** 上移 / 下移某个源：本地先动 + 发命令 */
+function moveProvider(id, delta){
+  var base = ordLocal || ordNow;
+  var i = -1;
+  for (var k = 0; k < base.length; k++){ if (base[k].id === id){ i = k; break; } }
+
+  /*
+   * id 不在列表里（手机端快照过期 / 列表刚被服务端换掉）——
+   * 静默忽略：**不能**拿 id 当位置去算，否则会移动错误的行。
+   */
+  if (i < 0) return;
+
+  var j = i + delta;
+  if (j < 0 || j >= base.length) return;   // 越界：按钮本就是 disabled
+
+  var next = base.slice();
+  var tmp = next[i]; next[i] = next[j]; next[j] = tmp;
+  ordLocal = next;
+  buildOrd(next);
+
+  $('ordState').textContent = '正在保存…';
+  cmd({ kind:'move_provider', id: id, delta: delta });
+  toast((delta < 0 ? '上移' : '下移') + '「' + (next[j].name || next[j].id) + '」');
+
+  clearTimeout(ordRevert);
+  ordRevert = setTimeout(function(){
+    if (!ordLocal) return;
+    ordLocal = null;
+    buildOrd(ordNow);
+    $('ordState').textContent = '未生效';
+    toast('顺序没生效 —— 客户端可能还没上报源列表');
+  }, ORD_WAIT_MS);
+}
+
+// ── 控制按钮 ──
+$('bPlay').onclick  = function(){ cmd({ kind:'toggle_play' }); };
+$('bNext').onclick  = function(){ cmd({ kind:'next_episode' }); toast('下一集'); };
+$('bPrev').onclick  = function(){ cmd({ kind:'prev_episode' }); toast('上一集'); };
+/*
+ * ★ 直播切频道（task-39 新增）
+ * 用户原话：「在直播页面 应该可以往下循环切换直播，并且可以在遥控上控制」
+ * ★ 与"上一集/下一集"分开两个按钮 —— 语义不同（见 Rust 侧
+ *   `RemoteCommand::NextChannel` 的注释：集号 vs 频道、边界也不同）。
+ */
+$('bChNext').onclick = function(){ cmd({ kind:'next_channel' }); toast('下一个频道'); };
+$('bChPrev').onclick = function(){ cmd({ kind:'prev_channel' }); toast('上一个频道'); };
+$('bBack').onclick  = function(){ cmd({ kind:'seek', delta:-10 }); };
+$('bFwd').onclick   = function(){ cmd({ kind:'seek', delta: 10 }); };
+$('bMute').onclick  = function(){ cmd({ kind:'toggle_mute' }); };
+$('bVolUp').onclick = function(){ cmd({ kind:'set_volume', value: 100 }); };
+$('bVolDown').onclick = function(){ cmd({ kind:'set_volume', value: 30 }); };
+
+// 进度条点击跳转
+document.querySelector('.now__bar').onclick = function(ev){
+  var r = this.getBoundingClientRect();
+  var ratio = (ev.clientX - r.left) / r.width;
+  var s = lastState;
+  if (!s || !s.duration) return;
+  var pos = Math.round(s.duration * Math.max(0, Math.min(1, ratio)));
+  cmd({ kind:'seek_to', position: pos });
+  toast('跳到 ' + fmt(pos));
+};
+
+// ── 搜索 ──
+$('bSearch').onclick = doSearch;
+$('q').addEventListener('keydown', function(e){ if (e.key === 'Enter') doSearch(); });
+
+function doSearch(){
+  var kw = ($('q').value || '').trim();
+  if (!kw) return;
+  searching = true;
+  $('results').innerHTML = '<div class="item"><div class="item__body"><div class="item__title" style="color:var(--dim)">搜索中…</div></div></div>';
+  api('/api/search', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ pin: pin, keyword: kw })
+  }).then(function(){
+    pollSearch(kw);
+  }).catch(function(){ searching = false; });
+}
+
+/*
+ * ══════════════════════════════════════════════════════════════════
+ * ★★★ 搜索轮询（2026-09-25 重写 —— 用户报「遥控搜不到、客户端搜得到」）
+ * ══════════════════════════════════════════════════════════════════
+ *
+ * # 原来错在哪
+ *
+ * 旧实现对每个源**等全部跑完**才回填（客户端侧用的是 `searchAll`），
+ * 而手机端的等待预算只有 **18.2 秒**（26 × 700ms）：
+ * ```text
+ * 实测：搜「庆余年」客户端要 24.64s  → 手机 18.2s 就放弃了
+ *       搜「从零开始」    15.36s    → 没超，能出结果
+ * ```
+ * 于是表现是「**时好时坏**」，而且恰好是慢关键词必坏 —— 用户看到
+ * 「没有找到结果」，但同一时刻客户端早就列出来了。
+ *
+ * # 现在怎么改的
+ *
+ * 客户端已改成**流式**（每搜到一个源就回填一次），所以手机这边：
+ * ```text
+ * ① **每轮都重绘** —— 结果会"越来越多"，用户立刻有东西看
+ * ② 预算 700ms × 86 ≈ 60 秒（原来 18.2s）—— 给慢源留足时间
+ * ③ 连续 6 轮（≈4.2s）条数没再增长 → 认为搜完了，停下
+ * ④ 一直没结果且预算用尽 → 才是「没有找到结果」
+ * ```
+ * ⚠️ ③ 这个"稳定即结束"的判据是**必要的**：协议里没有 done 标志
+ *    （`/api/search` 只回 `{keyword, items}`），不判就会一直轮询到 60 秒。
+ */
+var SEARCH_INTERVAL_MS = 700;
+var SEARCH_MAX_TRIES = 86;      // ≈ 60 秒
+var SEARCH_STABLE_TRIES = 6;    // 连续几轮条数不变就认为搜完
+
+function pollSearch(kw){
+  var tries = 0;
+  var lastCount = -1;
+  var stable = 0;
+
+  var t = setInterval(function(){
+    tries++;
+    api('/api/search').then(function(r){
+      if (!r || r.keyword !== kw){ return; }   // 别的关键词的结果，忽略
+
+      var n = (r.items || []).length;
+
+      if (n > 0){
+        /*
+         * ★ 条数变了就重绘 —— 这就是"陆续出现"的实现点。
+         *   条数没变时不重绘，避免每 700ms 白刷一次（会打断用户滚动）。
+         */
+        if (n !== lastCount){
+          renderResults(r.items);
+          lastCount = n;
+          stable = 0;
+        } else {
+          stable++;
+        }
+
+        if (stable >= SEARCH_STABLE_TRIES){
+          clearInterval(t); searching = false;
+          toast('找到 ' + n + ' 条');
+          return;
+        }
+      }
+
+      if (tries > SEARCH_MAX_TRIES){
+        clearInterval(t); searching = false;
+        if (n === 0){
+          $('results').innerHTML = '<div class="item"><div class="item__body"><div class="item__title" style="color:var(--dim)">没有找到结果</div></div></div>';
+        } else {
+          toast('找到 ' + n + ' 条');
+        }
+      }
+    }).catch(function(){ clearInterval(t); searching = false; });
+  }, SEARCH_INTERVAL_MS);
+}
+
+function renderResults(items){
+  var box = $('results'); box.innerHTML = '';
+  items.forEach(function(it){
+    var b = document.createElement('button');
+    b.className = 'item';
+    var cover = it.cover ? '<img class="item__cover" src="' + esc(it.cover) + '" loading="lazy" alt="">' : '<div class="item__cover"></div>';
+    b.innerHTML = cover +
+      '<div class="item__body"><div class="item__title">' + esc(it.title) + '</div>' +
+      '<div class="item__sub">' + esc(it.subtitle || '') + '</div></div>';
+    b.onclick = function(){
+      // 把标题一起带上 —— 客户端能立刻显示，不用等详情接口返回
+      cmd({ kind:'play_item', provider: it.provider, id: it.id, title: it.title });
+      toast('已在播放器打开');
+      setTimeout(function(){ $('bTop').click(); }, 400);
+    };
+    box.appendChild(b);
+  });
+}
+
+function esc(s){
+  return String(s == null ? '' : s).replace(/[&<>"']/g, function(c){
+    return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c];
+  });
+}
+
+// ── 发现页（首页分区）──
+$('bDiscover').onclick = function(){
+  api('/api/home', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ pin: pin })
+  }).then(function(){
+    $('results').innerHTML = '<div class="item"><div class="item__body"><div class="item__title" style="color:var(--dim)">加载中…</div></div></div>';
+    var tries = 0;
+    var t = setInterval(function(){
+      tries++;
+      api('/api/home').then(function(r){
+        if (r && r.sections && r.sections.length){
+          clearInterval(t);
+          var all = [];
+          r.sections.forEach(function(sec){ (sec.items||[]).forEach(function(i){ all.push(i); }); });
+          renderResults(all);
+          if (!all.length) $('results').innerHTML = '<div class="item"><div class="item__body"><div class="item__title" style="color:var(--dim)">暂无内容</div></div></div>';
+        } else if (tries > 20){ clearInterval(t); }
+      }).catch(function(){ clearInterval(t); });
+    }, 700);
+  });
+};
+
+$('bTop').onclick = function(){
+  document.querySelector('main').scrollTo({ top: 0, behavior: 'smooth' });
+};
+
+// 记住最后一次状态（进度条点击要用）
+var lastState = null;
+var _render = render;
+render = function(s){ lastState = s; _render(s); };
+
+// ── 启动 ──
+if (pin){
+  api('/api/pin', { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ pin: pin }) })
+    .then(function(){
+      $('gate').classList.add('hidden');
+      setConn(true, '已连接');
+      start();
+    })
+    .catch(function(){ needPin(''); });
+} else {
+  needPin('');
+}
+})();
+</script>
+</body>
+</html>

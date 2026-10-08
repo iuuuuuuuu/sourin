@@ -1,0 +1,205 @@
+[package]
+name = "sourin_core"
+version = "0.1.0"
+edition = "2021"
+
+# ═══════════════════════════════════════════════════════════════════════
+#  源影核心 —— 与 UI 框架无关的纯 Rust 业务逻辑
+# ═══════════════════════════════════════════════════════════════════════
+#
+# # 这个 crate 是什么
+#
+# 从 `cctv_to_client/src-tauri` 里**原样抽出**的业务核心，
+# 目标是验证它能否脱离 Tauri 独立编译 —— 这是「复用 81% 代码」
+# 这条硬指标的前提。
+#
+# # 实测依据（2026-09-22）
+#
+# 抽之前先量过耦合度：
+# ```text
+# provider.rs         381 行   0 处 Tauri 引用  ✓
+# registry.rs         961 行   0 处             ✓
+# model.rs            857 行   0 处             ✓
+# store.rs           1563 行   0 处             ✓
+# proxy.rs            539 行   0 处             ✓
+# streamproxy.rs     1595 行   1 处             ⚠
+# follow.rs           364 行   0 处             ✓
+# backup.rs           505 行   0 处             ✓
+# providers/         4195 行   0 处             ✓
+# sync/              1475 行   0 处             ✓
+# remote/            1195 行   0 处             ✓
+# plugins/           3281 行   0 处             ✓
+# ─────────────────────────────────────────
+# 合计              16911 行   仅 1 处
+# ```
+# 那唯一一处是 `streamproxy.rs:386` 的
+# `tauri::async_runtime::spawn`，等价于 `tokio::spawn`。
+#
+# # 依赖为什么这么少
+#
+# 抽完统计出的外部依赖只有：
+# ```text
+# serde / serde_json   序列化
+# tokio                异步运行时
+# reqwest              HTTP
+# axum + tower-http    HTTP 服务（流代理 / 局域网遥控）
+# rusqlite (bundled)   SQLite（自带，无需系统依赖）
+# rquickjs             插件引擎（纯 Rust 的 QuickJS）
+# zip / futures-core / bytes / async-trait
+# ```
+# **全是跨平台 crate** —— 这也是它能在 Android 上编译的原因。
+#
+# # 对 Flutter 意味着什么
+#
+# Flutter 用 **Dart FFI** 调这个 crate 编出的 cdylib：
+# ```text
+# Flutter (Dart)
+#      ↓ dart:ffi
+# sourin_core.dll / libsourin_core.so
+#      ↓
+# 原有的 providers / plugins / store / streamproxy ...
+# ```
+# UI 层完全重写，业务层一行不改。
+
+[lib]
+# ★ cdylib 给 Flutter 用；rlib 保留以便跑单测
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "net", "sync", "process", "io-util"] }
+futures-core = "0.3"
+bytes = "1"
+async-trait = "0.1"
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "gzip", "brotli", "deflate", "socks", "stream"], default-features = false }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
+tower-http = { version = "0.6", default-features = false, features = ["cors"] }
+rusqlite = { version = "0.32", features = ["bundled", "serde_json"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+log = "0.4"
+
+# ── 下面这些是实测编译时补出来的（第一轮 177 个 error 全是缺 crate）──
+anyhow = "1"
+thiserror = "2"
+urlencoding = "2"
+regex = "1"
+once_cell = "1"
+chrono = { version = "0.4", features = ["serde"] }
+
+# 局域网遥控要生成二维码（手机扫码直连，不用手输内网 IP）
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+
+# ★ 凭据安全：系统钥匙串
+#
+# ⚠️ 这是**唯一一个需要平台适配**的依赖：
+# ```text
+# Windows → windows-native（Credential Manager）
+# macOS   → apple-native（Keychain）
+# Android → 没有 android-native feature，
+#           要换成别的实现（见下面 cfg 段）
+# ```
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+
+# ★ JS 插件引擎
+#
+# # 三个 feature 各有原因（原工程的注释记录得很清楚）
+#
+# ```text
+# bindgen  → rquickjs 不提供 Android 预生成绑定，
+#            不开会报 bindings/aarch64-linux-android.rs 找不到
+# parallel → 本项目的 MediaProvider trait 是 Send + Sync，
+#            而 rquickjs 默认的 AsyncContext 不是 Send；
+#            不开会得到一屏「future cannot be sent between threads safely」
+# macro    → 提供 async_with!，等 JS Promise 必须用它
+#            （ctx.with() 不能返回 future —— 源码注释写明，原工程实测踩过）
+# ```
+# ★ 版本从 0.9 升到 0.14（2026-09-22）—— 为了支持 32 位 ARM
+#
+# # 0.9.0 的 32 位 bug（实测确认）
+#
+# `rquickjs-sys-0.9.0/src/lib.rs` 里这样选实现：
+# ```rust
+# #[cfg(target_pointer_width = "64")]
+# include!("inlines/ptr_64.rs");           // 用 JSValueUnion（非 nan-boxing 布局）
+#
+# #[cfg(target_pointer_width = "32")]
+# include!("inlines/ptr_32_nan_boxing.rs"); // 用 JS_MKVAL（nan-boxing 布局）
+# ```
+# 但 armv7（`target_pointer_width = "32"`）上 bindgen 生成的是 **nan-boxing**
+# 绑定（`pub type JSValue = u64`，没有 `JSValueUnion`），
+# 而编译却走了 `ptr_64.rs` → 一屏 `cannot find JSValueUnion` / `u64 has no fields`。
+#
+# ⚠️ 重要背景：**原工程其实也没编过 32 位** ——
+#    它 target 里那个 armv7 的 .so 是 09/18 的，早于插件引擎接入，
+#    实测里面**没有任何 rquickjs 符号**。所以这不是重写引入的回归。
+#
+# # 为什么必须支持 32 位（与硬指标② 有关）
+#
+# ```text
+# 很多 Android TV 盒子是 32 位 ARM（armeabi-v7a）
+# ```
+# 而 media_kit 的 libmpv 是**带 v7a 的** —— 如果我们的核心没有，
+# 用户装到 32 位盒子上会：应用能启动 → 一调核心就 DynamicLibrary.open 失败
+# → 看到「核心启动失败」而不是明确的不支持。
+#
+# # 验证方式
+#
+# 建了个临时 crate 单独编 armv7，**0.14 通过、0.9 失败** ——
+# 确认是上游修复，不是我们绕过去的。
+rquickjs = { version = "0.14", default-features = false, features = ["bindgen", "futures", "macro", "parallel"] }
+
+[dev-dependencies]
+# 原工程的 axum 测试用 `tower::ServiceExt::oneshot` 直接给 Router 发请求
+# （不用真起 HTTP 服务器，测试快且不占端口）。
+# 抽核心时漏了这个 —— `cargo test` 才暴露出来（`cargo check` 不编译 test 段）。
+tower = { version = "0.5", features = ["util"] }
+hyper = { version = "1", features = ["full"] }
+http-body-util = "0.1"
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Release 优化 —— 与硬指标③（安装包 <50MB）直接相关
+# ═══════════════════════════════════════════════════════════════════════
+#
+# # 为什么必须显式写这一段（2026-09-22 踩到）
+#
+# 抽核心时我漏了原工程的 `[profile.release]`，结果：
+# ```text
+# sourin_core.dll  8.12 MB   ← 默认设置（含调试符号、无 LTO）
+# ```
+# 而原工程同样代码编出来是 **2.5 MB**。差了 3 倍多，
+# 而这一切只是少了一段配置 —— **不报错，只是产物变大**。
+#
+# 发现方式：交叉编译 Android 时注意到 .so 有 10.6MB，
+# 回头看 Windows DLL 才发现也涨了。
+#
+# # 每一项的作用与代价
+#
+# | 设置 | 作用 | 代价 |
+# |---|---|---|
+# | `strip = true` | 去掉调试符号（**体积大头**） | 崩溃栈没有行号 |
+# | `lto = true` | 跨 crate 内联与死代码消除 | 编译慢很多 |
+# | `codegen-units = 1` | 让 LTO 看到全部代码 | 编译更慢 |
+# | `opt-level = "s"` | 优化体积而非速度 | 略慢一点 |
+#
+# # ⚠️ `panic = "abort"` 与我的 FFI 设计冲突 —— 所以**故意不开**
+#
+# 原工程用 `panic = "abort"` 是对的（它是完整应用，崩了就是崩了）。
+# 但我这里不能用，因为：
+#
+# ```text
+# ffi.rs 的 dispatch_blocking 用 catch_unwind 兜 panic，
+# 把 panic 转成 JSON 错误返回给 Flutter。
+# ```
+# 而 `panic = "abort"` **让 catch_unwind 失效** —— panic 直接 abort 进程，
+# 没有 unwind 可捕获 → 插件里的一个小 panic 会**直接崩掉整个 Flutter 应用**，
+# 而且用户看不到任何错误信息。
+#
+# 用一点体积换「宿主不会被插件 panic 带走」，这个取舍值得 ——
+# 何况 strip + LTO 已经能把它压回 2-3MB。
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true
+# panic = "abort"   ← 故意注释掉，原因见上

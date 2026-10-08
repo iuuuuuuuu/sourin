@@ -1,0 +1,122 @@
+# ═══════════════════════════════════════════════════════════════════════
+#  源影 · Flutter —— 仓库忽略清单
+# ═══════════════════════════════════════════════════════════════════════
+#
+# 原则：**只提交源码**。所有构建产物、本机路径、探测数据一律不进库。
+# 下面按「为什么忽略」分组，每条都有理由 —— 不要随手加 `*`。
+
+# ── Dart / Flutter ────────────────────────────────────────────────────
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.buildlog/
+.history
+.svn/
+migrate_working_dir/
+
+# IntelliJ / Android Studio
+*.iml
+*.ipr
+*.iws
+.idea/
+sourin_spike.iml
+sourin_spike_android.iml
+
+# Flutter / Dart
+**/doc/api/
+**/ios/Flutter/.last_build_id
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+/build/
+
+# Symbolication / 混淆映射
+app.*.symbols
+app.*.map.json
+
+# Android 构建产物
+/android/app/debug
+/android/app/profile
+/android/app/release
+/android/.gradle/
+/android/.kotlin/
+/android/build/
+/android/app/build/
+# 本机 SDK 路径（每台机器都不一样，绝不能进库）
+/android/local.properties
+# 签名材料 —— **永远不要**提交
+*.jks
+*.keystore
+key.properties
+
+# Windows 构建产物
+/windows/flutter/ephemeral/
+/windows/x64/
+*.suo
+*.user
+
+# ── Rust 核心 ─────────────────────────────────────────────────────────
+#
+# ⚠️ `target/` 单目录 27 GB（debug + release + 各 ABI 的交叉编译产物）。
+#    它是**唯一**必须忽略的大件；漏了会让 `git add` 直接卡死。
+/rust/**/target/
+#
+# ★ Android 交叉编译配置里含**本机绝对路径**（NDK 位置），每台机器不同。
+#   仓库里放的是 `config.toml.example` 模板，用的时候自己 copy 一份：
+#   ```powershell
+#   Copy-Item rust/sourin_core/.cargo/config.toml.example rust/sourin_core/.cargo/config.toml
+#   ```
+/rust/sourin_core/.cargo/config.toml
+
+# ── 交付与打包产物 ────────────────────────────────────────────────────
+/dist-deliver/
+/release/
+*.7z
+*.apk
+*.aab
+*.exe
+*.msi
+*.dll
+*.so
+*.dylib
+
+# ⚠️ 例外说明：Android 的 `android/app/src/main/jniLibs/<abi>/libsourin_core.so`
+#    是**交叉编译产物**（~27 MB × 3 ABI），可由 `rust/sourin_core` 重新编出来。
+#    开源库不该带二进制，所以这里**明确排除**（上面的 `*.so` 已覆盖）。
+#    首次克隆后想跑 Android，按 README「从源码构建」那一节编一次即可。
+
+# ── 探测与开发脚手架（本项目特有的） ────────────────────────────────────
+#
+# `.probe/` 是开发期的一次性探针目录：抓图脚本、指纹门禁、真机日志、
+# 中间证据。它**高达 29 GB**，且含本机路径、真实账号痕迹、大量与源码
+# 无关的二进制 —— 一律不进库。
+/.probe/
+/.probe_i12/
+/.probe_i56/
+/%TEMP%/
+/ANALYZE/
+/emulator-5556/
+
+# ── 开发期随手丢在根目录的产物 ──────────────────────────────────────────
+# 截图、视频夹具、一次性分析输出 —— 都不属于源码。
+/*.png
+/*.jpg
+/*.mp4
+/*.mkv
+/*.ass
+/*.bak-*
+/*.txt
+
+# ── 凭据与个人数据（安全底线） ──────────────────────────────────────────
+#
+# ★ 用户真实数据目录、插件凭据、云同步配置 —— 一旦进库就是事故。
+/data/
+*cookie*.json
+*credential*
+*.session
+

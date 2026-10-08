@@ -1,0 +1,100 @@
+plugins {
+    id "com.android.application"
+    id "kotlin-android"
+    // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
+    id "dev.flutter.flutter-gradle-plugin"
+}
+
+// ---------------------------------------------------------------------------
+//  NOTE: this file is intentionally ASCII-only.
+//
+//  Gradle on Windows reads .gradle files with the platform default charset
+//  (GBK/ANSI on this machine), NOT UTF-8. Mixing in CJK comments and symbols
+//  like the star/warning glyphs corrupts the parse and, in practice, swallowed
+//  a closing brace -- which silently moved `splits {}` OUTSIDE the `android {}`
+//  block and produced a confusing "Conflicting configuration ... ndk abiFilters
+//  cannot be present when splits abi filters are set" error.
+//
+//  Keep this file plain ASCII. Chinese explanations live in DEVELOPMENT-style
+//  notes elsewhere, not here.
+// ---------------------------------------------------------------------------
+
+android {
+    namespace = "app.sourin.sourin_spike"
+    compileSdk = flutter.compileSdkVersion
+    ndkVersion = flutter.ndkVersion
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_1_8
+        targetCompatibility = JavaVersion.VERSION_1_8
+    }
+
+    kotlinOptions {
+        jvmTarget = JavaVersion.VERSION_1_8
+    }
+
+    defaultConfig {
+        applicationId = "app.sourin.sourin_spike"
+        minSdk = flutter.minSdkVersion
+        targetSdk = flutter.targetSdkVersion
+        versionCode = flutter.versionCode
+        versionName = flutter.versionName
+
+        // Deliberately NO `ndk { abiFilters ... }` here.
+        //
+        // Gradle forbids having both abiFilters and splits.abi:
+        //   "Conflicting configuration : '...' in ndk abiFilters cannot be
+        //    present when splits abi filters are set"
+        // Since we never enable splits here (see the note below), leaving this
+        // out also keeps the plain `flutter build apk` path working.
+    }
+
+    // -----------------------------------------------------------------------
+    //  NO `splits { abi { ... } }` BLOCK HERE -- on purpose.
+    //
+    //  Flutter's Gradle plugin configures ABI filtering itself from
+    //  `--target-platform` / `--split-per-abi`. Declaring `splits.abi` in this
+    //  file collides with that and the build dies with:
+    //
+    //    "Conflicting configuration : 'armeabi-v7a,arm64-v8a,x86_64' in ndk
+    //     abiFilters cannot be present when splits abi filters are set"
+    //
+    //  The command-line flag is the supported way, and it works:
+    //
+    //    flutter build apk --release --split-per-abi
+    //
+    //  Measured 2026-09-22 (three separate APKs, one per ABI):
+    //    armeabi-v7a   29.42 MB   <- 32-bit TV boxes
+    //    arm64-v8a     36.24 MB   <- modern phones/boxes
+    //    x86_64        41.41 MB   <- emulators
+    //  versus 103.92 MB for the single all-ABI APK.
+    //
+    //  Do not "helpfully" add the block back; it only breaks the build.
+    // -----------------------------------------------------------------------
+
+    buildTypes {
+        release {
+            // TODO: replace with a real signing config before publishing.
+            // Debug keys are used so `flutter run --release` works.
+            signingConfig = signingConfigs.debug
+        }
+    }
+
+    // Keep native libraries UNCOMPRESSED so they can be mmap'd straight out of
+    // the APK.
+    //
+    // Measured: libmpv.so compresses to 31.6% with LZMA2, so compressing would
+    // look like a big win -- but it forces the installer to extract a second
+    // copy into /data/data/<pkg>/lib/, doubling on-device usage and making
+    // first launch noticeably slower. Hard requirement 2 explicitly targets
+    // weak TV boxes, where fast startup matters more than a smaller download.
+    packagingOptions {
+        jniLibs {
+            useLegacyPackaging = false
+        }
+    }
+}
+
+flutter {
+    source = "../.."
+}

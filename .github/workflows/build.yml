@@ -1,0 +1,211 @@
+# ═══════════════════════════════════════════════════════════════════════
+#  源影 · Flutter —— GitHub 构建
+# ═══════════════════════════════════════════════════════════════════════
+#
+# # 为什么 Windows 和 Android 分成两个 job
+# ```text
+# Windows  编 Rust 核心 → flutter test → flutter build windows（约 10 分钟）
+# Android  额外要 NDK + 三个 target 交叉编译（约 25 分钟），而且**默认关闭**
+# ```
+# ★ 每次 push 都跑 Android 会让 CI 变得很慢，而 Windows 已经覆盖了
+#   Dart 与 Rust 两侧的全部测试 —— 所以 Android 只在手动触发时跑。
+
+name: 构建
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      build_android:
+        description: '同时构建 Android（需要 NDK，较慢）'
+        type: boolean
+        default: false
+
+# ★ 同一分支的新 push 取消上一次未完成的构建
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # ★ 这两个版本是**硬要求**，见 README「从源码构建 → 前置依赖」
+  FLUTTER_VERSION: '3.47.5'
+  #   Flutter 3.47 把 Material 拆成了独立的 material_ui 包，
+  #   低于这个版本 pubspec 解析不过。
+
+jobs:
+  # ═════════════════════════════════════════════════════════════════════
+  #  Windows：Rust 核心 + 分析 + 全量测试 + 打包
+  # ═════════════════════════════════════════════════════════════════════
+  windows:
+    name: Windows
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 装 Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: 装 Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 缓存 Rust 构建产物
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/sourin_core
+
+      # ── ① Rust 核心 ────────────────────────────────────────────────
+      - name: 编 Rust 核心
+        working-directory: rust/sourin_core
+        run: cargo build --release
+
+      - name: Rust 单元测试
+        working-directory: rust/sourin_core
+        run: cargo test --release --lib
+
+      - name: 把核心放进 Windows 构建目录
+        shell: pwsh
+        run: |
+          Copy-Item rust\sourin_core\target\release\sourin_core.dll windows\ -Force
+          # ★ 核验：CMake 的拷贝按时间戳，这里显式确认产物真的在
+          if (-not (Test-Path windows\sourin_core.dll)) {
+            throw "sourin_core.dll 没有被拷进 windows\"
+          }
+          "核心大小 = " + (Get-Item windows\sourin_core.dll).Length
+
+      # ── ② Dart 侧静态检查与测试 ────────────────────────────────────
+      - name: 装依赖
+        run: flutter pub get
+
+      - name: 静态分析（0 error 才继续）
+        shell: pwsh
+        run: |
+          $out = flutter analyze --no-pub 2>&1 | Out-String
+          Write-Output $out
+          # ★ 只卡 error —— 本仓有约 200 条既有 warning/info
+          #   （探针文件里的 invalid_use_of_protected_member 等），
+          #   卡 warning 会让 CI 永远红，失去意义。
+          if ($out -match '\berror\b.*-') {
+            throw "flutter analyze 报出 error"
+          }
+
+      - name: 全量测试
+        run: flutter test --reporter expanded
+
+      # ── ③ 打包 ─────────────────────────────────────────────────────
+      - name: 构建 Windows 发布版
+        # ★ -t 不能漏：入口是 shell.dart，main.dart 是早期的 HEVC 验收 spike
+        run: flutter build windows --release --no-pub -t lib/shell.dart
+
+      - name: 核验产物
+        shell: pwsh
+        run: |
+          $rel = 'build\windows\x64\runner\Release'
+          $exe = Join-Path $rel 'sourin_spike.exe'
+          $dll = Join-Path $rel 'sourin_core.dll'
+          if (-not (Test-Path $exe)) { throw "缺少 $exe" }
+          if (-not (Test-Path $dll)) { throw "缺少 $dll" }
+          # ★ app.so 必须够大 —— 这是「编的确实是产品入口」的判据：
+          #   shell 入口约 10.7 MB；spike 入口只有约 1 MB。
+          $app = Join-Path $rel 'data\app.so'
+          $n = (Get-Item $app).Length
+          "app.so = $n 字节"
+          if ($n -lt 5000000) {
+            throw "app.so 只有 $n 字节 —— 很可能漏了 -t lib/shell.dart，编出来的是 spike"
+          }
+
+      - name: 上传 Windows 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: sourin-windows-${{ github.sha }}
+          path: build/windows/x64/runner/Release/
+          retention-days: 14
+
+  # ═════════════════════════════════════════════════════════════════════
+  #  Android：默认关闭，手动触发时跑
+  # ═════════════════════════════════════════════════════════════════════
+  android:
+    name: Android
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    if: github.event_name == 'workflow_dispatch' && inputs.build_android
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 装 Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: 装 Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi
+
+      - name: 缓存 Rust 构建产物
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/sourin_core
+
+      - name: 装 Android NDK
+        uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          # ★ 版本必须与 rust/sourin_core/.cargo/config.toml 里的路径一致
+          ndk-version: r27
+          link-to-sdk: true
+
+      - name: 编 Android 的 Rust 核心
+        shell: bash
+        working-directory: rust/sourin_core
+        run: |
+          set -euo pipefail
+          # ★ .cargo/config.toml 里写死的是 Windows 路径，Linux CI 上要用环境变量覆盖
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang"
+          export CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi24-clang"
+          export CC_aarch64_linux_android="$CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER"
+          export CC_armv7_linux_androideabi="$CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER"
+          cargo build --release --target aarch64-linux-android
+          cargo build --release --target armv7-linux-androideabi
+
+      - name: 拷进 jniLibs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p android/app/src/main/jniLibs/arm64-v8a
+          mkdir -p android/app/src/main/jniLibs/armeabi-v7a
+          cp rust/sourin_core/target/aarch64-linux-android/release/libsourin_core.so \
+             android/app/src/main/jniLibs/arm64-v8a/
+          cp rust/sourin_core/target/armv7-linux-androideabi/release/libsourin_core.so \
+             android/app/src/main/jniLibs/armeabi-v7a/
+          ls -la android/app/src/main/jniLibs/arm64-v8a/
+          ls -la android/app/src/main/jniLibs/armeabi-v7a/
+
+      - name: 装依赖
+        run: flutter pub get
+
+      - name: 构建 APK（arm64）
+        run: flutter build apk --release --no-pub --target-platform android-arm64 -t lib/shell.dart
+
+      - name: 构建 APK（armv7）
+        run: flutter build apk --release --no-pub --target-platform android-armv7 -t lib/shell.dart
+
+      - name: 上传 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: sourin-android-${{ github.sha }}
+          path: build/app/outputs/flutter-apk/*.apk
+          retention-days: 14
+

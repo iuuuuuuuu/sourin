@@ -1,0 +1,526 @@
+// ═══════════════════════════════════════════════════════════════════════
+//  ★★★ Flutter + media_kit 的 HEVC 验收 spike（2026-09-21）
+// ═══════════════════════════════════════════════════════════════════════
+//
+// # 这个 spike 要回答什么
+//
+// 我们卡了一整天的问题：**Windows 上 HEVC 播不了**。根因已查明 ——
+// WebView2/Edge 走 Media Foundation，而系统没注册 HEVC 解码器 MFT
+// （实测 61 个 MFT 里零个 HEVC）。
+//
+// media_kit 用 **libmpv**，它自带 FFmpeg，**不碰 Media Foundation**。
+// 所以理论上能解。但这个「理论上」必须**实测**，不能靠推理。
+//
+// # 四件必须验证的事
+//
+// ```text
+// ① HEVC 能播吗              → 看画面 + 读时长
+// ② 走的是硬解还是软解        → 读 mpv 的 hwdec-current 属性
+// ③ 视频能跟着页面滚动吗      → 这是 airspace 问题的关键！
+// ④ CPU 占用多少             → 硬解应远低于软解
+// ```
+//
+// ③ 是重点：我们之前三个内嵌方案全死在「原生画面跟不上滚动」。
+// media_kit 用 **Flutter 纹理**（不是原生子窗口），所以理论上没有
+// 这个问题 —— 但必须亲眼看到。
+import 'dart:io';
+
+import 'package:material_ui/material_ui.dart';
+import 'package:media_kit/media_kit.dart';
+import 'package:media_kit_video/media_kit_video.dart';
+
+void main() {
+  // ⚠️ 必须在 runApp 之前初始化 media_kit 的原生层
+  WidgetsFlutterBinding.ensureInitialized();
+  MediaKit.ensureInitialized();
+  runApp(const SpikeApp());
+}
+
+class SpikeApp extends StatelessWidget {
+  const SpikeApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'media_kit HEVC spike',
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData.dark(useMaterial3: true),
+      home: const SpikePage(),
+    );
+  }
+}
+
+class SpikePage extends StatefulWidget {
+  const SpikePage({super.key});
+
+  @override
+  State<SpikePage> createState() => _SpikePageState();
+}
+
+class _SpikePageState extends State<SpikePage> {
+  late final Player _player;
+  late final VideoController _controller;
+
+  final List<String> _log = [];
+  String _status = '未开始';
+  String _hwdec = '(未读)';
+  String _videoParams = '(未读)';
+  double _position = 0;
+  double _duration = 0;
+  bool _playing = false;
+
+  /// 页面滚动位置 —— 用来验证视频跟随
+  final ScrollController _scroll = ScrollController();
+  double _scrollOffset = 0;
+
+  /// 是否加长内容（制造可滚动空间）
+  bool _tall = true;
+
+  @override
+  void initState() {
+    super.initState();
+
+    /*
+     * ★★★ 显式开硬件解码（2026-09-22 Android 实测发现）
+     *
+     * # 症状
+     *
+     * Android 上不传任何参数时：
+     * ```text
+     * codec = hevc   1920x1080        ← 视频轨识别正常
+     * hwdec-current = "no"            ← ★ 硬件解码没开
+     * 错误: Could not open codec       ← 硬解器打不开
+     * ```
+     * 即 media_kit 默认**没有**要求 mpv 走硬件解码。
+     *
+     * # 各平台的硬解后端不同
+     *
+     * ```text
+     * Windows  → d3d11va（Direct3D 11 视频加速）
+     * Android  → mediacodec（Android 的编解码框架）
+     * macOS    → videotoolbox
+     * Linux    → vaapi / nvdec
+     * ```
+     * mpv 的 `--hwdec=auto-safe` 会自动挑，但在 Android 上
+     * media_kit 的默认 args 里**没有这一条**，所以要自己加。
+     *
+     * # `auto-safe` 而不是 `auto`
+     *
+     * ```text
+     * auto       → 所有硬解器都试，包括不稳定的
+     * auto-safe  → 只试**已知安全**的（推荐给普通用户）
+     * ```
+     * 官方文档推荐 `auto-safe`：`auto` 在某些驱动上会花屏。
+     */
+    _player = Player(
+      configuration: const PlayerConfiguration(
+        title: 'sourin-spike',
+        bufferSize: 32 * 1024 * 1024,
+        /*
+         * ⚠️ `libass: true` 是 ASS 字幕渲染的开关
+         *
+         * 真实影视片源大量使用 ASS 样式字幕（带特效/定位/字体）。
+         * mpv 内置 libass，但 media_kit 默认**不开**。
+         *
+         * ★ 这是「兼容最多」这条硬指标的关键 ——
+         *   WebView2 方案拿不到 ASS（要自己写渲染器），
+         *   libmpv 自带 libass 完整支持。
+         */
+        libass: true,
+        logLevel: MPVLogLevel.warn,
+      ),
+    );
+    _controller = VideoController(_player);
+
+    /*
+     * ★★★ 显式开硬件解码（2026-09-22 Android 实测发现）
+     *
+     * # 症状
+     *
+     * Android 上不设任何参数时：
+     * ```text
+     * codec = hevc   1920x1080        ← 视频轨识别正常
+     * hwdec-current = "no"            ← ★ 硬件解码没开
+     * 错误: Could not open codec       ← 硬解器打不开
+     * ```
+     * 即 media_kit **默认不要求硬解**。
+     *
+     * # 为什么不在 PlayerConfiguration 里设
+     *
+     * 我读过 `PlayerConfiguration` 的构造参数：**没有 hwdec 字段**。
+     * 只能等 mpv 起来之后用 `setProperty` 设。
+     *
+     * # 各平台硬解后端不同
+     *
+     * ```text
+     * Windows  → d3d11va（Direct3D 11 视频加速）
+     * Android  → mediacodec（Android 编解码框架）
+     * macOS    → videotoolbox
+     * Linux    → vaapi / nvdec
+     * ```
+     * `auto-safe` 让 mpv 自己挑 —— 比硬编码平台判断更稳
+     * （官方文档：`auto` 在某些驱动上会花屏，`auto-safe` 只试已知安全的）。
+     */
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      await _setHwdec();
+    });
+
+    _player.stream.position.listen((p) {
+      if (mounted) setState(() => _position = p.inMilliseconds / 1000.0);
+    });
+    _player.stream.duration.listen((d) {
+      if (mounted) setState(() => _duration = d.inMilliseconds / 1000.0);
+    });
+    _player.stream.playing.listen((p) {
+      if (mounted) setState(() => _playing = p);
+    });
+    _player.stream.error.listen((e) {
+      if (mounted) _add('❌ 错误: $e');
+    });
+
+    _scroll.addListener(() {
+      if (mounted) setState(() => _scrollOffset = _scroll.offset);
+    });
+
+    _add('media_kit 已初始化');
+    _add('平台: ${Platform.operatingSystem}');
+
+    /*
+     * ★ 自动起播（2026-09-21）
+     *
+     * 为什么要自动播而不是等人点按钮：
+     * ```text
+     * ① 点按钮要靠模拟鼠标坐标 —— 窗口位置/DPI 一变就点偏
+     * ② debugPrint 的输出会进 stdout，重定向后能**精确读到**
+     *    hwdec-current 的值，比截图判断可靠得多
+     * ```
+     * 所以设了 SPIKE_VIDEO 就自动播，让整条链路可脚本化。
+     *
+     * ⚠️ Android 上没有环境变量（2026-09-22 补）
+     *    `Platform.environment` 在 Android 上**拿不到** adb 设的变量。
+     *    所以加一个**编译期**常量 `SPIKE_PATH` 走 `--dart-define`。
+     *    桌面优先用环境变量（不用重编译就能换文件），移动端用 dart-define。
+     */
+    const dartDefinePath = String.fromEnvironment('SPIKE_PATH');
+    final auto = Platform.environment['SPIKE_VIDEO'] ?? dartDefinePath;
+    if (auto.isNotEmpty) {
+      Future.delayed(const Duration(seconds: 2), () {
+        /*
+         * ⚠️ 路径拼法按平台分（2026-09-22 踩到）
+         * ```text
+         * Windows : file:///D:/path/to/x.mp4      ← 反斜杠必须换正斜杠
+         * Android : file:///sdcard/Download/x.mp4
+         * ```
+         */
+        final p = auto.replaceAll(r'\', '/');
+        _play('file:///$p', label: '自动播本地 HEVC');
+      });
+    }
+  }
+
+  void _add(String s) {
+    final t = DateTime.now().toIso8601String().substring(11, 19);
+    if (!mounted) return;
+    setState(() => _log.insert(0, '[$t] $s'));
+    if (_log.length > 40) _log.removeLast();
+    debugPrint('[SPIKE] $s');
+  }
+
+  /// ★ 显式开硬件解码（见 initState 里的说明）
+  Future<void> _setHwdec() async {
+    final platform = _player.platform;
+    if (platform is! NativePlayer) {
+      _add('⚠ platform 不是 NativePlayer，跳过 hwdec 设置');
+      return;
+    }
+    try {
+      await platform.setProperty('hwdec', 'auto-safe');
+      _add('✓ 已设 hwdec=auto-safe');
+      /*
+       * 顺便读一次，确认它真的被 mpv 接受了。
+       * `hwdec` 是**请求值**，`hwdec-current` 是**生效值** ——
+       * 两者可能不同（请求了但没启用），所以要都看。
+       */
+      final req = await platform.getProperty('hwdec');
+      _add('  hwdec（请求）= "$req"');
+    } catch (e) {
+      _add('✗ 设 hwdec 失败: $e');
+    }
+  }
+
+  /// 播放一个本地或远程地址
+  Future<void> _play(String url, {String label = ''}) async {
+    _add('▶ 播放${label.isEmpty ? '' : "（$label）"}: '
+        '${url.length > 70 ? url.substring(0, 70) : url}…');
+    try {
+      await _player.open(Media(url), play: true);
+      if (mounted) setState(() => _status = '已发送 open');
+      // 等一会再读硬解状态（起播后才有值）
+      for (int i = 0; i < 12; i++) {
+        await Future.delayed(const Duration(milliseconds: 1000));
+        await _probe();
+        if (_duration > 0) break;
+      }
+    } catch (e) {
+      _add('❌ open 失败: $e');
+    }
+  }
+
+  /// ★ 读 mpv 的关键属性 —— 判断硬解是否生效
+  Future<void> _probe() async {
+    try {
+      final platform = _player.platform;
+      if (platform is! NativePlayer) {
+        _add('⚠ platform 不是 NativePlayer（是 ${platform.runtimeType}）');
+        return;
+      }
+
+      /*
+       * `hwdec-current` 是**实际生效**的解码方式。
+       * 注意区分：
+       * ```text
+       * hwdec           = 请求的方式（--hwdec=auto-safe）
+       * hwdec-current   = 真正生效的（我们要读这个）
+       * ```
+       * "no" 表示退回了软件解码。
+       */
+      final hw = (await platform.getProperty('hwdec-current')) ?? '(null)';
+      final vf = await platform.getProperty('video-format');
+      final vc = await platform.getProperty('video-codec');
+      final dw = await platform.getProperty('width');
+      final dh = await platform.getProperty('height');
+
+      if (!mounted) return;
+      setState(() {
+        _hwdec = hw;
+        _videoParams = 'codec=$vc  fmt=$vf  ${dw}x$dh';
+        _status = _duration > 0
+            ? '播放中 ${_fmt(_position)} / ${_fmt(_duration)}'
+            : '加载中…';
+      });
+      _add('hwdec-current = "$hw"   codec=$vc  $dw x $dh  pixfmt=$vf');
+    } catch (e) {
+      _add('读属性失败: $e');
+    }
+  }
+
+  String _fmt(double s) {
+    if (!s.isFinite || s <= 0) return '0:00';
+    final h = s ~/ 3600;
+    final m = (s % 3600) ~/ 60;
+    final sec = s % 60;
+    return h > 0
+        ? '$h:${m.toString().padLeft(2, '0')}:${sec.floor().toString().padLeft(2, '0')}'
+        : '${m.floor()}:${sec.floor().toString().padLeft(2, '0')}';
+  }
+
+  @override
+  void dispose() {
+    _player.dispose();
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isHw = _hwdec.contains('d3d11va') ||
+        _hwdec.contains('dxva2') ||
+        _hwdec.contains('nvdec') ||
+        _hwdec.contains('amf') ||
+        _hwdec.contains('mediacodec');
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('media_kit + HEVC 验收 spike'),
+        actions: [
+          Padding(
+            padding: const EdgeInsets.only(right: 12),
+            child: Center(
+              child: Text(
+                'hwdec: $_hwdec',
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  color: isHw ? Colors.greenAccent : Colors.orangeAccent,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+      body: Column(
+        children: [
+          // ── 顶部控制条 ──
+          Padding(
+            padding: const EdgeInsets.all(8),
+            child: Wrap(
+              spacing: 8,
+              runSpacing: 6,
+              children: [
+                FilledButton.icon(
+                  onPressed: () {
+                    final f = Platform.environment['SPIKE_VIDEO'];
+                    if (f == null || f.isEmpty) {
+                      _add('⚠ 未设置 SPIKE_VIDEO 环境变量');
+                      return;
+                    }
+                    _play('file:///$f', label: '本地 HEVC');
+                  },
+                  icon: const Icon(Icons.folder_open, size: 18),
+                  label: const Text('播本地 HEVC'),
+                ),
+                OutlinedButton(
+                  onPressed: () => _play(
+                    'https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/720/Big_Buck_Bunny_720_10s_1MB.mp4',
+                    label: 'H.264 对照',
+                  ),
+                  child: const Text('播 H.264 对照'),
+                ),
+                OutlinedButton(
+                  onPressed: _probe,
+                  child: const Text('重读属性'),
+                ),
+                OutlinedButton(
+                  onPressed: () => setState(() => _tall = !_tall),
+                  child: Text(_tall ? '缩短内容' : '加长内容'),
+                ),
+              ],
+            ),
+          ),
+
+          // ── ★ 滚动容器：视频在里面（验证跟随）──
+          Expanded(
+            child: Container(
+              margin: const EdgeInsets.symmetric(horizontal: 8),
+              decoration: BoxDecoration(
+                border: Border.all(color: Colors.white24),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: SingleChildScrollView(
+                clipBehavior: Clip.antiAlias,
+                controller: _scroll,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Container(
+                      height: 100,
+                      alignment: Alignment.center,
+                      child: const Text('↓ 上面这段是为了能滚动（往下滑看视频跟随）'),
+                    ),
+
+                    /*
+                     * ★★★ 关键：Video 是一个**真正的 Flutter widget**
+                     *
+                     * 它内部把 libmpv 的画面渲染成 **Texture**，参与
+                     * Flutter 的场景图合成。所以它会跟着滚动 ——
+                     * 不像原生子窗口那样「钉」在屏幕上。
+                     *
+                     * 这正是我们之前三个方案（子窗口 / 顶层浮窗 /
+                     * tauri-plugin-mpv）全都失败的地方。
+                     */
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      child: AspectRatio(
+                        aspectRatio: 16 / 9,
+                        child: Video(
+                          controller: _controller,
+                          controls: NoVideoControls,
+                        ),
+                      ),
+                    ),
+
+                    // 控制条（普通 Flutter 控件，永远在视频之上）
+                    Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: Row(
+                        children: [
+                          IconButton(
+                            onPressed: () => _player.playOrPause(),
+                            icon: Icon(
+                                _playing ? Icons.pause : Icons.play_arrow),
+                          ),
+                          Expanded(
+                            child: Slider(
+                              value: _duration > 0
+                                  ? _position.clamp(0, _duration).toDouble()
+                                  : 0,
+                              max: _duration > 0 ? _duration : 1,
+                              onChanged: (v) {
+                                setState(() => _position = v);
+                              },
+                              onChangeEnd: (v) {
+                                _player.seek(
+                                    Duration(milliseconds: (v * 1000).toInt()));
+                              },
+                            ),
+                          ),
+                          Text('${_fmt(_position)} / '
+                              '${_duration > 0 ? _fmt(_duration) : "--:--"}'),
+                        ],
+                      ),
+                    ),
+
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 12),
+                      child: Text(
+                        '滚动位置: ${_scrollOffset.toStringAsFixed(0)}px'
+                        '　── 滚动时视频应该跟着走（airspace 问题的关键验证）',
+                        style: const TextStyle(
+                            fontSize: 12, color: Colors.white70),
+                      ),
+                    ),
+
+                    Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: Text(
+                        'video-params: $_videoParams',
+                        style: const TextStyle(
+                            fontSize: 12, color: Colors.cyanAccent),
+                      ),
+                    ),
+
+                    if (_tall) ...[
+                      const SizedBox(height: 12),
+                      for (int i = 1; i <= 30; i++)
+                        Padding(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 12, vertical: 4),
+                          child: Text('额外的长内容第 $i 行 —— 用来制造滚动。'),
+                        ),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+          ),
+
+          // ── 日志 ──
+          Container(
+            height: 150,
+            margin: const EdgeInsets.all(8),
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: Colors.black45,
+              borderRadius: BorderRadius.circular(6),
+            ),
+            child: ListView.builder(
+              clipBehavior: Clip.antiAlias,
+              itemCount: _log.length,
+              itemBuilder: (_, i) => Text(
+                _log[i],
+                style: const TextStyle(
+                  fontFamily: 'monospace',
+                  fontSize: 11,
+                  color: Colors.greenAccent,
+                ),
+              ),
+            ),
+          ),
+
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Text(_status, style: const TextStyle(fontSize: 12)),
+          ),
+        ],
+      ),
+    );
+  }
+}

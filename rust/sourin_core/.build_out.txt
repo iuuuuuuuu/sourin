@@ -1,0 +1,46 @@
+﻿cargo :    Compiling sourin_core v0.1.0 (D:\WishProject\sourin-flutter-spike\rust\sourin_core)
+At line:2 char:1
++ cargo build --release --lib 2>&1 | Out-File -Encoding utf8 .build_out ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling so...st\sourin_core):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+warning: use of deprecated macro `async_with`
+    --> src\plugins\mod.rs:1124:19
+     |
+1124 |         let out = async_with!(ctx => |ctx| {
+     |                   ^^^^^^^^^^
+     |
+     = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated macro `rquickjs::async_with`
+  --> src\plugins\mod.rs:35:16
+   |
+35 | use rquickjs::{async_with, AsyncContext, AsyncRuntime, Function, Object, Promise};
+   |                ^^^^^^^^^^
+
+warning: variable does not need to be mutable
+   --> src\providers\cctv.rs:791:13
+    |
+791 |         let mut consume = |list: &[Value],
+    |             ----^^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `first_len`
+    --> src\streamproxy.rs:1268:9
+     |
+1268 |     let first_len = first_window.len() as u64;
+     |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_first_len`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: linker stdout: 正在创建库 D:\WishProject\sourin-flutter-spike\rust\sourin_core\target\release\deps\sourin_core.dll.
+lib 和对象 D:\WishProject\sourin-flutter-spike\rust\sourin_core\target\release\deps\sourin_core.dll.exp
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `sourin_core` (lib) generated 5 warnings (run `cargo fix --lib -p sourin_core` to apply 2 suggestions)
+    Finished `release` profile [optimized] target(s) in 2m 13s

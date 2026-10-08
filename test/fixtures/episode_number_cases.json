@@ -1,0 +1,245 @@
+{
+  "about": [
+    "集号解析的跨语言契约夹具（task-67 阶段2，Lead 裁决 ⑥）。",
+    "",
+    "同一份文件被两侧读取，谁也不写：",
+    "  Dart 侧  test/t67_episode_fixture_test.dart",
+    "  Rust 侧  rust/sourin_core/src/store.rs 的 mod tests（episode_number_fixture_matches_dart）",
+    "",
+    "为什么是静态夹具，而不是「Dart 测试把结果落盘成夹具」：",
+    "  生成式夹具会自愈 —— Dart 解析器一旦漂移，测试就把漂移后的结果写进夹具，",
+    "  于是 Dart 侧永远绿，只剩 Rust 侧变红，而且夹具本身再也说不清「原本约定了什么」。",
+    "  静态夹具让两份实现都被同一个第三方钉住：任一侧漂移都会变红。",
+    "",
+    "expected = 集号（整数），或 null = 解析不出。",
+    "标 ★ 的条目是契约/边界用例，不是功能用例 —— 改动它们等于改契约，请先读 note。"
+  ],
+  "cases": [
+    {
+      "input": "第01集",
+      "expected": 1,
+      "note": "生产数据：cycani:3862（无职转生 第三季，进度 91s）"
+    },
+    {
+      "input": "第1集",
+      "expected": 1,
+      "note": "生产数据：hongniuzy2:150722（同一部无职转生，另一个源，进度 766s）★ 与上一条必须相等：两条规则（取 FROM=91 / 取 max=766）只有在集号相同的前提下才谈得上合并，否则按裁决 ⑦ 第二条应当不携带"
+    },
+    {
+      "input": "第 1 集",
+      "expected": 1,
+      "note": "集号两侧带空格的常见变体（正则里是 第 + \\s* + 数字 + \\s* + 集）"
+    },
+    {
+      "input": "第01話",
+      "expected": 1,
+      "note": "繁体「話」也在字符类里"
+    },
+    {
+      "input": "第１集",
+      "expected": 1,
+      "note": "全角数字 U+FF11 ⇒ 先归一化再匹配"
+    },
+    {
+      "input": "第1话",
+      "expected": 1,
+      "note": "简体「话」"
+    },
+    {
+      "input": "正片",
+      "expected": null,
+      "note": "无集号（生产数据里真实存在）"
+    },
+    {
+      "input": null,
+      "expected": null,
+      "note": "null 输入（生产数据里 progress.episode_title 有 6 行为 NULL）"
+    },
+    {
+      "input": "",
+      "expected": null,
+      "note": "空串（实现里有显式 isEmpty 短路）"
+    },
+    {
+      "input": "BV1B8ZJYTEPg|29165686089",
+      "expected": null,
+      "note": "B 站复合 id，不是集号"
+    },
+    {
+      "input": "第1集 遗忘的过去",
+      "expected": 1,
+      "note": "生产数据：bilibili:ss:105212（集号后面还有标题正文）"
+    },
+    {
+      "input": "第08集",
+      "expected": 8,
+      "note": "生产数据：caiji-2:83810（时光代理人第三季）；同作品另一源 cj:99018 是 第01集 ⇒ 8 != 1 ⇒ 按裁决 ⑦ 第二条不携带进度"
+    },
+    {
+      "input": "第14集",
+      "expected": 14,
+      "note": "生产数据：favorites.last_episode_title（cycani:3862 无职转生）"
+    },
+    {
+      "input": "P1 第三集",
+      "expected": null,
+      "note": "★ 中文数字「三」不是 [0-9] ⇒ 解析不出。生产数据：bilibili:av:BV1RFaY6PEEZ"
+    },
+    {
+      "input": "第一集",
+      "expected": null,
+      "note": "中文数字不受支持 —— 保守：宁可不认，也不猜错（猜错会把进度搬到错误的集上）"
+    },
+    {
+      "input": "现代修仙，没钱纯靠自律【自律狠人】【第一季超长电影版】",
+      "expected": null,
+      "note": "★ 含「第一季」但不匹配：中文数字 + 「季」不在字符类。生产数据：bilibili:av:BV1B8ZJYTEPg"
+    },
+    {
+      "input": "第1回",
+      "expected": null,
+      "note": "★ 与 lib/ui/player_page.dart:3420 _epOrder 的分歧点：那份实现认「回」，本契约不认。故意取保守侧 —— 解析不出时两侧只会「不携带」，不会搬错进度"
+    },
+    {
+      "input": "第0集",
+      "expected": null,
+      "note": "★ n <= 0 守卫（第 0 集不是有效集号）"
+    },
+    {
+      "input": "第4294967296集",
+      "expected": 4294967296,
+      "note": "★ 整数位宽契约（2^32）：Dart 的 int 是 64 位，能解析；Rust 若用 u32 会得到 null ⇒ 分歧。Rust 侧必须用 i64"
+    },
+    {
+      "input": "第12345678901234567890集",
+      "expected": null,
+      "note": "★ 整数位宽契约：20 位超出 i64 上限 ⇒ Dart int.tryParse 返回 null；Rust 用 u64/u128 会解析成功 ⇒ 分歧"
+    },
+    {
+      "input": "  第1集  ",
+      "expected": 1,
+      "note": "正则不锚定，前后空白不影响"
+    },
+    {
+      "input": "2026 热 梗 年 度 总 结 ！！！【上】",
+      "expected": null,
+      "note": "生产数据噪声：bilibili:av:BV1ZQau63EUf"
+    },
+    {
+      "input": "《柯洁围棋入门课》",
+      "expected": null,
+      "note": "生产数据噪声：bilibili:av:BV1YDhJ6ZEL6"
+    },
+    {
+      "input": "原声版",
+      "expected": null,
+      "note": "生产数据噪声：154:59466"
+    },
+    {
+      "input": "我记录下了妹妹的最后7天...【自制伪纪录片电影】",
+      "expected": null,
+      "note": "生产数据噪声：bilibili:av:BV1Deht6rEpZ"
+    },
+    {
+      "input": "“至此，已成神品！！！”",
+      "expected": null,
+      "note": "生产数据噪声：bilibili:av:BV1o2eM6kEDT"
+    },
+
+    {
+      "input": "第\u00851集",
+      "expected": null,
+      "note": "★ 字符类契约（空白）：U+0085 NEL。Dart 的 \\s 是 ECMAScript 语义，**不**认 NEL；Rust regex 默认 Unicode，\\s = \\p{White_Space} **认** NEL ⇒ Rust 侧必须写成显式 ASCII 空白类，否则这里会得 1 而分歧"
+    },
+    {
+      "input": "第\ufeff1集",
+      "expected": 1,
+      "note": "★ 字符类契约（空白）：U+FEFF BOM/ZWNBSP。Dart 的 \\s **认** BOM；Rust \\s **不认** ⇒ 反向分歧。Rust 侧显式空白类里必须含 \\u{FEFF}"
+    },
+    {
+      "input": "第\u30001集",
+      "expected": 1,
+      "note": "★ 字符类契约（空白）：U+3000 表意空格 —— 两侧都认"
+    },
+    {
+      "input": "第\u00a01集",
+      "expected": 1,
+      "note": "★ 字符类契约（空白）：U+00A0 NBSP —— 两侧都认"
+    },
+    {
+      "input": "第\u20281集",
+      "expected": 1,
+      "note": "★ 字符类契约（空白）：U+2028 行分隔符 —— 两侧都认"
+    },
+    {
+      "input": "第1\u200b集",
+      "expected": null,
+      "note": "★ 字符类契约（空白）：U+200B 零宽空格 —— 两侧都**不**认（不是 White_Space）"
+    },
+    {
+      "input": "第\u0663集",
+      "expected": null,
+      "note": "★ 字符类契约（数字）：U+0663 阿拉伯-印度数字「三」。Dart 的 \\d 是 [0-9] 不认；Rust \\d = \\p{Nd} **认** ⇒ Rust 侧必须写成 [0-9]"
+    },
+    {
+      "input": "第\u06f3集",
+      "expected": null,
+      "note": "★ 字符类契约（数字）：U+06F3 波斯数字「三」—— 同上"
+    },
+    {
+      "input": "第\u0969集",
+      "expected": null,
+      "note": "★ 字符类契约（数字）：U+0969 天城文数字「三」—— 同上"
+    },
+    {
+      "input": "第9223372036854775807集",
+      "expected": 9223372036854775807,
+      "note": "★ 位宽契约：i64::MAX，两侧都必须解析成功"
+    },
+    {
+      "input": "第9223372036854775808集",
+      "expected": null,
+      "note": "★ 位宽契约：i64::MAX + 1 ⇒ Dart int.tryParse 溢出返回 null；Rust 用 i64 同样失败，用 u64/i128 会成功 ⇒ 分歧"
+    },
+    {
+      "input": "第000集",
+      "expected": null,
+      "note": "★ n <= 0 守卫（前导零形态）"
+    },
+    {
+      "input": "第0001集",
+      "expected": 1,
+      "note": "前导零不影响数值"
+    },
+    {
+      "input": "第1集第2集",
+      "expected": 1,
+      "note": "★ firstMatch 语义：取**第一个**匹配，不是最后一个"
+    },
+    {
+      "input": "第-1集",
+      "expected": null,
+      "note": "负号不在 [0-9] 里 ⇒ 匹配不到（不是「解析成 -1」）"
+    },
+    {
+      "input": "第+1集",
+      "expected": null,
+      "note": "正号同上"
+    },
+    {
+      "input": "第 集",
+      "expected": null,
+      "note": "有空白但无数字 ⇒ (\\d+) 至少一位，匹配失败"
+    },
+    {
+      "input": "第1",
+      "expected": null,
+      "note": "有数字但缺单位字（集/话/話）⇒ 匹配失败"
+    },
+    {
+      "input": "第１話",
+      "expected": 1,
+      "note": "全角数字 + 繁体单位字，两条规则同时生效"
+    }
+  ]
+}

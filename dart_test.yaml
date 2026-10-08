@@ -1,0 +1,69 @@
+# ═══════════════════════════════════════════════════════════════════════
+#  dart_test.yaml —— 测试标签配置
+# ═══════════════════════════════════════════════════════════════════════
+#
+# ★★★ 为什么有 `native-media` 这个标签（2026-09-25，task-31 实测）
+#
+# # 现象
+# `flutter test test/` 默认并发跑，**时绿时红**（6 次跑出 6 种结果）。
+# 失败形态是"整文件用例一起 `did not complete`"（不是单用例失败）。
+#
+# # 根因（已用干净交错 A/B 证明，完整证据见 `.probe/native-media-tests.md`）
+# ```text
+# MediaKit.ensureInitialized() 加载 libmpv-2.dll 时，
+# **flutter_tester.exe 进程 native 崩溃**（访问违例 c0000005）
+#
+# 证据链：
+#   ① 失败时 flutter test 退出码 = 79（不是 1）—— 进程异常终止
+#   ② Windows 事件日志：APPCRASH / flutter_tester.exe / P6=c0000005
+#   ③ WER LoadedModule（42 个）里唯一的非系统库 = libmpv-2.dll
+#   ④ 干净交错 A/B：不加载 libmpv 崩 0/25；加载则崩 6/25
+#   ⑤ 只加 MediaKit（不挂 PlayerPage、不碰 RemoteBridge）崩 3/15
+#      ⇒ 与用例内容无关
+#   ⑥ 读 flutter_tools 源码解释了"为什么没有错误信息"：
+#      flutter_tester_device.dart 的 finished getter 在 Windows 上直接 return
+#      ⇒ 崩溃信息被主动丢弃 ⇒ 上层只看到 `did not complete`
+# ```
+#
+# # ★★ 为什么用 `skip:` 而不是 `exclude_tags:`（实测三选一）
+# ```text
+# A. tags: {native-media: {skip: "..."}} + `--run-skipped`
+#      默认               → `All tests skipped.`     exit=0  ✓
+#      显式 --run-skipped → `+5 All tests passed!`   exit=0  ✓
+#   ⇒ ★ 两条路径都对，采用
+#
+# B. exclude_tags: native-media + `--tags native-media`
+#      默认         → `No tests match...`  exit=79  ✗
+#      显式 --tags   → `No tests match...`  exit=79  ✗
+#   ⇒ 排除发生在选择之前 ⇒ 排除了就**无法**用 --tags 放行
+#
+# C. exclude_tags: 'native-media && !run-native' + `--tags run-native`
+#      三条路径全部 `No tests match` + exit=79  ✗
+#   ⇒ 该文件只带 native-media、不带 run-native ⇒ 选择器永远为假
+# ```
+#
+# # 用法
+# ```powershell
+# # 默认：不跑 native-media（CI 稳定全绿）
+# flutter test test/
+#
+# # ★ 显式跑（改播放器 / media_kit 相关代码时**应该**跑）
+# flutter test test/ --run-skipped --tags native-media --concurrency=1
+#
+# # 只看被排除的清单
+# flutter test test/ --run-skipped --tags native-media --reporter=expanded
+# ```
+#
+# ⚠️ `--concurrency=1` **不能**避免崩溃（实测：串行 8 次里红 5 次；
+#    单文件串行也红 1/5）。它只是让输出更易读。
+#
+# ⚠️ 崩溃**仍然存在** —— 本配置只是不让它污染默认测试。
+#    根因在第三方 libmpv-2.dll，我们改不了它的源码。
+tags:
+  # ★ 依赖真实 media_kit（libmpv 原生库）的测试
+  #
+  # 这些文件调用 `MediaKit.ensureInitialized()`，会在 flutter_tester 里
+  # 偶发 native 崩溃。默认跳过，需要时用
+  # `--run-skipped --tags native-media` 跑。
+  native-media:
+    skip: "默认跳过：加载 libmpv 会让 flutter_tester 偶发 native 崩溃（见 dart_test.yaml 顶部）。手动跑：flutter test test/ --run-skipped --tags native-media --concurrency=1"
