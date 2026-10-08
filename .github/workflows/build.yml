@@ -2,24 +2,36 @@
 #  源影 · Flutter —— GitHub 构建
 # ═══════════════════════════════════════════════════════════════════════
 #
-# # 为什么 Windows 和 Android 分成两个 job
+# # 三个 job 的分工
 # ```text
-# Windows  编 Rust 核心 → flutter test → flutter build windows（约 10 分钟）
-# Android  额外要 NDK + 三个 target 交叉编译（约 25 分钟），而且**默认关闭**
+# Windows   编 Rust 核心 → analyze → 全量测试 → 打包（约 12 分钟）
+# macOS     编 Rust 核心 → analyze → 打包 .app + .dmg（约 15 分钟）
+# Android   额外要 NDK + 交叉编译三个 ABI（约 30 分钟），**默认关闭**
 # ```
-# ★ 每次 push 都跑 Android 会让 CI 变得很慢，而 Windows 已经覆盖了
-#   Dart 与 Rust 两侧的全部测试 —— 所以 Android 只在手动触发时跑。
+# ★ Android 默认关掉的原因：它最慢，而 Windows 那个 job 已经覆盖了
+#   Dart 与 Rust 两侧的全部测试。要跑就手动触发并勾上 build_android。
+#
+# # Android TV
+# ```text
+# Android TV **不需要单独的构建** —— 同一个 APK 就是手机版也是 TV 版：
+#   AndroidManifest 里同时声明了 LAUNCHER 与 LEANBACK_LAUNCHER，
+#   还声明了 uses-feature leanback / touchscreen(required=false)。
+#   ⇒ 手机装上出现在桌面，电视装上出现在 TV 主界面，同一个文件。
+# 运行时靠 `sourin/device` 平台通道读系统 feature 判定设备类型
+# （MainActivity.kt 的 leanback / touchscreen），UI 自动切 TV 形态。
+# 详见 README 的「Android TV」一节。
+# ```
 
 name: 构建
 
 on:
   push:
-    branches: [main, master]
+    branches: [main]
   pull_request:
   workflow_dispatch:
     inputs:
       build_android:
-        description: '同时构建 Android（需要 NDK，较慢）'
+        description: 同时构建 Android（需要 NDK，较慢）
         type: boolean
         default: false
 
@@ -29,14 +41,13 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # ★ 这两个版本是**硬要求**，见 README「从源码构建 → 前置依赖」
-  FLUTTER_VERSION: '3.47.5'
-  #   Flutter 3.47 把 Material 拆成了独立的 material_ui 包，
-  #   低于这个版本 pubspec 解析不过。
+  # ★ 硬要求：Flutter 3.47 把 Material 拆成了独立的 material_ui 包，
+  #   低于这个版本 pubspec 解析不过。详见 README「从源码构建 → 前置依赖」。
+  FLUTTER_VERSION: "3.47.5"
 
 jobs:
   # ═════════════════════════════════════════════════════════════════════
-  #  Windows：Rust 核心 + 分析 + 全量测试 + 打包
+  #  Windows
   # ═════════════════════════════════════════════════════════════════════
   windows:
     name: Windows
@@ -74,12 +85,12 @@ jobs:
       - name: 把核心放进 Windows 构建目录
         shell: pwsh
         run: |
-          Copy-Item rust\sourin_core\target\release\sourin_core.dll windows\ -Force
-          # ★ 核验：CMake 的拷贝按时间戳，这里显式确认产物真的在
-          if (-not (Test-Path windows\sourin_core.dll)) {
-            throw "sourin_core.dll 没有被拷进 windows\"
+          Copy-Item rust/sourin_core/target/release/sourin_core.dll windows/ -Force
+          # ★ 核验：CMake 的拷贝按时间戳判断，这里显式确认产物真的在
+          if (-not (Test-Path windows/sourin_core.dll)) {
+            throw "sourin_core.dll 没有被拷进 windows/"
           }
-          "核心大小 = " + (Get-Item windows\sourin_core.dll).Length
+          "核心大小 = " + (Get-Item windows/sourin_core.dll).Length
 
       # ── ② Dart 侧静态检查与测试 ────────────────────────────────────
       - name: 装依赖
@@ -90,10 +101,10 @@ jobs:
         run: |
           $out = flutter analyze --no-pub 2>&1 | Out-String
           Write-Output $out
-          # ★ 只卡 error —— 本仓有约 200 条既有 warning/info
-          #   （探针文件里的 invalid_use_of_protected_member 等），
-          #   卡 warning 会让 CI 永远红，失去意义。
-          if ($out -match '\berror\b.*-') {
+          # ★ 只卡 error —— 本仓有约 230 条既有 warning/info（探针文件里的
+          #   invalid_use_of_protected_member 之类）。卡 warning 会让 CI
+          #   永远红，那这条门禁就失去意义了。
+          if ($out -match "(?m)^\s*error\s+-") {
             throw "flutter analyze 报出 error"
           }
 
@@ -102,20 +113,21 @@ jobs:
 
       # ── ③ 打包 ─────────────────────────────────────────────────────
       - name: 构建 Windows 发布版
-        # ★ -t 不能漏：入口是 shell.dart，main.dart 是早期的 HEVC 验收 spike
+        # ★ -t 不能漏：入口是 shell.dart。lib/main.dart 是早期的 HEVC
+        #   验收 spike（见那个文件头），编错了不会报错，只是行为完全不同。
         run: flutter build windows --release --no-pub -t lib/shell.dart
 
       - name: 核验产物
         shell: pwsh
         run: |
-          $rel = 'build\windows\x64\runner\Release'
-          $exe = Join-Path $rel 'sourin_spike.exe'
-          $dll = Join-Path $rel 'sourin_core.dll'
+          $rel = "build/windows/x64/runner/Release"
+          $exe = Join-Path $rel "sourin_spike.exe"
+          $dll = Join-Path $rel "sourin_core.dll"
           if (-not (Test-Path $exe)) { throw "缺少 $exe" }
           if (-not (Test-Path $dll)) { throw "缺少 $dll" }
-          # ★ app.so 必须够大 —— 这是「编的确实是产品入口」的判据：
+          # ★ app.so 的大小是「编的确实是产品入口」的判据：
           #   shell 入口约 10.7 MB；spike 入口只有约 1 MB。
-          $app = Join-Path $rel 'data\app.so'
+          $app = Join-Path $rel "data/app.so"
           $n = (Get-Item $app).Length
           "app.so = $n 字节"
           if ($n -lt 5000000) {
@@ -130,7 +142,86 @@ jobs:
           retention-days: 14
 
   # ═════════════════════════════════════════════════════════════════════
-  #  Android：默认关闭，手动触发时跑
+  #  macOS
+  # ═════════════════════════════════════════════════════════════════════
+  macos:
+    name: macOS
+    runs-on: macos-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 装 Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: 装 Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 缓存 Rust 构建产物
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/sourin_core
+
+      - name: 编 Rust 核心
+        working-directory: rust/sourin_core
+        run: cargo build --release
+
+      - name: 装依赖
+        run: flutter pub get
+
+      - name: 静态分析（0 error 才继续）
+        shell: bash
+        run: |
+          set +e
+          out=$(flutter analyze --no-pub 2>&1)
+          echo "$out"
+          if echo "$out" | grep -Eq "^[[:space:]]*error[[:space:]]+-"; then
+            echo "::error::flutter analyze 报出 error"
+            exit 1
+          fi
+
+      - name: 全量测试
+        run: flutter test
+
+      - name: 构建 macOS 发布版
+        run: flutter build macos --release --no-pub -t lib/shell.dart
+
+      - name: 核验产物
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="build/macos/Build/Products/Release/源影.app"
+          if [ ! -d "$APP" ]; then
+            echo "找不到 .app，实际产物："; ls -la build/macos/Build/Products/Release/ || true
+            exit 1
+          fi
+          # ★ 权限声明必须真的进了产物 —— 少了 network.client 的话
+          #   应用能启动但所有请求都失败（最难查的那类）。
+          codesign -d --entitlements - "$APP" 2>&1 | tee /tmp/ent.txt
+          for k in network.client network.server; do
+            if ! grep -q "$k" /tmp/ent.txt; then
+              echo "::error::$APP 缺少 $k 权限 —— 播放会失败"; exit 1
+            fi
+          done
+          echo "产物大小："; du -sh "$APP"
+
+      - name: 上传 macOS 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: sourin-macos-${{ github.sha }}
+          # ★ 只传 .app —— 它是自包含的（dylib 都在 Frameworks/ 里），
+          #   解压即用。做 .dmg 需要额外装 create-dmg，收益不大。
+          path: build/macos/Build/Products/Release/*.app
+          retention-days: 14
+
+  # ═════════════════════════════════════════════════════════════════════
+  #  Android（手机 + TV 同一个 APK）—— 默认关闭
   # ═════════════════════════════════════════════════════════════════════
   android:
     name: Android
@@ -163,7 +254,7 @@ jobs:
         uses: nttld/setup-ndk@v1
         id: ndk
         with:
-          # ★ 版本必须与 rust/sourin_core/.cargo/config.toml 里的路径一致
+          # ★ 版本必须与 rust/sourin_core/.cargo/config.toml.example 里的一致
           ndk-version: r27
           link-to-sdk: true
 
@@ -172,9 +263,11 @@ jobs:
         working-directory: rust/sourin_core
         run: |
           set -euo pipefail
-          # ★ .cargo/config.toml 里写死的是 Windows 路径，Linux CI 上要用环境变量覆盖
-          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang"
-          export CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi24-clang"
+          # ★ 仓库里的 .cargo/config.toml.example 写的是 Windows 路径，
+          #   Linux CI 上用环境变量覆盖（Cargo 读 CARGO_TARGET_<三斜线大写>_LINKER）。
+          NDKBIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$NDKBIN/aarch64-linux-android24-clang"
+          export CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER="$NDKBIN/armv7a-linux-androideabi24-clang"
           export CC_aarch64_linux_android="$CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER"
           export CC_armv7_linux_androideabi="$CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER"
           cargo build --release --target aarch64-linux-android
@@ -190,17 +283,36 @@ jobs:
              android/app/src/main/jniLibs/arm64-v8a/
           cp rust/sourin_core/target/armv7-linux-androideabi/release/libsourin_core.so \
              android/app/src/main/jniLibs/armeabi-v7a/
-          ls -la android/app/src/main/jniLibs/arm64-v8a/
-          ls -la android/app/src/main/jniLibs/armeabi-v7a/
+          # ★ 核验导出符号：改完 ffi.rs 没重编那个 ABI 的话，
+          #   符号数会少 —— 表现为「所有命令都超时」，最难查的那类。
+          for abi in arm64-v8a armeabi-v7a; do
+            n=$(strings android/app/src/main/jniLibs/$abi/libsourin_core.so | grep -c "^sourin_")
+            echo "$abi 导出符号数 = $n"
+            if [ "$n" -lt 7 ]; then
+              echo "::error::$abi 的 .so 只有 $n 个 sourin_ 符号（应为 7 个）—— 核心没重编"; exit 1
+            fi
+          done
 
       - name: 装依赖
         run: flutter pub get
 
-      - name: 构建 APK（arm64）
+      - name: 构建 APK（arm64 — 现代手机与电视盒子）
         run: flutter build apk --release --no-pub --target-platform android-arm64 -t lib/shell.dart
 
-      - name: 构建 APK（armv7）
+      - name: 构建 APK（armv7 — 老设备 / 32 位电视盒子）
         run: flutter build apk --release --no-pub --target-platform android-armv7 -t lib/shell.dart
+
+      - name: 核验 APK 声明了 Android TV 启动器
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK="$ANDROID_SDK_ROOT/build-tools/$(ls "$ANDROID_SDK_ROOT/build-tools" | sort -V | tail -1)"
+          APK=$(ls build/app/outputs/flutter-apk/app-release.apk)
+          "$SDK/aapt" dump badging "$APK" > /tmp/badging.txt || true
+          grep -E "leanback|launchable-activity" /tmp/badging.txt || true
+          if ! grep -q "LEANBACK_LAUNCHER" /tmp/badging.txt; then
+            echo "::warning::badging 里没看到 LEANBACK_LAUNCHER —— TV 上可能找不到应用（请人工确认）"
+          fi
 
       - name: 上传 APK
         uses: actions/upload-artifact@v4

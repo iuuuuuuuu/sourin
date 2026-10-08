@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  ═══════════════════════════════════════════════════════════════════
+	   ★ macOS 权限声明 —— **Release 也要开这些**，不是只有 Debug
+	  ═══════════════════════════════════════════════════════════════════
+
+	  # 为什么必须显式声明（macOS 与 Windows/Linux 最大的差别）
+	  ```text
+	  macOS 默认把应用关进 **App Sandbox**，没有声明就没有权限：
+	    没有 network.client      → 所有 HTTP 请求直接失败（点播 / 直播全打不开）
+	    没有 network.server      → 核心层的本地流代理起不来（端口绑不上）
+	    没有 files.user-selected → 选外挂字幕 / 导入备份都读不到文件
+	  ```
+	  ★ 这套是**交付实测**逼出来的：只写 network.server 的话，
+	    应用能启动、界面正常，但一播放就报「无法连接」—— 因为
+	    出站请求（拉 m3u8）被沙箱拦了，而入站（本地代理监听）是通的。
+
+	  ⚠️ 两个文件必须**同步**：DebugProfile 供 `flutter run`，
+	    Release 供 `flutter build macos` 的 release 模式。只改一个的话，
+	    会出现「开发时好的、打包后坏的」—— 最难查的那类。
+	    （★ XML 注释里不能出现连续两个减号，所以上面写的是「的 release 模式」）
+	-->
+
+	<!-- 沙箱本身：保持开启（Apple 审核要求，且更安全） -->
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+
+	<!-- Flutter 引擎需要 JIT（Dart VM） -->
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+
+	<!-- ★ 出站网络：拉流、插件 HTTP、WebDAV 同步、弹幕 -->
+	<key>com.apple.security.network.client</key>
+	<true/>
+
+	<!-- ★ 入站网络：核心层的本地流代理要监听 127.0.0.1 -->
+	<key>com.apple.security.network.server</key>
+	<true/>
+
+	<!-- ★ 用户选中的文件：外挂字幕、导入备份、导出日志 -->
+	<key>com.apple.security.files.user-selected.read-write</key>
+	<true/>
+
+	<!-- ★ 下载目录：整片下载默认落在「视频 / 源影」 -->
+	<key>com.apple.security.assets.movies.read-write</key>
+	<true/>
+</dict>
+</plist>

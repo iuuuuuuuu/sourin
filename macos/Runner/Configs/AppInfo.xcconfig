@@ -1,0 +1,21 @@
+// Application-level settings for the Runner target.
+//
+// This may be replaced with something auto-generated from metadata (e.g., pubspec.yaml) in the
+// future. If not, the values below would default to using the project name when this becomes a
+// 'flutter create' template.
+
+// The application's name. By default this is also the title of the Flutter window.
+//
+// ⚠️ 必须是 ASCII 的 `sourin_spike` —— **不能**改成「源影」。
+//    `Runner.xcodeproj/project.pbxproj` 里有 3 处硬引用了 `sourin_spike.app`
+//    （PBXFileReference / productReference / TEST_HOST），而 pbxproj 对非 ASCII
+//    路径的处理在各版本 Xcode 上不一致 ⇒ 改成中文会让产物名与引用名对不上。
+//    ★ 用户看到的窗口标题由 `lib/shell.dart` 的 `WindowOptions(title: '源影')` 决定，
+//      与这里无关（这里只管 .app 的文件名）。
+PRODUCT_NAME = sourin_spike
+
+// The application's bundle identifier
+PRODUCT_BUNDLE_IDENTIFIER = app.sourin.player
+
+// The copyright displayed in application information
+PRODUCT_COPYRIGHT = Copyright (c) 2026 源影 contributors. MIT License.

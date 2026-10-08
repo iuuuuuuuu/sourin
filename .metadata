@@ -4,7 +4,7 @@
 # This file should be version controlled and should not be manually edited.
 
 version:
-  revision: "dec2ee5c1f98f8e84a7d5380c05eb8a3d0a81668"
+  revision: "6a19cca56475dbfba1478ee68d7bd0c2ef891da1"
   channel: "stable"
 
 project_type: app
@@ -12,15 +12,25 @@ project_type: app
 # Tracks metadata for the flutter migrate command
 migration:
   platforms:
+    # ★ 这里只列「本仓真的有的平台」。
+#
+    # 2026-10-08 重跑 `flutter create --platforms=macos` 时，工具把 android/ 与
+    # windows/ 的条目**删掉了**（它按「本次生成过哪些平台」重写整段）。
+    # 那两条记录的是「这两个平台当初是用哪个 Flutter revision 生成的」，
+    # 删掉不影响构建（`flutter build` 不看这个文件），但会让 `flutter migrate`
+    # 失去基线 —— 所以手工补回来，只更新 revision 值。
     - platform: root
-      create_revision: dec2ee5c1f98f8e84a7d5380c05eb8a3d0a81668
-      base_revision: dec2ee5c1f98f8e84a7d5380c05eb8a3d0a81668
+      create_revision: 6a19cca56475dbfba1478ee68d7bd0c2ef891da1
+      base_revision: 6a19cca56475dbfba1478ee68d7bd0c2ef891da1
     - platform: android
-      create_revision: dec2ee5c1f98f8e84a7d5380c05eb8a3d0a81668
-      base_revision: dec2ee5c1f98f8e84a7d5380c05eb8a3d0a81668
+      create_revision: 6a19cca56475dbfba1478ee68d7bd0c2ef891da1
+      base_revision: 6a19cca56475dbfba1478ee68d7bd0c2ef891da1
     - platform: windows
-      create_revision: dec2ee5c1f98f8e84a7d5380c05eb8a3d0a81668
-      base_revision: dec2ee5c1f98f8e84a7d5380c05eb8a3d0a81668
+      create_revision: 6a19cca56475dbfba1478ee68d7bd0c2ef891da1
+      base_revision: 6a19cca56475dbfba1478ee68d7bd0c2ef891da1
+    - platform: macos
+      create_revision: 6a19cca56475dbfba1478ee68d7bd0c2ef891da1
+      base_revision: 6a19cca56475dbfba1478ee68d7bd0c2ef891da1
 
   # User provided section
 
