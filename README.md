@@ -36,7 +36,7 @@ Flutter 版用 **media_kit + libmpv**（自带完整 FFmpeg，完全不碰 Media
 
 - [功能](#功能)
 - [架构](#架构)
-- [从源码构建](#从源码构建)
+- [从源码构建](#从源码构建) ← 含 [开发流程](#开发流程走-pr不走直推-main)（**走 PR，不走直推 main**）
 - [平台支持](#平台支持) ← Windows / macOS / Android / **Android TV**
 - [配置说明](#配置说明) ← **这一节最详细**
 - [数据目录](#数据目录)
@@ -290,6 +290,57 @@ Android 那个 job 默认关掉：它最慢（要 NDK + 三个 target 交叉编�
 > 本仓有约 440 条既有 warning/info（探针文件与测试里的既有项），
 > 默认设置会让 CI 永远红。加了这两个 flag 之后**只有 error 才卡住**
 > （实测：有 error 时仍返回 1）。
+
+### 开发流程：走 PR，不走直推 main
+
+功能迭代走 **「开 PR → AI 审核 → 完善 → 合并」**，细则见
+[CONTRIBUTING.md](CONTRIBUTING.md)。摘要：
+
+```text
+① 开分支   git switch -c feat/<短描述>
+② 提交     git commit
+③ 开 PR    git push -u origin <branch> → GitHub 上开 PR
+④ 自动评审 CI 跑起来；CodeRabbit 几分钟内贴出评审
+⑤ 完善     逐条判断：真问题就修，误报就回帖说明并 resolve
+⑥ 再评审   推新 commit 后自动复审增量
+⑦ 合并     意见都处理完 + CI 全绿 → 合并
+```
+
+**只有以下情况可以直接推 main**：错别字 / 注释 / 文档 / `.gitignore` 这类元数据 /
+回滚刚推错的东西 / main 已经红了要紧急修 CI。
+判断标准是「**这个改动有没有可能悄悄改变产品行为？**」——有就走 PR。
+
+#### CodeRabbit（AI 代码评审）
+
+配置在 [`.coderabbit.yaml`](.coderabbit.yaml)。它补的正是 CI 拦不住的那类问题：
+
+| 只有 CI 时能拦住 | 需要有人看才能拦住 |
+|---|---|
+| 编译不过、测试红、analyze error | 某个分支在某种平台组合下永远走不到 |
+| 依赖缺失、格式不符 | 一条断言其实**恒真**（假门禁） |
+| 版本号对不上 | 改了 A 忘了同步 B（如 `.nsi` 的安装侧 / 卸载侧） |
+|  | 并发 / 时序问题（测试改进程级全局量） |
+
+右列这几类本仓**每一条都真踩过**，共同特征是「CI 全绿，问题在用户那里才爆」。
+
+**费用**：公开仓库免费（本仓是 public），私有仓库没有免费档。
+
+**安装**：给 `coderabbitai` 这个 GitHub App 授权本仓 ——
+打开 <https://github.com/apps/coderabbitai/installations/new>，
+选 `iuuuuuuuu/sourin`，授权即可（只给这一个仓库，不要给全部）。
+
+**在 PR 里可用的命令**：
+```text
+@coderabbitai review          重新评审
+@coderabbitai full review     完整评审（不只看增量）
+@coderabbitai resolve         把它的评论标记为已解决
+@coderabbitai configuration   打印当前生效的完整配置
+@coderabbitai help            全部命令
+```
+
+> ⚠️ 处理评审意见的纪律（写在 CONTRIBUTING.md 里，这里再强调一次）：
+> **不许**用「加 ignore 注释」「放宽断言」「删掉那行」来消掉意见。
+> 本仓已有一条同类教训 —— 为了让 CI 变绿而放宽断言，等于把缺陷藏进绿里。
 
 ---
 
