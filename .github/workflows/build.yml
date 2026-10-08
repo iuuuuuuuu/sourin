@@ -97,16 +97,22 @@ jobs:
         run: flutter pub get
 
       - name: 静态分析（0 error 才继续）
-        shell: pwsh
-        run: |
-          $out = flutter analyze --no-pub 2>&1 | Out-String
-          Write-Output $out
-          # ★ 只卡 error —— 本仓有约 230 条既有 warning/info（探针文件里的
-          #   invalid_use_of_protected_member 之类）。卡 warning 会让 CI
-          #   永远红，那这条门禁就失去意义了。
-          if ($out -match "(?m)^\s*error\s+-") {
-            throw "flutter analyze 报出 error"
-          }
+        # ★★ 这里有两个坑，都踩过：
+        #
+        # ① `flutter analyze` **默认把 warning / info 也算失败**（退出码 1）。
+        #    本仓有约 440 条既有 warning/info（探针文件里的
+        #    invalid_use_of_protected_member、测试里的 prefer_const_* 之类），
+        #    ⇒ 不加下面两个 flag 的话 CI 永远红，门禁就失去意义了。
+        #    `--no-fatal-infos --no-fatal-warnings` 之后：
+        #      只有 error 才退出非零（实测：有 error 时仍返回 1 ✓）
+        #
+        # ② GitHub Actions 的 `shell: pwsh` 把
+        #    `$ErrorActionPreference` 设成 **Stop**，而 PowerShell 会把
+        #    原生命令写到 **stderr** 的任何一行包成 NativeCommandError ——
+        #    `flutter analyze` 的进度提示就走 stderr ⇒ 会被当成终止性错误。
+        #    ⇒ 不要自己 `$out = flutter analyze 2>&1` 再解析，直接让它跑，
+        #      用退出码判断（`flutter` 是 cmd 包装，不会有这个问题）。
+        run: flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings
 
       - name: 全量测试
         run: flutter test --reporter expanded
@@ -176,15 +182,10 @@ jobs:
         run: flutter pub get
 
       - name: 静态分析（0 error 才继续）
-        shell: bash
-        run: |
-          set +e
-          out=$(flutter analyze --no-pub 2>&1)
-          echo "$out"
-          if echo "$out" | grep -Eq "^[[:space:]]*error[[:space:]]+-"; then
-            echo "::error::flutter analyze 报出 error"
-            exit 1
-          fi
+        # 与 Windows 那个 job 同款（理由逐字见那里的注释）：
+        # `flutter analyze` 默认把 warning/info 也算失败，本仓有约 440 条
+        # 既有 warning/info ⇒ 必须显式降级，只让 error 卡住 CI。
+        run: flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings
 
       - name: 全量测试
         run: flutter test

@@ -267,15 +267,29 @@ strings android/app/src/main/jniLibs/x86_64/libsourin_core.so | Select-String "^
 `.github/workflows/build.yml` 在每次 push / PR 时：
 
 ```text
-① 编 Rust 核心（Windows）
-② flutter analyze（0 error 才继续）
-③ flutter test（全量）
-④ flutter build windows --release -t lib/shell.dart
-⑤ 上传构建产物为 Artifact
+windows  编 Rust 核心 → analyze → 全量测试 → 打包 → 上传 Artifact
+macos    编 Rust 核心 → analyze → 全量测试 → 打包 .app → 上传 Artifact
+android  NDK 交叉编译三个 ABI → 两个 APK → 上传（**默认关闭**）
 ```
 
-Android 构建在同一个 workflow 里，但**默认关闭**（要 NDK + 三个 target 交叉编译，
-耗时较长）。手动触发 `workflow_dispatch` 并勾上 `build_android` 才会跑。
+Android 那个 job 默认关掉：它最慢（要 NDK + 三个 target 交叉编译），
+而 Windows job 已经覆盖了 Dart 与 Rust 两侧的全部测试。
+要跑就手动触发 `workflow_dispatch` 并勾上 `build_android`。
+
+### CI 里几个有意加的核验（都是踩过的坑）
+
+| 检查 | 防的是什么 |
+|---|---|
+| Windows：`data/app.so` 必须 > 5 MB | 漏了 `-t lib/shell.dart` 会编出 spike 而不是客户端，而**编错了不报错** |
+| Windows：显式确认 `windows/sourin_core.dll` 存在 | CMake 的拷贝按时间戳判断，会静默跳过 |
+| macOS：`codesign -d --entitlements` 核验带上了 `network.client/server` | 少了它应用能启动但所有请求都失败 |
+| Android：数 `.so` 里的 `sourin_` 导出符号 ≥ 7 个 | 改完 `ffi.rs` 没重编那个 ABI，症状是「所有命令都超时」 |
+| Android：`aapt dump badging` 检查 `LEANBACK_LAUNCHER` | 少了它 TV 上找不到应用 |
+
+> ⚠️ `flutter analyze` 在 CI 里跑的是 `--no-fatal-infos --no-fatal-warnings`：
+> 本仓有约 440 条既有 warning/info（探针文件与测试里的既有项），
+> 默认设置会让 CI 永远红。加了这两个 flag 之后**只有 error 才卡住**
+> （实测：有 error 时仍返回 1）。
 
 ---
 
