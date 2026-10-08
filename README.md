@@ -522,9 +522,18 @@ flutter build macos --release -t lib/shell.dart
 # 产物：build/macos/Build/Products/Release/sourin_spike.app
 ```
 
-> ⚠️ macOS 上 Rust 核心编出的是 `libsourin_core.dylib`，
-> 由 `macos/` 的 Xcode 工程自动带上（与 Windows 的 CMake 拷贝是同一角色）。
+> ⚠️ macOS 上 Rust 核心编出的是 `libsourin_core.dylib`，由 `macos/` 的
+> Xcode 工程里那个 `Embed Rust Core` 构建阶段拷进
+> `sourin_spike.app/Contents/Frameworks/`（与 Windows 的 CMake 拷贝是同一角色）。
 > **改完 `ffi.rs` 同样要重编** —— 症状是 `Failed to lookup symbol`。
+>
+> 这个阶段是**后加的**（2026-10-08）。在那之前 `macos/` 整棵树对
+> `sourin_core` **零引用**，产物里根本没有这个 dylib，而 Dart 侧
+> `DynamicLibrary.open('libsourin_core.dylib')` 用的是裸文件名 ——
+> dlopen 走的是 dyld 搜索路径，**不会**去 `Contents/Frameworks/` 里翻
+> （那个目录只对二进制里带 LC_RPATH 的调用方生效，管不到 dart:ffi）。
+> 症状是 macOS 版**能启动但所有核心功能不可用**，只剩一个错误页。
+> 所以 `lib/core/ffi.dart` 现在先按**包内绝对路径**找，找不到才退回裸名。
 
 > ⚠️ `PRODUCT_NAME` 必须是 ASCII 的 `sourin_spike`：
 > `project.pbxproj` 里有 3 处硬引用 `sourin_spike.app`，改中文会让产物名与引用名对不上。

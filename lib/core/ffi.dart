@@ -55,6 +55,7 @@ import 'dart:ffi';
 import 'dart:io';
 
 import 'package:ffi/ffi.dart';
+import 'package:flutter/foundation.dart';
 
 // ── C ABI 签名（必须与 Rust 侧一一对应）──
 
@@ -171,12 +172,70 @@ class SourinCore {
       // Android 打包后名字带 lib 前缀
       _lib = DynamicLibrary.open('libsourin_core.so');
     } else if (Platform.isMacOS || Platform.isIOS) {
+      // ★ macOS/iOS：先找 **包内** 的绝对路径，再退回裸名。
+      //
+      // # 为什么必须先找包内（2026-10-08 实测踩到）
+      //
+      // `DynamicLibrary.open('libsourin_core.dylib')` 传的是裸文件名 ⇒
+      // dlopen 走 dyld 的搜索路径（@rpath / DYLD_* / 系统目录），
+      // **不会**自动去 .app 的 Contents/Frameworks/ 里翻。
+      //
+      // 那个目录只对「二进制里带 LC_RPATH」的调用方生效：Flutter 的
+      // Runner 只有 `@executable_path/../Frameworks`（见 pbxproj 的
+      // LD_RUNPATH_SEARCH_PATHS），它管的是 Runner 自己链接的依赖，
+      // 管不到 dart:ffi 在运行时用裸名发起的 dlopen。
+      //
+      // 后果实测：macos/ 整棵树对 sourin_core **零引用** ⇒
+      // 产物里根本没有这个 dylib ⇒ macOS 版能启动但所有核心功能不可用
+      // （连 providers 列表都拿不到，只剩一个 _ErrorView）。
+      // 现在由 pbxproj 的 `Embed Rust Core` 阶段拷进 Frameworks/，
+      // 这里用绝对路径把它接上。
+      final bundled = _bundledDylibPath();
+      if (bundled != null) {
+        _lib = DynamicLibrary.open(bundled);
+        return _lib!;
+      }
       _lib = DynamicLibrary.open('libsourin_core.dylib');
     } else {
       throw UnsupportedError('不支持的平台: ${Platform.operatingSystem}');
     }
     return _lib!;
   }
+
+
+  /// macOS/iOS：包内 `Contents/Frameworks/libsourin_core.dylib` 的绝对路径
+  ///
+  /// 可执行文件在 `Contents/MacOS/<exe>` ⇒ 往上一级就是 `Contents/`，
+  /// 核心库在它的 `Frameworks/` 下（pbxproj 的 `Embed Rust Core` 放进去的）。
+  ///
+  /// [executablePath] 缺省用 `Platform.resolvedExecutable`；抽成参数是为了
+  /// 让测试能在**任意平台**造一棵假的 `.app` 目录树来验证查找逻辑
+  /// （macOS 的这段逻辑不该只能在 macOS 上测）。
+  ///
+  /// 找不到返回 `null`（例如 `flutter test` 跑在 flutter_tester 里，
+  /// 那里没有包结构）⇒ 调用方退回裸名，报错信息保持与原来一致。
+  static String? _bundledDylibPath([String? executablePath]) {
+    try {
+      final exeDir = File(executablePath ?? Platform.resolvedExecutable).parent;
+      // 用 `parent` 而不是拼 `../`：拿到的是规整过的路径，
+      // 免得 dlopen 收到带 `..` 的字符串（能工作，但排查日志时难看）。
+      final candidate =
+          File('${exeDir.parent.path}/Frameworks/libsourin_core.dylib');
+      if (candidate.existsSync()) return candidate.absolute.path;
+    } catch (_) {
+      // 路径解析失败就退回裸名 —— 不要把真正的加载错误盖掉
+    }
+    return null;
+  }
+
+  /// ★ 测试注入口（`@visibleForTesting`）：按给定可执行文件路径解析包内核心库
+  ///
+  /// 生产代码**无调用点** —— 真实链路走的是 `_bundledDylibPath()` 的无参形式。
+  /// 这里只是把参数透出来，好让回归测试造一棵假的
+  /// `X.app/Contents/{MacOS,Frameworks}` 来验证「找得到 / 找不到退回」两种结果。
+  @visibleForTesting
+  static String? debugBundledDylibPathFor(String executablePath) =>
+      _bundledDylibPath(executablePath);
 
   /// 绑定符号（只做一次）
   static void _ensureBound() {
