@@ -11,6 +11,17 @@
 # ★ Android 默认关掉的原因：它最慢，而 Windows 那个 job 已经覆盖了
 #   Dart 与 Rust 两侧的全部测试。要跑就手动触发并勾上 build_android。
 #
+# # 发版本（Release）
+# ```text
+# 只在手动触发时可用：Actions → 构建 → Run workflow → 填 release_tag（如 v1.0.0）
+#   · 留空  = 只构建，不发 Release
+#   · 填了  = 构建完自动建 Release 并上传三个平台的包 + SHA256SUMS.txt
+# 发 Android 的包要**同时**把 build_android 勾上（默认不勾）。
+# ```
+# ★ 三个平台 job 各自把成品压成 `rel-*` artifact，由末尾的 publish job 汇总。
+#   之所以不让 publish 去下 `sourin-*` 那些 artifact：那条下载链路要走
+#   Azure blob 的 SAS 重定向，实测只有几十 KB/s（125MB 要一小时）。
+#
 # # Android TV
 # ```text
 # Android TV **不需要单独的构建** —— 同一个 APK 就是手机版也是 TV 版：
@@ -34,6 +45,13 @@ on:
         description: 同时构建 Android（需要 NDK，较慢）
         type: boolean
         default: false
+      # ★ 填了就发 Release（留空 = 只构建不发布）
+      #   值必须是完整 tag，例如 v1.0.0。
+      #   说明见文件末尾 publish job 上方那段。
+      release_tag:
+        description: '发布 Release 的 tag（留空=不发布），例如 v1.0.0'
+        type: string
+        default: ''
 
 # ★ 同一分支的新 push 取消上一次未完成的构建
 concurrency:
@@ -147,6 +165,41 @@ jobs:
           path: build/windows/x64/runner/Release/
           retention-days: 14
 
+      # ── 发 Release 用的 zip（只在填了 release_tag 时才跑）────────────
+      #   ★ 为什么在这里压而不是让 publish job 去下 artifact：
+      #     artifact 的下载要走 Azure blob 的 SAS 重定向，那条链路在某些
+      #     网络环境下只有几十 KB/s（实测 40MB 要十几分钟、125MB 要一小时）。
+      #     在 runner 上就地压缩再上传，是**runner 直连 GitHub**，快得多。
+      - name: 打包 Release 用的 zip
+        if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+        shell: pwsh
+        run: |
+          $rel = "build/windows/x64/runner/Release"
+          $zip = "build/sourin-windows-${{ inputs.release_tag }}.zip"
+          # ★ 先删后建，避免 zip 里混进上一次的残留
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+          Compress-Archive -Path "$rel\*" -DestinationPath $zip -CompressionLevel Optimal
+          $i = Get-Item $zip
+          "zip = $($i.Length) 字节"
+          # ★ 自检：解压后的顶层必须是 sourin_spike.exe 等文件本身，
+          #   而不是一个 Release\ 目录（Compress-Archive 的 -Path 通配会决定这个）
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $z = [System.IO.Compression.ZipFile]::OpenRead($i.FullName)
+          try {
+            $names = $z.Entries | ForEach-Object { $_.FullName }
+            $hasExe = $names -contains "sourin_spike.exe"
+            "zip 条目数 = $($names.Count)  顶层有 sourin_spike.exe = $hasExe"
+            if (-not $hasExe) { throw "zip 结构不对：顶层没有 sourin_spike.exe" }
+          } finally { $z.Dispose() }
+
+      - name: 上传 Release zip（Windows）
+        if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: rel-windows-${{ inputs.release_tag }}
+          path: build/sourin-windows-${{ inputs.release_tag }}.zip
+          retention-days: 1
+
   # ═════════════════════════════════════════════════════════════════════
   #  macOS
   # ═════════════════════════════════════════════════════════════════════
@@ -256,6 +309,40 @@ jobs:
           #   解压即用。做 .dmg 需要额外装 create-dmg，收益不大。
           path: build/macos/Build/Products/Release/*.app
           retention-days: 14
+
+      # ── 发 Release 用的 zip（只在填了 release_tag 时才跑）────────────
+      #   ★★ 必须用 ditto -c -k --sequesterRsrc --keepParent，**不能**用 zip：
+      #     .app 是**目录**，里面有可执行位与符号链接（Frameworks/ 里那些
+      #     Versions/A 链接）。zip 会把符号链接**展开成实体文件**、
+      #     并且**丢掉可执行位** ⇒ 用户解压后双击无反应
+      #     （Gatekeeper 之后还会再拦一层，变成「打不开且不知道原因」）。
+      #     ditto 是 Apple 官方用于分发 .app 的工具，保留全部元数据。
+      - name: 打包 Release 用的 zip
+        if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+        run: |
+          APP="build/macos/Build/Products/Release/sourin_spike.app"
+          ZIP="build/sourin-macos-${{ inputs.release_tag }}.zip"
+          rm -f "$ZIP"
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
+          ls -l "$ZIP"
+          # ★ 自检：zip 顶层必须恰好是一个 sourin_spike.app 目录
+          #   （--keepParent 的作用；少了它解压出来是一堆散文件）
+          if ! unzip -l "$ZIP" | grep -q "sourin_spike.app/Contents/MacOS/sourin_spike"; then
+            echo "::error::zip 结构不对：找不到 sourin_spike.app/Contents/MacOS/sourin_spike"; exit 1
+          fi
+          # ★ 再确认核心库在里面（与「核验产物」同一条判据，防 zip 这一步漏掉）
+          if ! unzip -l "$ZIP" | grep -q "Contents/Frameworks/libsourin_core.dylib"; then
+            echo "::error::zip 里没有 libsourin_core.dylib —— macOS 版核心功能会全挂"; exit 1
+          fi
+          echo "✓ zip 结构核验通过"
+
+      - name: 上传 Release zip（macOS）
+        if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: rel-macos-${{ inputs.release_tag }}
+          path: build/sourin-macos-${{ inputs.release_tag }}.zip
+          retention-days: 1
 
   # ═════════════════════════════════════════════════════════════════════
   #  Android（手机 + TV 同一个 APK）—— 默认关闭
@@ -459,3 +546,147 @@ jobs:
           path: build/app/outputs/flutter-apk/*.apk
           retention-days: 14
 
+      # ── 发 Release 用的 APK 改名（只在填了 release_tag 时才跑）────────
+      #   ★ 为什么要改名：`--split-per-abi` 产出的名字是
+      #     `app-arm64-v8a-release.apk` / `app-armeabi-v7a-release.apk`，
+      #     名字里**没有产品名**，用户在下载页看到两个都叫 app-* 的文件
+      #     根本分不出哪个是哪个。改成带产品名 + 架构的名字。
+      #   ★ 顺带核验：两个 ABI 的 .so 必须都在（`--split-per-abi` 只会
+      #     打 jniLibs 里**存在**的 ABI ⇒ 少拷一个不会报错，只会静默出
+      #     一个装不上的包）。
+      - name: 准备 Release 用的 APK
+        if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+        run: |
+          TAG="${{ inputs.release_tag }}"
+          OUT="build/rel-apk"
+          rm -rf "$OUT"; mkdir -p "$OUT"
+          SRC="build/app/outputs/flutter-apk"
+          cp "$SRC/app-arm64-v8a-release.apk"   "$OUT/sourin-android-arm64-$TAG.apk"
+          cp "$SRC/app-armeabi-v7a-release.apk" "$OUT/sourin-android-armv7-$TAG.apk"
+          ls -l "$OUT"
+          # ★ 自检：每个 APK 里都必须真的有对应的 libsourin_core.so
+          for pair in "sourin-android-arm64-$TAG.apk:lib/arm64-v8a/libsourin_core.so" \
+                      "sourin-android-armv7-$TAG.apk:lib/armeabi-v7a/libsourin_core.so"; do
+            apk="${pair%%:*}"; want="${pair##*:}"
+            if ! unzip -l "$OUT/$apk" | grep -q "$want"; then
+              echo "::error::$apk 里没有 $want"; exit 1
+            fi
+            echo "✓ $apk 含 $want"
+          done
+
+      - name: 上传 Release APK
+        if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: rel-android-${{ inputs.release_tag }}
+          path: build/rel-apk/*.apk
+          retention-days: 1
+
+
+  # ═════════════════════════════════════════════════════════════════════
+  #  发 Release —— 只有填了 release_tag 才跑
+  # ═════════════════════════════════════════════════════════════════════
+  #
+  #  # 为什么要有这个 job（而不是本地下载 artifact 再手动上传）
+  #
+  #  artifact 的下载要走 `api.github.com` → **Azure blob 的 SAS 重定向**。
+  #  实测：那条链路在部分网络环境下只有几十 KB/s —— 40MB 的 Windows 包要
+  #  十几分钟，125MB 的 macOS 包要一小时以上，而且中途会被截断。
+  #  ⇒ 正确做法是让 **runner 自己**把成品传上去：runner 与 GitHub 之间
+  #    是机房直连。所以三个 job 各自在打包后额外压一份 `rel-*` artifact，
+  #    本 job 只负责把它们汇总成 Release。
+  #
+  #  # 为什么用 `gh release create` 而不是 softprops/action-gh-release
+  #
+  #  `gh` 是 GitHub 官方 CLI，随 runner 预装，不需要引第三方 action
+  #  （少一个供应链面）。
+  #
+  #  # 为什么 `if: always()`
+  #
+  #  三个平台 job 是并行的。若某个平台挂了，我们**仍要**发已经好的那些包，
+  #  而不是因为一个平台失败就什么都不发 —— 但下面会显式检查每个平台
+  #  是否 success，**没成功就不带它的包**，绝不发半成品。
+  publish:
+    name: 发 Release
+    runs-on: ubuntu-latest
+    needs: [windows, macos, android]
+    # ★ 注意 `always()`：needs 里有 skipped（android 默认跳过）时，
+    #   不加它整个 job 会被跳过。
+    if: always() && github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+    permissions:
+      # ★★ 一旦写了 `permissions:`，**没列出来的权限全部变成 none** ——
+      #   这是 GitHub 的规则（不是「保持默认」）。
+      #   `actions/download-artifact` 要用 Actions API 列产物 ⇒ 必须要
+      #   `actions: read`；漏了它会报 403/Resource not accessible。
+      actions: read
+      contents: write      # 建 Release 要写权限
+
+    steps:
+      # ★ 必须先 checkout：`--notes-file .github/release-notes.md` 是**仓库里的文件**，
+      #   不 checkout 的话 publish job 的工作目录是空的，gh 会报找不到 notes。
+      - name: 检出代码（为了读 release-notes.md）
+        uses: actions/checkout@v4
+
+      - name: 汇总三个平台的包
+        uses: actions/download-artifact@v4
+        # ★ 一个 `rel-*` 都没有时（三个平台全挂），这个 action 会**硬失败**并
+        #   报一句难懂的 'no artifacts found'。用 continue-on-error 让流程走到
+        #   下一步，由那里给出「三个平台都没有可用产物」的明确错误。
+        continue-on-error: true
+        with:
+          pattern: rel-*
+          merge-multiple: true
+          path: rel
+
+      - name: 核验拿到了什么（没拿到就早失败）
+        id: chk
+        run: |
+          TAG="${{ inputs.release_tag }}"
+          echo "---- rel/ 内容 ----"
+          ls -lR rel || true
+          echo ""
+          W="rel/sourin-windows-$TAG.zip"
+          M="rel/sourin-macos-$TAG.zip"
+          A64="rel/sourin-android-arm64-$TAG.apk"
+          A7="rel/sourin-android-armv7-$TAG.apk"
+          FILES=""
+          # ★ 逐个平台判定：Windows / macOS 是必跑 job，没产物就是真失败；
+          #   Android 默认不跑，所以它缺席是正常的（不报错，只是不发 APK）。
+          if [ "${{ needs.windows.result }}" = "success" ] && [ -f "$W" ]; then
+            FILES="$FILES $W"; echo "✓ Windows  $W";
+          else echo "✗ Windows 包不可用（job=${{ needs.windows.result }}）"; fi
+          if [ "${{ needs.macos.result }}" = "success" ] && [ -f "$M" ]; then
+            FILES="$FILES $M"; echo "✓ macOS    $M";
+          else echo "✗ macOS 包不可用（job=${{ needs.macos.result }}）"; fi
+          if [ "${{ needs.android.result }}" = "success" ] && [ -f "$A64" ] && [ -f "$A7" ]; then
+            FILES="$FILES $A64 $A7"; echo "✓ Android  $A64 $A7";
+          else echo "· Android 未构建（job=${{ needs.android.result }}）—— 不发布 APK"; fi
+          if [ -z "$FILES" ]; then
+            echo "::error::三个平台都没有可用产物，拒绝发空 Release"; exit 1
+          fi
+          echo "files=$FILES" >> "$GITHUB_OUTPUT"
+          # ★ 校验和清单（用户拿到包能自己核对完整性）
+          #   ⚠️ 不能写 `sha256sum *.zip *.apk` —— android 被跳过时 `*.apk`
+          #   不匹配任何文件，bash 会把**字面量** `*.apk` 传给 sha256sum 并报错。
+          #   所以按**实际存在的文件**逐个算。
+          ( cd rel && : > SHA256SUMS.txt
+            for x in *.zip *.apk; do
+              [ -f "$x" ] && sha256sum "$x" >> SHA256SUMS.txt
+            done ) || true
+          echo "---- SHA256SUMS.txt ----"
+          cat rel/SHA256SUMS.txt || true
+
+      - name: 建 Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ inputs.release_tag }}"
+          gh release create "$TAG" \
+            --repo "${{ github.repository }}" \
+            --title "源影 $TAG" \
+            --notes-file .github/release-notes.md \
+            --target "${{ github.sha }}" \
+            ${{ steps.chk.outputs.files }} \
+            rel/SHA256SUMS.txt
+          echo "✓ Release 已创建"
+          gh release view "$TAG" --repo "${{ github.repository }}"
