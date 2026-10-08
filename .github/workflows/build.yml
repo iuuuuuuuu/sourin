@@ -205,13 +205,39 @@ jobs:
         run: |
           # ★ 用 choco 装 NSIS。runner 上本来没有 makensis。
           choco install nsis --no-progress -y
-          # ★ 刷新 PATH：choco 装完当前会话的 PATH 还是旧的
-          $env:Path = [System.Environment]::GetEnvironmentVariable('Path','Machine') + ';' +
-                      [System.Environment]::GetEnvironmentVariable('Path','User')
-          $mk = Get-Command makensis -ErrorAction SilentlyContinue
-          if (-not $mk) { throw '装完 NSIS 还是找不到 makensis' }
-          "makensis = $($mk.Source)"
-          & $mk.Source /VERSION
+          # ★★ 不要靠 PATH 找 makensis。
+          #   实测（run 37788073987）：choco 明明报「Deployed to
+          #   C:\Program Files (x86)\NSIS」，但刷新 Machine+User PATH 之后
+          #   `Get-Command makensis` **仍然找不到** —— nsis 包只解压文件，
+          #   **不往 PATH 里加目录**（不像某些包会调 Install-ChocolateyPath）。
+          #   ⇒ 直接按已知安装位置找，PATH 只作为兜底。
+          $candidates = @(
+            'C:\Program Files (x86)\NSIS\makensis.exe',
+            'C:\Program Files\NSIS\makensis.exe',
+            'C:\ProgramData\chocolatey\lib\nsis\tools\makensis.exe',
+          )
+          $mk = $null
+          foreach ($c in $candidates) {
+            if (Test-Path -LiteralPath $c) { $mk = $c; break }
+          }
+          if (-not $mk) {
+            # 兜底：刷新 PATH 再找一次（万一将来 choco 包改了行为）
+            $env:Path = [System.Environment]::GetEnvironmentVariable('Path','Machine') + ';' +
+                        [System.Environment]::GetEnvironmentVariable('Path','User')
+            $cmd = Get-Command makensis -ErrorAction SilentlyContinue
+            if ($cmd) { $mk = $cmd.Source }
+          }
+          if (-not $mk) {
+            # 最后兜底：整盘搜（慢，但比「莫名其妙装不上」好查）
+            $found = Get-ChildItem 'C:\' -Filter 'makensis.exe' -Recurse -ErrorAction SilentlyContinue |
+                     Select-Object -First 1
+            if ($found) { $mk = $found.FullName }
+          }
+          if (-not $mk) { throw '装完 NSIS 还是找不到 makensis（choco 报成功但文件不在预期位置）' }
+          "makensis = $mk"
+          & $mk /VERSION
+          # ★ 把路径交给后面那一步（同一次 job 内跨 step 传值）
+          "MAKENSIS=$mk" >> $env:GITHUB_ENV
 
       - name: 编译安装包
         if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
@@ -239,7 +265,8 @@ jobs:
           $outfile = "Sourin-Setup-$ver.exe"
           "版本 = $ver，产物名 = $outfile"
           Set-Location installer
-          & makensis /V2 "/DAPP_VERSION=$ver" "/DOUTFILE=$outfile" sourin.nsi
+          # ★ 用上一步交下来的绝对路径（不靠 PATH，理由见上一步的注释）
+          & $env:MAKENSIS /V2 "/DAPP_VERSION=$ver" "/DOUTFILE=$outfile" sourin.nsi
           if ($LASTEXITCODE -ne 0) { throw "makensis 失败（exit $LASTEXITCODE）" }
           Set-Location ..
           $exe = "installer/$outfile"
