@@ -757,10 +757,21 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ inputs.release_tag }}"
+          # ★ release-notes.md 里的文件名用 `__VERSION__` 占位（tag 去掉前导 v），
+          #   在这里替换掉 —— 这样同一份 notes 对任何版本都对，
+          #   不会出现「发 v1.0.1 但说明里写着 1.0.0」这种事。
+          VER="${TAG#v}"
+          NOTES=/tmp/release-notes.md
+          sed "s/__VERSION__/$VER/g" .github/release-notes.md > "$NOTES"
+          if grep -q "__VERSION__" "$NOTES"; then
+            echo "::error::release-notes.md 里还有未替换的 __VERSION__"; exit 1
+          fi
+          echo "---- notes 前 12 行（已替换版本号）----"
+          head -12 "$NOTES"
           gh release create "$TAG" \
             --repo "${{ github.repository }}" \
             --title "源影 $TAG" \
-            --notes-file .github/release-notes.md \
+            --notes-file "$NOTES" \
             --target "${{ github.sha }}" \
             ${{ steps.chk.outputs.files }} \
             rel/SHA256SUMS.txt

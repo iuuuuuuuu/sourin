@@ -1,4 +1,4 @@
-# 源影 v1.0.0
+# 源影 v__VERSION__
 
 跨端视频聚合客户端 —— **Windows / macOS / Android（含 Android TV）**。
 
@@ -11,11 +11,11 @@
 
 | 平台 | 文件 | 说明 |
 |---|---|---|
-| **Windows 10/11 (x64)** | `Sourin-Setup-1.0.0.exe` | **安装版**（推荐）：双击 → 下一步 → 开始菜单与桌面快捷方式、可在「应用和功能」里卸载。免管理员权限 |
-| **Windows 10/11 (x64)** | `sourin-windows-v1.0.0.zip` | **免安装版**：解压到任意目录 → 双击 `sourin_spike.exe` |
-| **macOS 12+** | `sourin-macos-v1.0.0.zip` | 解压后把 `sourin_spike.app` 拖进「应用程序」。⚠️ 见下方【macOS 首次打开】 |
-| **Android 手机 / 平板** | `sourin-android-arm64-v1.0.0.apk` | 现代设备（近 5 年基本都是这个） |
-| **Android TV / 电视盒子** | `sourin-android-armv7-v1.0.0.apk` | 较老的 32 位设备；TV 版**同一个 APK**，装上即出现在 TV 主界面 |
+| **Windows 10/11 (x64)** | `Sourin-Setup-__VERSION__.exe` | **安装版**（推荐）：双击 → 下一步 → 开始菜单与桌面快捷方式、可在「应用和功能」里卸载。免管理员权限 |
+| **Windows 10/11 (x64)** | `sourin-windows-v__VERSION__.zip` | **免安装版**：解压到任意目录 → 双击 `sourin_spike.exe` |
+| **macOS 12+** | `sourin-macos-v__VERSION__.zip` | 解压后把 `sourin_spike.app` 拖进「应用程序」。⚠️ 见下方【macOS 首次打开】 |
+| **Android 手机 / 平板** | `sourin-android-arm64-v__VERSION__.apk` | 现代设备（近 5 年基本都是这个） |
+| **Android TV / 电视盒子** | `sourin-android-armv7-v__VERSION__.apk` | 较老的 32 位设备；TV 版**同一个 APK**，装上即出现在 TV 主界面 |
 
 ### 安装版与免安装版有什么区别
 
