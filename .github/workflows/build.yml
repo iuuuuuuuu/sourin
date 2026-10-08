@@ -405,12 +405,106 @@ jobs:
           fi
           echo "✓ zip 结构核验通过"
 
-      - name: 上传 Release zip（macOS）
+      # ── 发 Release 用的 DMG（只在填了 release_tag 时才跑）──────────
+      #
+      #  # 为什么要有 DMG（用户原话：「mac也要dmg的,而不是压缩包的」）
+      #
+      #  zip 对 macOS 用户是**外来形态**：正常 macOS 软件的分发方式是
+      #  「打开 .dmg → 把图标拖进 Applications」。zip 解压出来是个
+      #  孤零零的 .app，用户不知道该放哪、也看不到「拖进去」这个动作。
+      #
+      #  # 为什么不用第三方 action（create-dmg 之类）
+      #
+      #  `hdiutil` 是 macOS 自带工具，全程可控；引第三方 action 只是把
+      #  同一件事包一层，出问题时更难查。下面每一步都有自检。
+      #
+      #  # 为什么先建一个暂存目录再打包
+      #
+      #  DMG 里要放三样东西：.app 本体、Applications 的软链（拖拽目标）、
+      #  一段说明。直接对 build 目录打会把整个 Release 目录塞进去。
+      - name: 打包 Release 用的 DMG
+        if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+        run: |
+          set -euo pipefail
+          APP="build/macos/Build/Products/Release/sourin_spike.app"
+          DMG="build/sourin-macos-${{ inputs.release_tag }}.dmg"
+          STAGE="build/dmg-stage"
+          rm -rf "$STAGE" "$DMG"
+          mkdir -p "$STAGE"
+          # ★ ditto 而不是 cp -R：保留符号链接与可执行位（.app 里两者都有）
+          ditto "$APP" "$STAGE/sourin_spike.app"
+          # ★ Applications 软链 —— 这是「拖进去」那个动作的目标。
+          #   用相对路径 ../Applications，这样挂载点随便叫什么都能解析。
+          ln -s /Applications "$STAGE/Applications"
+          # ★ 放一份说明在 DMG 里（用户打开 dmg 第一眼能看到）
+          cat > "$STAGE/安装说明.txt" <<'EOF'
+          源影 (Sourin) —— macOS 安装说明
+          ================================
+          
+          1. 把 sourin_spike.app 拖到右边的 Applications 文件夹上
+          2. 从「应用程序」里打开它
+          3. 首次打开会被 Gatekeeper 拦下（本包未做代码签名与公证）：
+             · 右键点图标 → 打开 → 在弹窗里再点「打开」
+             · 或：系统设置 → 隐私与安全性 → 拉到底 → 「仍要打开」
+             · 或命令行：
+               xattr -dr com.apple.quarantine /Applications/sourin_spike.app
+          
+          你的收藏 / 历史 / 播放进度保存在
+          ~/Library/Containers/app.sourin.player/Data/app.sourin.player
+          升级与卸载都不会动它。
+          EOF
+          echo "---- 暂存目录 ----"; ls -la "$STAGE"
+          # ★ 打 DMG：UDZO（zlib 压缩、只读）是分发用的标准格式
+          hdiutil create \
+            -volname "源影" \
+            -srcfolder "$STAGE" \
+            -ov -format UDZO \
+            "$DMG"
+          ls -l "$DMG"
+          # ── 自检 ①：DMG 必须能挂载（打坏了挂不上，但 hdiutil create 不报错）──
+          MP=$(hdiutil attach "$DMG" -nobrowse -readonly | tail -1 | awk '{print $NF}')
+          echo "挂载点 = $MP"
+          trap 'hdiutil detach "$MP" -quiet || true' EXIT
+          # ── 自检 ②：三样东西都在 ──
+          for p in "sourin_spike.app" "Applications" "安装说明.txt"; do
+            if [ ! -e "$MP/$p" ]; then
+              echo "::error::DMG 里缺少 $p"; exit 1
+            fi
+          done
+          # ── 自检 ③：★ 最关键的一条 —— 挂载后的 .app 里必须有 Rust 核心，
+          #   且**可执行位还在**（这正是 zip 做不到、而 DMG 必须做对的事）──
+          CORE="$MP/sourin_spike.app/Contents/Frameworks/libsourin_core.dylib"
+          if [ ! -f "$CORE" ]; then
+            echo "::error::DMG 里的 .app 没有 libsourin_core.dylib —— 核心功能会全挂"; exit 1
+          fi
+          BIN="$MP/sourin_spike.app/Contents/MacOS/sourin_spike"
+          if [ ! -x "$BIN" ]; then
+            echo "::error::DMG 里的可执行文件丢了可执行位 —— 用户双击无反应"; exit 1
+          fi
+          # 符号数（与「核验产物」同一条判据，防 DMG 这一步漏掉内容）
+          n=$(nm -gU "$CORE" 2>/dev/null | grep -c '_sourin_' || true)
+          echo "DMG 内 Rust 核心导出符号数：$n"
+          if [ "$n" -lt 7 ]; then
+            echo "::error::DMG 内核心只有 $n 个 sourin_ 符号（应 >= 7）"; exit 1
+          fi
+          # ── 自检 ④：Applications 必须是软链而不是实体目录 ──
+          if [ ! -L "$MP/Applications" ]; then
+            echo "::error::Applications 不是软链（拖拽目标失效）"; exit 1
+          fi
+          echo "✓ DMG 结构与内容核验通过"
+          hdiutil detach "$MP" -quiet || true
+          trap - EXIT
+
+      - name: 上传 Release zip + DMG（macOS）
         if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
         uses: actions/upload-artifact@v4
         with:
           name: rel-macos-${{ inputs.release_tag }}
-          path: build/sourin-macos-${{ inputs.release_tag }}.zip
+          # ★ zip 也一起发：DMG 是给「正常安装」的用户，
+          #   zip 给要放进脚本/CI/受限环境的人。两者内容同源。
+          path: |
+            build/sourin-macos-${{ inputs.release_tag }}.zip
+            build/sourin-macos-${{ inputs.release_tag }}.dmg
           retention-days: 1
 
   # ═════════════════════════════════════════════════════════════════════
@@ -716,6 +810,7 @@ jobs:
           echo ""
           W="rel/sourin-windows-$TAG.zip"
           M="rel/sourin-macos-$TAG.zip"
+          D="rel/sourin-macos-$TAG.dmg"
           A64="rel/sourin-android-arm64-$TAG.apk"
           A7="rel/sourin-android-armv7-$TAG.apk"
           # ★ 安装包（可安装版）。版本号是 tag 去掉前导 v。
@@ -733,6 +828,8 @@ jobs:
           else echo "✗ Windows 包不可用（job=${{ needs.windows.result }}）"; fi
           if [ "${{ needs.macos.result }}" = "success" ] && [ -f "$M" ]; then
             FILES="$FILES $M"; echo "✓ macOS    $M";
+            if [ -f "$D" ]; then FILES="$FILES $D"; echo "✓ macOS dmg $D";
+            else echo "::warning::macOS DMG $D 不在 —— 本次只发 zip"; fi
           else echo "✗ macOS 包不可用（job=${{ needs.macos.result }}）"; fi
           if [ "${{ needs.android.result }}" = "success" ] && [ -f "$A64" ] && [ -f "$A7" ]; then
             FILES="$FILES $A64 $A7"; echo "✓ Android  $A64 $A7";
@@ -746,7 +843,7 @@ jobs:
           #   不匹配任何文件，bash 会把**字面量** `*.apk` 传给 sha256sum 并报错。
           #   所以按**实际存在的文件**逐个算。
           ( cd rel && : > SHA256SUMS.txt
-            for x in *.zip *.apk *.exe; do
+            for x in *.zip *.apk *.exe *.dmg; do
               [ -f "$x" ] && sha256sum "$x" >> SHA256SUMS.txt
             done ) || true
           echo "---- SHA256SUMS.txt ----"
