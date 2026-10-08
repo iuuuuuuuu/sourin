@@ -197,9 +197,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          APP="build/macos/Build/Products/Release/源影.app"
+          # ★ 产物名来自 macos/Runner/Configs/AppInfo.xcconfig 的 PRODUCT_NAME=sourin_spike。
+          #   ⚠️ 这里**不能**写「源影.app」：用户看到的窗口标题由 lib/shell.dart 的
+          #   WindowOptions(title: '源影') 决定，与 .app 的文件名无关；而 pbxproj 里有
+          #   3 处硬引用 sourin_spike.app，改中文会让产物名与引用名对不上。
+          APP="build/macos/Build/Products/Release/sourin_spike.app"
           if [ ! -d "$APP" ]; then
-            echo "找不到 .app，实际产物："; ls -la build/macos/Build/Products/Release/ || true
+            echo "找不到 $APP"
+            echo "  名字来源：macos/Runner/Configs/AppInfo.xcconfig 的 PRODUCT_NAME=sourin_spike"
+            echo "  真实产物：$(ls -d build/macos/Build/Products/Release/*.app 2>/dev/null || echo '(构建目录为空)')"
             exit 1
           fi
           # ★ 权限声明必须真的进了产物 —— 少了 network.client 的话
@@ -297,23 +303,78 @@ jobs:
       - name: 装依赖
         run: flutter pub get
 
-      - name: 构建 APK（arm64 — 现代手机与电视盒子）
-        run: flutter build apk --release --no-pub --target-platform android-arm64 -t lib/shell.dart
+      # ═══════════════════════════════════════════════════════════════════
+      # ★★★ 为什么是「一次 --split-per-abi」而不是「两次 --target-platform」
+      # ═══════════════════════════════════════════════════════════════════
+      #
+      # ① 原来第二次写的是 --target-platform android-armv7 —— **不是合法取值**。
+      #    flutter_tools/src/commands/build_apk.dart:51-55 的 allowed 只有
+      #      [android-arm, android-arm64, android-x64]
+      #    实测报错：android-armv7 is not an allowed value for option --target-platform
+      #    ⇒ 这一步**必红** ⇒ 整个 android job 在这里就退出 ⇒
+      #      **永远走不到**下面的 badging 核验 ⇒ TV 契约门禁从没真正执行过一次。
+      #
+      # ② 就算把名字改对，两次单 ABI 构建的产物**都叫 app-release.apk**
+      #    （gradle.dart:157 _apkFilesFor 在非 split 时只返回这一个名字）
+      #    ⇒ 第二次会**覆盖**第一次 ⇒ 上传的其实只有一个 APK。
+      #
+      # ⇒ 正解是 --split-per-abi：gradle.dart:151-155 里
+      #    app-$abi-$buildType.apk ⇒ 一次产出按 ABI 命名的多个 APK。
+      #
+      # ★ --target-platform android-arm64,android-arm 是**故意**只留这两个，
+      #   理由有两条（第二条是硬缺陷，不是体积问题）：
+      #   ① 交付件就是这两个（arm64 手机/TV 盒子 + armv7 老设备）；
+      #      x86_64 那份约 50 MB，只给模拟器用，不进交付包。
+      #   ② ★★ 上面「拷进 jniLibs」只拷了 arm64-v8a 与 armeabi-v7a 两个 ABI，
+      #      **没有 x86_64**。若这里按默认三个 ABI 拆，x86_64 那个 APK 里
+      #      就**不含 libsourin_core.so** —— 装到 x86_64 设备/模拟器上
+      #      一调核心就 DynamicLibrary.open 失败。而下面的「上传 APK」是
+      #      `*.apk` 全量上传 ⇒ 用户会拿到一个**静默残废**的包。
+      #      ⇒ 宁可不构建，也不产出一个缺核心库的 APK。
+      - name: 构建 APK（按 ABI 拆分 —— arm64 + armv7）
+        run: flutter build apk --release --no-pub --split-per-abi --target-platform android-arm64,android-arm -t lib/shell.dart
 
-      - name: 构建 APK（armv7 — 老设备 / 32 位电视盒子）
-        run: flutter build apk --release --no-pub --target-platform android-armv7 -t lib/shell.dart
-
-      - name: 核验 APK 声明了 Android TV 启动器
+      - name: 核验 APK 的 Android TV 入口（手机入口 + TV 入口都要在）
         shell: bash
         run: |
           set -euo pipefail
           SDK="$ANDROID_SDK_ROOT/build-tools/$(ls "$ANDROID_SDK_ROOT/build-tools" | sort -V | tail -1)"
-          APK=$(ls build/app/outputs/flutter-apk/app-release.apk)
-          "$SDK/aapt" dump badging "$APK" > /tmp/badging.txt || true
-          grep -E "leanback|launchable-activity" /tmp/badging.txt || true
-          if ! grep -q "LEANBACK_LAUNCHER" /tmp/badging.txt; then
-            echo "::warning::badging 里没看到 LEANBACK_LAUNCHER —— TV 上可能找不到应用（请人工确认）"
+          # ★ --split-per-abi **不产** app-release.apk（见上面那段注释）⇒
+          #   这里必须扫目录，不能再 ls 一个写死的文件名：
+          #   在干净 runner 上会 ls 失败；在开发机上则会**误测上一轮的旧包**（假绿）。
+          shopt -s nullglob
+          APKS=(build/app/outputs/flutter-apk/*.apk)
+          if [ "${#APKS[@]}" -eq 0 ]; then
+            echo "::error::build/app/outputs/flutter-apk/ 下没有任何 .apk —— 构建没产出"; exit 1
           fi
+          echo "待核验的 APK（${#APKS[@]} 个）：${APKS[*]}"
+          for APK in "${APKS[@]}"; do
+            echo "--- $APK"
+            # ★★ 硬门禁用 xmltree 查 AndroidManifest 的**原始 category**：
+            #   dump badging 的输出里**根本没有** LEANBACK_LAUNCHER 这个字符串
+            #   （实测：badging 116 行里 has LEANBACK_LAUNCHER = False），
+            #   它只把 TV 入口规范化成 leanback-launchable-activity 那一行；
+            #   原始 category 只在 xmltree 里。
+            #   ⇒ 旧判据 grep LEANBACK_LAUNCHER **永远为假** ⇒ 每次都走 warning
+            #     ⇒ 那是一条**假门禁**（不会失败，只会一直警告 —— 比红更糟，
+            #       红会被看见，警告会被忽略）。本仓铁律：
+            #       一条永远为真的断言比没有断言更危险。
+            #   ★ 两个 category 都查：LEANBACK 保证 TV 上能找到应用，
+            #     LAUNCHER 保证手机/平板桌面上还有图标（缺它 = 手机装完没图标）。
+            "$SDK/aapt" dump xmltree "$APK" AndroidManifest.xml > /tmp/manifest.txt
+            for cat in "android.intent.category.LAUNCHER" "android.intent.category.LEANBACK_LAUNCHER"; do
+              if ! grep -q "$cat" /tmp/manifest.txt; then
+                echo "::error::$APK 的 AndroidManifest 缺少 $cat"; exit 1
+              fi
+            done
+            # ★ 再把 badging 的规范化行打出来给人看 —— 它正是 Android 系统
+            #   实际认出来的 TV 入口，读起来比 xmltree 直观。
+            "$SDK/aapt" dump badging "$APK" > /tmp/badging.txt || true
+            grep -E "leanback|launchable-activity" /tmp/badging.txt || true
+            if ! grep -q "leanback-launchable-activity:" /tmp/badging.txt; then
+              echo "::error::$APK 没有 leanback 启动入口，Android TV 上装不进去"; exit 1
+            fi
+          done
 
       - name: 上传 APK
         uses: actions/upload-artifact@v4
