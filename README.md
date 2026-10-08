@@ -426,7 +426,7 @@ flutter build windows --release -t lib/shell.dart \
 | `SOURIN_DRAG_SELFTEST` | `1` | 启动时跑一次「标题栏拖拽」自检然后退出。结果写到 `%TEMP%\sourin_drag_selftest.txt` |
 | `SOURIN_WF_DEPENDS_ON_SIZE` | `0` | 让窗口边框**不**注册尺寸依赖（模拟修复前的行为，用来复现「白角」）。**只用于验证** |
 | `SOURIN_NO_REMOTE_AUTOSTART` | 任意 | 不自动启动手机遥控服务 |
-| `SOURIN_PREFETCH_DISABLE` | 任意 | 关掉流代理的预取 |
+| `SOURIN_PREFETCH_DISABLE` | 任意 | 关掉流代理的预取。★ 在**构造** `StreamProxy` 时读一次并存进实例字段（2026-10-08 改）—— 改前是每次请求现读全局，会让并发跑的测试互相干扰（见 `streamproxy.rs` 的 `prefetch_switch_is_per_instance_not_process_global`） |
 | `SOURIN_PREFETCH_DEBUG` | 任意 | 打开预取的调试日志 |
 
 > 默认全部**关闭** —— 生产行为与不设这些变量时逐字相同。

@@ -258,6 +258,38 @@ pub struct StreamProxy {
      *   ⇒ 一个慢请求不会"吃掉"后续请求的时间
      */
     client: reqwest::Client,
+    /*
+     * ═══════════════════════════════════════════════════════════════════
+     * ★★★ 并行预取的开关 —— **每实例**，不是进程级环境变量
+     * ═══════════════════════════════════════════════════════════════════
+     *
+     * # 为什么必须从环境变量改成字段（2026-10-08，CI 实测）
+     *
+     * 原来 `plan_prefetch` 直接读 `std::env::var("SOURIN_PREFETCH_DISABLE")`，
+     * 而 `deterministic_before_after_same_upstream_same_throttle` 这个测试
+     * 会 `set_var`/`remove_var` 它来做 A/B 对照。
+     * `std::env` 是**进程全局**的，而 `cargo test` 默认多线程跑同一进程里的
+     * 所有测试 ⇒ 那段"关掉预取"的窗口里，**别的测试**（如
+     * `prefetch_fetches_concurrently_and_bytes_are_exact`、
+     * `no_range_support_falls_back`、`prefetch_enabled_for_range_capable_mp4`）
+     * 恰好调 `plan_prefetch`，就会看到 `None` ⇒ 随机失败。
+     *
+     * 实测症状（CI run 37782468948 的 Windows job）：
+     * ```text
+     * test result: FAILED. 365 passed; 3 failed; ...
+     *   streamproxy::tests::no_range_support_falls_back
+     *   streamproxy::tests::prefetch_enabled_for_range_capable_mp4
+     *   streamproxy::tests::prefetch_fetches_concurrently_and_bytes_are_exact
+     * ```
+     * ★ 关键证据：`git diff 263d89c..3c677ea -- rust/sourin_core/src` **是空的**
+     *   —— 上一轮 Windows 绿、这一轮红，而 `src/` 一行没改 ⇒ 纯竞态，不是回归。
+     *   本机连跑三次（单跑 / 跑 prefetch 组 / 跑整组 streamproxy）**全绿**，
+     *   正因为本机那次没撞上窗口。
+     *
+     * ⇒ 改成**每实例一个原子开关**：测试各建各的 `StreamProxy`，互不可见。
+     *   生产行为不变（默认 `false` = 预取开，与改前一致）。
+     */
+    prefetch_disabled: std::sync::atomic::AtomicBool,
 }
 
 /// 代理到上游的请求超时
@@ -323,7 +355,28 @@ impl StreamProxy {
             serve_task: Mutex::new(None),
             start_lock: tokio::sync::Mutex::new(()),
             client,
+            /*
+             * ★ 从环境变量初始化 —— 保留生产上的回滚开关
+             *   （`SOURIN_PREFETCH_DISABLE=1` 完全回到改动前的串行透传），
+             *   但**只读一次**、存进实例字段。之后无论谁改进程环境，
+             *   这个实例的行为都不会再被别的测试影响。
+             */
+            prefetch_disabled: std::sync::atomic::AtomicBool::new(
+                std::env::var("SOURIN_PREFETCH_DISABLE").is_ok(),
+            ),
         }
+    }
+
+    /// 本实例是否禁用并行预取（测试用；生产走环境变量默认值）
+    pub fn set_prefetch_disabled(&self, disabled: bool) {
+        self.prefetch_disabled
+            .store(disabled, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// 读本实例的预取开关
+    fn prefetch_is_disabled(&self) -> bool {
+        self.prefetch_disabled
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     pub fn port(&self) -> u16 {
@@ -1330,6 +1383,7 @@ fn is_hls_segment_like(path_lower: &str, ctype_lower: &str) -> bool {
 ///   ⇒ 较弱证据，所以第一个窗口仍会逐段校验，不通过就无损回退
 /// ```
 fn plan_prefetch(
+    disabled: bool,
     status: StatusCode,
     up_headers: &HeaderMap,
     path_lower: &str,
@@ -1351,8 +1405,16 @@ fn plan_prefetch(
      * # 生产价值
      * 线上若发现预取有副作用，不必重新编译：
      *     SOURIN_PREFETCH_DISABLE=1   → 完全回到改动前的串行透传
+     *
+     * ★★ 2026-10-08：这里**不再直接读环境变量**，改成由调用方传进来的
+     *    `disabled` 参数 —— 原因是环境变量是**进程全局**的，而测试
+     *    `deterministic_before_after_same_upstream_same_throttle` 要
+     *    `set_var` 它做 A/B 对照，于是会和**并发跑的其它测试**抢同一个
+     *    全局量 ⇒ CI 上随机红 3 条。详见 `StreamProxy::prefetch_disabled`
+     *    字段上那段注释。
+     *    环境变量仍在 `StreamProxy::new()` 里读（一次），生产回滚能力不变。
      */
-    if std::env::var("SOURIN_PREFETCH_DISABLE").is_ok() {
+    if disabled {
         return None;
     }
 
@@ -2077,7 +2139,13 @@ async fn forward_request(
      * 其余情况（HLS 分片 / 支持不了 Range 的源 / 图片）**原样回退**到
      * 下面的单连接透传 —— 也就是今天的行为。
      */
-    if let Some(plan) = plan_prefetch(status, &up_headers, &path_only, &ctype) {
+    if let Some(plan) = plan_prefetch(
+        proxy.prefetch_is_disabled(),
+        status,
+        &up_headers,
+        &path_only,
+        &ctype,
+    ) {
         /*
          * ══════════════════════════════════════════════════════════════
          * ★★★ task-57：先发**首段**（64KB），不等整窗
@@ -2826,6 +2894,74 @@ mod tests {
         );
     }
 
+    /// ★★★ 回归：预取开关必须是**每实例**的，绝不能是进程全局
+    ///
+    /// # 这条测试防的是什么（CI run 37782468948 的真实故障）
+    ///
+    /// 改前 `plan_prefetch` 直接读 `std::env::var("SOURIN_PREFETCH_DISABLE")`，
+    /// 而 A/B 测试 `deterministic_before_after_same_upstream_same_throttle`
+    /// 会 `set_var` 它做对照 ⇒ 那段窗口里**任何**并发测试调 `plan_prefetch`
+    /// 都会拿到 `None` ⇒ CI 随机红 3 条（`no_range_support_falls_back` /
+    /// `prefetch_enabled_for_range_capable_mp4` /
+    /// `prefetch_fetches_concurrently_and_bytes_are_exact`）。
+    ///
+    /// ★ 判据（两条都是**直接**验隔离性，不是间接推断）：
+    /// ① 改 A 实例的开关，B 实例**必须**不受影响
+    /// ② 构造之后再改进程环境变量，已存在的实例**必须**不受影响
+    ///    （这正是竞态的机制：改前是"每次请求现读全局"，现在只在
+    ///      `new()` 里读一次）
+    #[test]
+    fn prefetch_switch_is_per_instance_not_process_global() {
+        // ── ① 实例之间互不影响 ──
+        let a = StreamProxy::new();
+        let b = StreamProxy::new();
+        assert!(!a.prefetch_is_disabled(), "新实例默认应当是**开**预取");
+        assert!(!b.prefetch_is_disabled(), "新实例默认应当是**开**预取");
+
+        a.set_prefetch_disabled(true);
+        assert!(a.prefetch_is_disabled(), "改 A 之后 A 应当是关");
+        assert!(
+            !b.prefetch_is_disabled(),
+            "★ 改 A 的开关**不能**影响 B —— 否则就还是进程全局的老毛病"
+        );
+
+        // 而且 A 关了之后，A 这条路径上的判定确实变成 None
+        let h = hdr(&[
+            ("content-range", "bytes 0-1334656/339926897"),
+            ("content-type", "video/mp4"),
+        ]);
+        assert_eq!(
+            plan_prefetch(true, StatusCode::PARTIAL_CONTENT, &h, "/m.mp4", "video/mp4"),
+            None,
+            "关了预取就应当判定为 None"
+        );
+        assert!(
+            plan_prefetch(false, StatusCode::PARTIAL_CONTENT, &h, "/m.mp4", "video/mp4").is_some(),
+            "开着预取就应当判定为 Some（与上面那条构成对照）"
+        );
+
+        a.set_prefetch_disabled(false);
+        assert!(!a.prefetch_is_disabled(), "能改回去（A/B 对照要来回切）");
+
+        // ── ② 构造后改进程环境变量，已存在的实例不受影响 ──
+        let c = StreamProxy::new();
+        assert!(!c.prefetch_is_disabled());
+        std::env::set_var("SOURIN_PREFETCH_DISABLE", "1");
+        assert!(
+            !c.prefetch_is_disabled(),
+            "★ 已构造的实例**不能**被后设的环境变量影响 —— 竞态就是这么来的"
+        );
+        // 新构造的实例才会读它（生产回滚开关仍然有效）
+        let d = StreamProxy::new();
+        assert!(
+            d.prefetch_is_disabled(),
+            "新构造的实例应当读到环境变量（生产回滚能力不能丢）"
+        );
+        std::env::remove_var("SOURIN_PREFETCH_DISABLE");
+        // ★ 收尾：清干净，免得污染同一进程里后面的测试
+        assert!(!StreamProxy::new().prefetch_is_disabled(), "清掉后新实例应当回到开");
+    }
+
     /// 解析 Content-Range
     #[test]
     fn content_range_parses() {
@@ -2850,7 +2986,7 @@ mod tests {
             ("content-range", "bytes 0-1334656/339926897"),
             ("content-type", "video/mp4"),
         ]);
-        let plan = plan_prefetch(StatusCode::PARTIAL_CONTENT, &h, "/movie.mp4", "video/mp4")
+        let plan = plan_prefetch(false, StatusCode::PARTIAL_CONTENT, &h, "/movie.mp4", "video/mp4")
             .expect("206 + mp4 应当启用并行预取");
         assert_eq!(plan.start, 0);
         assert_eq!(plan.end, 1334656);
@@ -2866,20 +3002,20 @@ mod tests {
         // .ts 分片
         let h = hdr(&[("content-range", &big), ("content-type", "video/mp2t")]);
         assert_eq!(
-            plan_prefetch(StatusCode::PARTIAL_CONTENT, &h, "/a/0000000.ts", "video/mp2t"),
+            plan_prefetch(false, StatusCode::PARTIAL_CONTENT, &h, "/a/0000000.ts", "video/mp2t"),
             None,
             "HLS 的 .ts 分片绝不能并发预取"
         );
         // .m4s 分片（CMAFF/DASH）
         let h2 = hdr(&[("content-range", &big)]);
         assert_eq!(
-            plan_prefetch(StatusCode::PARTIAL_CONTENT, &h2, "/a/seg.m4s", ""),
+            plan_prefetch(false, StatusCode::PARTIAL_CONTENT, &h2, "/a/seg.m4s", ""),
             None,
             "fMP4 分片也不能预取"
         );
         // 分片扩展名但 Content-Type 缺失，也要挡住
         assert_eq!(
-            plan_prefetch(StatusCode::PARTIAL_CONTENT, &h2, "/a/x.aac", ""),
+            plan_prefetch(false, StatusCode::PARTIAL_CONTENT, &h2, "/a/x.aac", ""),
             None
         );
     }
@@ -2890,7 +3026,7 @@ mod tests {
         // 200 且没有 Accept-Ranges ⇒ 不能预取
         let h = hdr(&[("content-length", "99999999"), ("content-type", "video/mp4")]);
         assert_eq!(
-            plan_prefetch(StatusCode::OK, &h, "/m.mp4", "video/mp4"),
+            plan_prefetch(false, StatusCode::OK, &h, "/m.mp4", "video/mp4"),
             None,
             "没声明 Accept-Ranges 就不能假设能按偏移取"
         );
@@ -2901,14 +3037,14 @@ mod tests {
             ("content-length", "99999999"),
         ]);
         assert!(
-            plan_prefetch(StatusCode::OK, &h2, "/m.mp4", "video/mp4").is_some(),
+            plan_prefetch(false, StatusCode::OK, &h2, "/m.mp4", "video/mp4").is_some(),
             "200 + Accept-Ranges + 总长 应当允许（首窗验证过才吐字节）"
         );
 
         // 206 但没有 Content-Range ⇒ 拒绝（拿不到范围就无法校验）
         let h3 = hdr(&[]);
         assert_eq!(
-            plan_prefetch(StatusCode::PARTIAL_CONTENT, &h3, "/m.mp4", "video/mp4"),
+            plan_prefetch(false, StatusCode::PARTIAL_CONTENT, &h3, "/m.mp4", "video/mp4"),
             None
         );
     }
@@ -2919,7 +3055,7 @@ mod tests {
         let small = format!("bytes 0-{}/{}", 64 * 1024 - 1, 64 * 1024);
         let h = hdr(&[("content-range", &small)]);
         assert_eq!(
-            plan_prefetch(StatusCode::PARTIAL_CONTENT, &h, "/cover.mp4", "video/mp4"),
+            plan_prefetch(false, StatusCode::PARTIAL_CONTENT, &h, "/cover.mp4", "video/mp4"),
             None,
             "小于 512KB 不值得并发"
         );
@@ -2927,7 +3063,7 @@ mod tests {
         let big = format!("bytes 0-{}/99999999", 4 * 1024 * 1024);
         let h2 = hdr(&[("content-range", &big), ("content-type", "image/jpeg")]);
         assert_eq!(
-            plan_prefetch(StatusCode::PARTIAL_CONTENT, &h2, "/c.jpg", "image/jpeg"),
+            plan_prefetch(false, StatusCode::PARTIAL_CONTENT, &h2, "/c.jpg", "image/jpeg"),
             None,
             "图片不预取"
         );
@@ -3504,15 +3640,25 @@ mod tests {
          * ★ 顺序很重要：先 ON 再 OFF 再 ON，取各自最好值 ——
          *   与真机 A/B 同样的交替思路，但这里是确定性的，交替只是保险。
          *
-         * ⚠️ SOURIN_PREFETCH_DISABLE 是**进程级**环境变量。
-         *    本测试自己串行地设置/清除它；其它测试各自用独立的
-         *    StreamProxy 与独立上游，且请求体都很小（不会命中预取路径），
-         *    所以并发跑也不会被这个变量影响。
+         * ★★ 2026-10-08 改：原来这里是
+         * ```rust
+         * std::env::set_var("SOURIN_PREFETCH_DISABLE", "1");
+         * let (off_ms, off_body) = read_first_window(...).await;
+         * std::env::remove_var("SOURIN_PREFETCH_DISABLE");
+         * ```
+         * 而 `std::env` 是**进程全局**的 ⇒ 在那段窗口里，**任何**并发跑的
+         * 测试只要调 `plan_prefetch` 都会看到"预取被禁用"，于是随机失败。
+         * CI 实测（run 37782468948）红了 3 条，且 `src/` 一行没改 ⇒ 纯竞态。
+         *
+         * ⇒ 现在改成**本实例的原子开关**（`proxy.set_prefetch_disabled`）。
+         *   `proxy` 是本测试自己建的，别的测试看不到它 ⇒ 彻底隔离。
+         *   ★ 断言强度**没有放宽**：OFF 仍然真的走串行路径、ON 仍然真的走并行，
+         *     加速比阈值仍是 ≥1.8×，字节正确性仍然逐字节比。
          */
         let (on1_ms, on1_body) = read_first_window(local.clone()).await;
-        std::env::set_var("SOURIN_PREFETCH_DISABLE", "1");
+        proxy.set_prefetch_disabled(true);
         let (off_ms, off_body) = read_first_window(local.clone()).await;
-        std::env::remove_var("SOURIN_PREFETCH_DISABLE");
+        proxy.set_prefetch_disabled(false);
         let (on2_ms, on2_body) = read_first_window(local.clone()).await;
 
         let on_ms = on1_ms.min(on2_ms);
