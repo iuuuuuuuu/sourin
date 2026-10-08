@@ -15,7 +15,8 @@
 # ```text
 # 只在手动触发时可用：Actions → 构建 → Run workflow → 填 release_tag（如 v1.0.0）
 #   · 留空  = 只构建，不发 Release
-#   · 填了  = 构建完自动建 Release 并上传三个平台的包 + SHA256SUMS.txt
+#   · 填了  = 构建完自动建 Release 并上传：Windows 安装包 + 免安装 zip、
+#             macOS zip、Android 两个 APK、SHA256SUMS.txt
 # 发 Android 的包要**同时**把 build_android 勾上（默认不勾）。
 # ```
 # ★ 三个平台 job 各自把成品压成 `rel-*` artifact，由末尾的 publish job 汇总。
@@ -192,12 +193,80 @@ jobs:
             if (-not $hasExe) { throw "zip 结构不对：顶层没有 sourin_spike.exe" }
           } finally { $z.Dispose() }
 
-      - name: 上传 Release zip（Windows）
+      # ── 可安装版：NSIS 安装包（只在填了 release_tag 时才跑）──────────
+      #   ★ 为什么必须有：zip 是**免安装版**（解压即用），但很多用户要的是
+      #     「双击 → 下一步 → 装好、开始菜单和桌面都有图标、能在「应用和功能」
+      #     里卸载」的那种。两者都要发。
+      #   ★ 安装包的 payload **就是刚构建出来的 Release 目录** —— 与 zip
+      #     同源同 commit，不存在「安装包里的 exe 比 zip 里的旧」这种可能。
+      - name: 装 NSIS
+        if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+        shell: pwsh
+        run: |
+          # ★ 用 choco 装 NSIS。runner 上本来没有 makensis。
+          choco install nsis --no-progress -y
+          # ★ 刷新 PATH：choco 装完当前会话的 PATH 还是旧的
+          $env:Path = [System.Environment]::GetEnvironmentVariable('Path','Machine') + ';' +
+                      [System.Environment]::GetEnvironmentVariable('Path','User')
+          $mk = Get-Command makensis -ErrorAction SilentlyContinue
+          if (-not $mk) { throw '装完 NSIS 还是找不到 makensis' }
+          "makensis = $($mk.Source)"
+          & $mk.Source /VERSION
+
+      - name: 编译安装包
+        if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+        shell: pwsh
+        run: |
+          $tag = '${{ inputs.release_tag }}'
+          $rel = 'build/windows/x64/runner/Release'
+          $pay = 'installer/payload'
+          # ★ 每次重建 payload，避免混进上一次的残留
+          if (Test-Path $pay) { Remove-Item $pay -Recurse -Force }
+          New-Item -ItemType Directory -Path $pay -Force | Out-Null
+          # 顶层：exe + dll + json（与交付 zip 的顶层完全一致）
+          Get-ChildItem -LiteralPath $rel -File |
+            Where-Object { $_.Extension -in @('.exe','.dll','.json') } |
+            ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $pay -Force }
+          Copy-Item -LiteralPath (Join-Path $rel 'data') -Destination (Join-Path $pay 'data') -Recurse -Force
+          $n = (Get-ChildItem $pay -Recurse -File | Measure-Object).Count
+          "payload 文件数 = $n"
+          # ★ 自检：安装包不能漏掉核心库与入口 exe（漏了就是装完打不开）
+          foreach ($must in @('sourin_spike.exe','sourin_core.dll','libmpv-2.dll','data/app.so')) {
+            if (-not (Test-Path (Join-Path $pay $must))) { throw "payload 缺少 $must" }
+          }
+          # ★ 版本号从 tag 注入（tag 形如 v1.0.0 ⇒ 1.0.0）
+          $ver = $tag -replace '^v',''
+          $outfile = "Sourin-Setup-$ver.exe"
+          "版本 = $ver，产物名 = $outfile"
+          Set-Location installer
+          & makensis /V2 "/DAPP_VERSION=$ver" "/DOUTFILE=$outfile" sourin.nsi
+          if ($LASTEXITCODE -ne 0) { throw "makensis 失败（exit $LASTEXITCODE）" }
+          Set-Location ..
+          $exe = "installer/$outfile"
+          $i = Get-Item $exe
+          "安装包 = $($i.Length) 字节"
+          # ★ 自检：安装包体积必须 > 20MB（payload 约 130MB，压缩后约 28MB）。
+          #   若 payload 没被收进去，makensis 会产出一个小得多的包 ——
+          #   那种包装完是空的，而 makensis 自己**不会报错**。
+          if ($i.Length -lt 20000000) { throw "安装包只有 $($i.Length) 字节，payload 很可能没进去" }
+          # ★ 再确认包**里**真的含关键文件（7z 能直接列 NSIS 的内容）
+          $sevenZip = 'C:\Program Files\7-Zip\7z.exe'
+          if (Test-Path $sevenZip) {
+            $list = & $sevenZip l $exe 2>&1 | Out-String
+            foreach ($must in @('sourin_spike.exe','sourin_core.dll','app.so')) {
+              if ($list -notmatch [regex]::Escape($must)) { throw "安装包里没有 $must" }
+            }
+            '✓ 7z 确认包内含 sourin_spike.exe / sourin_core.dll / app.so'
+          } else { '（runner 上没装 7-Zip，跳过包内容核验）' }
+
+      - name: 上传 Release zip + 安装包（Windows）
         if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
         uses: actions/upload-artifact@v4
         with:
           name: rel-windows-${{ inputs.release_tag }}
-          path: build/sourin-windows-${{ inputs.release_tag }}.zip
+          path: |
+            build/sourin-windows-${{ inputs.release_tag }}.zip
+            installer/Sourin-Setup-*.exe
           retention-days: 1
 
   # ═════════════════════════════════════════════════════════════════════
@@ -594,7 +663,7 @@ jobs:
   #  十几分钟，125MB 的 macOS 包要一小时以上，而且中途会被截断。
   #  ⇒ 正确做法是让 **runner 自己**把成品传上去：runner 与 GitHub 之间
   #    是机房直连。所以三个 job 各自在打包后额外压一份 `rel-*` artifact，
-  #    本 job 只负责把它们汇总成 Release。
+  #    本 job 只负责把它们汇总成 Release（含 Windows 的 NSIS 安装包）。
   #
   #  # 为什么用 `gh release create` 而不是 softprops/action-gh-release
   #
@@ -649,11 +718,18 @@ jobs:
           M="rel/sourin-macos-$TAG.zip"
           A64="rel/sourin-android-arm64-$TAG.apk"
           A7="rel/sourin-android-armv7-$TAG.apk"
+          # ★ 安装包（可安装版）。版本号是 tag 去掉前导 v。
+          SETUP="rel/Sourin-Setup-${TAG#v}.exe"
           FILES=""
           # ★ 逐个平台判定：Windows / macOS 是必跑 job，没产物就是真失败；
           #   Android 默认不跑，所以它缺席是正常的（不报错，只是不发 APK）。
           if [ "${{ needs.windows.result }}" = "success" ] && [ -f "$W" ]; then
             FILES="$FILES $W"; echo "✓ Windows  $W";
+            # ★ 安装包跟着 Windows 一起判定：它就是在 Windows job 里编的。
+            #   若它不在，说明安装包那一步没产出 —— 那是个真问题，要说出来，
+            #   但**不阻塞** zip 的发布（zip 本身是可用的免安装版）。
+            if [ -f "$SETUP" ]; then FILES="$FILES $SETUP"; echo "✓ 安装包    $SETUP";
+            else echo "::warning::Windows 安装包 $SETUP 不在 —— 本次只发免安装版"; fi
           else echo "✗ Windows 包不可用（job=${{ needs.windows.result }}）"; fi
           if [ "${{ needs.macos.result }}" = "success" ] && [ -f "$M" ]; then
             FILES="$FILES $M"; echo "✓ macOS    $M";
@@ -670,7 +746,7 @@ jobs:
           #   不匹配任何文件，bash 会把**字面量** `*.apk` 传给 sha256sum 并报错。
           #   所以按**实际存在的文件**逐个算。
           ( cd rel && : > SHA256SUMS.txt
-            for x in *.zip *.apk; do
+            for x in *.zip *.apk *.exe; do
               [ -f "$x" ] && sha256sum "$x" >> SHA256SUMS.txt
             done ) || true
           echo "---- SHA256SUMS.txt ----"

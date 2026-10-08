@@ -80,6 +80,11 @@ key.properties
 *.apk
 *.aab
 *.exe
+
+# NSIS 安装包构建的中间物与产物（CI 每次现造，不进版本库）
+/installer/payload/
+/installer/_dryrun.exe
+/installer/Sourin-Setup-*.exe
 *.msi
 *.dll
 *.so
