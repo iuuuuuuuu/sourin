@@ -121,18 +121,21 @@ void main() {
       );
     });
 
-    test('★ 键盘图标全仓只此一处（改错地方会被这条抓到）', () {
-      final hits = <String>[];
-      for (final f in dartFilesUnder(Directory('lib'))) {
-        if (f.readAsStringSync().contains('Icons.keyboard_outlined')) {
-          hits.add(f.path.replaceAll('\\', '/'));
-        }
-      }
-      expect(
-        hits,
-        <String>['lib/ui/player_page.dart'],
-        reason: '★ 播放页顶栏的键盘入口若被挪到别处，本测试必须跟着更新（不是自动通过）',
-      );
+    test('★ 播放页的快捷键提示入口没被挪到别处', () {
+      /*
+       * ★ 2026-10-10：这条原来断言「`Icons.keyboard_outlined` 全仓只出现在
+       *   player_page.dart」。实测它现在也出现在 settings_page.dart ——
+       *   那是「PC 播放手势」设置项的图标，与播放页的快捷键提示是**两个不同
+       *   功能**碰巧用了同一个图标（Material 里表示「键盘」的图标就这一个）。
+       *   ⇒ 判据改为「**播放页那个入口**仍在 player_page」，
+       *     而不是「这个图标全仓唯一」—— 后者把两个无关功能焊在一起。
+       *   ⚠️ 仍然守得住原意：把播放页那枚挪走或改图标，这条照样红。
+       */
+      final page = File('lib/ui/player_page.dart').readAsStringSync();
+      expect(page.contains('Icons.keyboard_outlined'), isTrue,
+          reason: '★ 播放页顶栏的键盘入口若被挪走，本测试必须跟着更新（不是自动通过）');
+      expect(page.contains('onHints'), isTrue,
+          reason: '★ 播放页那枚接的是提示回调 onHints');
     });
   });
 }

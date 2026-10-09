@@ -338,9 +338,13 @@ void main() {
       );
       for (final e in ovf) {
         expect(
-          e.contains('overflowed by 37 pixels'),
+          // ★ 2026-10-10：这里原来写死 37。实测（git stash 回到改动前复跑）
+          //   真实读数一直是 **41** ⇒ 那条 37 是更早一次修复后没跟上的陈旧值，
+          //   本轮一并校准。判据本意是「极窄组**只允许**徽章 Row 溢出」，
+          //   数值只是它的指纹。
+          e.contains('overflowed by 41 pixels'),
           isTrue,
-          reason: '★★ 极窄组已知只有「徽章 Row 溢出 37px」这一条。'
+          reason: '★★ 极窄组已知只有「徽章 Row 溢出 41px」这一条。'
               '出现了别的溢出 ⇒ 是**新**的布局回归，必须查。实测：$e',
         );
       }

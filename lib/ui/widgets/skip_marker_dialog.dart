@@ -3223,7 +3223,13 @@ class _EdgeRow extends StatelessWidget {
           color: colors.mutedForeground,
         );
 
-        final labelNeed = _textWidthOf(context, label, labelStyle) + accentCost;
+        final labelNeed = _textWidthOf(context, label, labelStyle) +
+            accentCost +
+            // ★ 2026-10-10：留 1px 余量。`_textWidthOf` 用 TextPainter 量，
+            //   而真正布局时 `RenderParagraph.getMaxIntrinsicWidth` 的取整
+            //   路径可能给出**大 1px** 的结果（实测手机宽度下 need=57 / avail=56）。
+            //   差这 1px 就会把四个汉字截成 `片…` —— 宁可左边多 1px 空隙。
+            1.0;
         final valueNeed = _textWidthOf(
           context,
           v == null ? '— — —' : _fmtSeconds(v),
@@ -3279,8 +3285,30 @@ class _EdgeRow extends StatelessWidget {
             hintW = budget - twoNeed;
           } else {
             // ③ 极窄：按需要的比例缩，二者都还能看见一部分
+            //
+            // ★ 2026-10-10：这里原来直接 `budget * labelNeed / twoNeed`，
+            //   标签会**差 1px 不够**（实测：手机宽度 411 下
+            //   `avail=56.0 need=57.0` ⇒ 渲染成 `片…`，四个汉字被截断）。
+            //   根因是纯浮点/取整：按比例分必然有一侧差零点几像素。
+            //   ⇒ 标签是**第一优先**（规则④），差那 1px 应该从读数那边扣。
             labelW = budget * labelNeed / twoNeed;
             valueW = budget - labelW;
+            /*
+             * ★ 2026-10-10：按比例分之后标签可能**只差零点几像素**。
+             *   那一点点从读数那边补过来（标签是第一优先，见规则④）。
+             *
+             * ⚠️ 上限必须**很小**：极窄窗口（实测 300 逻辑宽）下比例分本来
+             *   会让标签缩到 29px —— 那是**正确行为**（标签与读数按比例都保留
+             *   一部分，好过把整行撑爆）。第一版这里没设上限，导致任何宽度下
+             *   标签都拿到完整宽度 ⇒ `test/t486_..._test.dart` 的阳性对照
+             *   （「极窄下确实该被省略，尺子必须灵敏」）直接失效。
+             */
+            const kRoundingSlack = 1.0;
+            final deficit = math.min(labelNeed - labelW, kRoundingSlack);
+            if (deficit > 0 && valueW - deficit >= 1.0) {
+              labelW += deficit;
+              valueW -= deficit;
+            }
             hintW = 0.0;
           }
         }
