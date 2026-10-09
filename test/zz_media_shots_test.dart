@@ -316,6 +316,101 @@ void main() {
     // ★ 但作品信息与集列表必须在
     expect(find.text('已下载'), findsOneWidget);
   });
+  testWidgets('SHOT-5 本地播放页：批量删除选择态', (t) async {
+    await setShotViewport(t, const Size(1440, 900));
+    final dir = Directory(
+        '${scanRoot.path}${Platform.pathSeparator}无职转生 第三季')
+      ..createSync(recursive: true);
+    for (var i = 1; i <= 5; i++) {
+      File('${dir.path}${Platform.pathSeparator}第0${i}集.mp4')
+          .writeAsBytesSync(List<int>.filled(2 * 1024 * 1024, 0x42));
+    }
+    final work = CachedWork(
+      dirName: '无职转生 第三季',
+      path: dir.path,
+      episodes: <CachedEpisode>[
+        for (var i = 1; i <= 5; i++)
+          CachedEpisode(
+              fileName: '第0${i}集.mp4',
+              bytes: 2 * 1024 * 1024,
+              isComplete: true),
+      ],
+      description: '批量删除态截图。',
+    );
+    NetworkStatus.debugProbe = () async => true;
+
+    await t.runAsync(() async {
+      await t.pumpWidget(_appWith(MediaPage(
+        provider: kLocalProvider,
+        id: work.episodes.first.fileName,
+        title: work.dirName,
+        localPath: '${dir.path}${Platform.pathSeparator}第01集.mp4',
+        localMeta: work,
+      )));
+      for (var i = 0; i < 40; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+        await t.pump();
+        while (t.takeException() != null) {}
+      }
+    });
+    _claim(t);
+
+    // 进「管理」= 选择态（Owner：可以多选批量删除）
+    await t.tap(find.text('管理'));
+    for (var k = 0; k < 3; k++) {
+      await t.runAsync(() async {
+        for (var i = 0; i < 5; i++) {
+          await Future<void>.delayed(const Duration(milliseconds: 30));
+          await t.pump();
+        }
+      });
+    }
+    // 勾两集
+    for (final n in <String>['第02集', '第03集']) {
+      final row = find.descendant(
+        of: find.byType(DetailPage),
+        matching: find.textContaining(n),
+      );
+      if (row.evaluate().isNotEmpty) {
+        await t.tap(row.first);
+        await t.pump();
+      }
+    }
+    for (var k = 0; k < 2; k++) {
+      await t.runAsync(() async {
+        for (var i = 0; i < 5; i++) {
+          await Future<void>.delayed(const Duration(milliseconds: 30));
+          await t.pump();
+        }
+      });
+    }
+    _claim(t);
+    final f = await saveViewShot(t, 'shot5_local_batch_delete');
+    debugPrint('SHOT-5 = ${f.path}');
+    expect(find.textContaining('已选'), findsOneWidget,
+        reason: '★★★ 选择态必须有「已选 N 集」+ 全选/删除/取消');
+  });
+
+  testWidgets('SHOT-6 在线详情页（右栏）：与本地页同一套版式', (t) async {
+    await setShotViewport(t, const Size(1440, 900));
+    NetworkStatus.debugProbe = () async => true;
+    await t.runAsync(() async {
+      await t.pumpWidget(_appWith(MediaPage(
+        provider: 'demo',
+        id: '42',
+        title: '在线作品',
+        localPath: null,
+      )));
+      for (var i = 0; i < 40; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+        await t.pump();
+        while (t.takeException() != null) {}
+      }
+    });
+    _claim(t);
+    final f = await saveViewShot(t, 'shot6_online_detail');
+    debugPrint('SHOT-6 = ${f.path}');
+  });
 }
 
 /// 一张 8x8 的纯色 PNG（当封面用，避免整片占位块看不清排版）
