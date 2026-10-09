@@ -15,12 +15,13 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart' as mui;
 import 'package:sourin_spike/core/download_dir.dart';
 import 'package:sourin_spike/core/ui_prefs.dart';
 import 'package:sourin_spike/shell.dart'; // debugShellKey / ShellPage / AppTab
 import 'package:sourin_spike/ui/cache_page.dart';
+import 'package:sourin_spike/ui/app_scaffold.dart';
+import 'package:sourin_spike/ui/app_theme.dart';
 // BottomBarMarker 不在 shell.dart 里，定义在 spatial_nav.dart:1124
 import 'package:sourin_spike/ui/spatial_nav.dart' show BottomBarMarker;
 
@@ -54,10 +55,10 @@ File _writeBytes(String path, int bytes, {bool part = false}) {
 ///    整页会被换成 ErrorWidget，断言只会以「找不到 XX」失败，
 ///    真因只在 stderr ⇒ 属于**探针假阴性**，不是页面缺陷。
 Widget _appWith({required Widget home}) {
-  final theme = FTheme.neutral.dark.desktop;
+  final theme = AppTheme.themeFor(Brightness.dark);
   return mui.MaterialApp(
-    theme: theme.toApproximateMaterialTheme(),
-    builder: (context, child) => FTheme(
+    theme: theme,
+    builder: (context, child) => AppThemeHost(
       data: theme,
       child: child ?? const mui.SizedBox(),
     ),

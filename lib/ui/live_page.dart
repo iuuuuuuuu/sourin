@@ -49,6 +49,8 @@
 // > 频道列表本身会变：启用/停用源、源新增频道、源失效被剔除。
 // > 实测确认过问题：切走再切回，完全没有重新请求。
 
+import '../ui/app_scaffold.dart';
+
 import 'dart:async';
 
 import 'package:flutter/foundation.dart' show ValueListenable;
@@ -2021,7 +2023,7 @@ class LivePageState extends State<LivePage> {
          * ⚠️ **不** import `player_page.dart` 的 `PlayerPanelTheme`
          *   （那会把整个播放页拉进本页的依赖图）。
          *   ★ 而主题**本来就有** —— `shell.dart:1079` 的
-         *     `MaterialApp.builder` 里全局注入了 `FTheme(data: theme)`
+         *     `MaterialApp.builder` 里全局注入了 `AppThemeHost(data: materialTheme)`
          *     ⇒ `EpisodePanel` 里的 `FTheme.of(context)` 能正常工作。
          *     （已核：`episode_strip.dart` 用了 7 处 `FTheme.of(context)`）
          * ⚠️ `currentIndex: curIdx` —— **↑/↓ 切台后高亮会自动跟随**

@@ -37,10 +37,11 @@
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 
 import 'package:sourin_spike/ui/detail_page.dart';
+import 'package:sourin_spike/ui/app_scaffold.dart';
+import 'package:sourin_spike/ui/app_theme.dart';
 
 // ═══════════════════════════════════════════════════════════════════════
 //  宿主：复刻生产环境的两步主题构造
@@ -57,12 +58,12 @@ Widget hostInSidebar({
   Brightness brightness = Brightness.light,
 }) {
   final theme = brightness == Brightness.light
-      ? FTheme.neutral.light.desktop
-      : FTheme.neutral.dark.desktop;
+      ? AppTheme.themeFor(Brightness.light)
+      : AppTheme.themeFor(Brightness.dark);
   return MaterialApp(
     debugShowCheckedModeBanner: false,
-    theme: theme.toApproximateMaterialTheme(),
-    builder: (_, c) => FTheme(data: theme, child: c ?? const SizedBox()),
+    theme: theme,
+    builder: (_, c) => AppThemeHost(data: theme, child: c ?? const SizedBox()),
     home: MediaQuery(
       // 模拟"窗口宽 1280"
       data: MediaQueryData(size: Size(windowWidth, 800)),

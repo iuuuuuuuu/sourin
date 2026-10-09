@@ -52,11 +52,12 @@ import 'dart:io';
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/scheduler.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 
 import 'package:sourin_spike/ui/widgets/skip_marker_dialog.dart';
 import 'package:sourin_spike/ui/widgets/skip_timeline.dart';
+import 'ui/app_scaffold.dart';
+import 'ui/app_theme.dart';
 
 /// 自检是否启用（环境变量控制，**默认关** ⇒ 生产行为不变）
 bool get dragSelfTestEnabled =>
@@ -108,11 +109,11 @@ class _SelfTestApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = FTheme.neutral.light.desktop;
+    final theme = AppTheme.themeFor(Brightness.light);
     return MaterialApp(
-      theme: theme.toApproximateMaterialTheme(),
+      theme: theme,
       builder: (context, c) =>
-          FTheme(data: theme, child: c ?? const SizedBox()),
+          AppThemeHost(data: theme, child: c ?? const SizedBox()),
       home: _SelfTestPage(log: log, sink: sink),
     );
   }

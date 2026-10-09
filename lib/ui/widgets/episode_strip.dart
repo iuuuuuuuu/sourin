@@ -95,7 +95,6 @@
 
 import 'dart:math' as math;
 
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 // ⚠️ `LogicalKeyboardKey` / `KeyDownEvent` 在 services 里，
 //    `material_ui` **不**转出它们（键盘事件是引擎层概念，不属于 UI 层）
@@ -106,6 +105,7 @@ import '../../core/models.dart';
 import '../tokens.dart';
 import 'motion_prefs.dart';
 import 'overlay_motion.dart';
+import '../../ui/app_palette.dart';
 
 /// 超过多少集才显示「展开」箭头（**只对手机/TV 生效**）
 ///
@@ -859,7 +859,7 @@ class _EpisodeChipState extends State<_EpisodeChip> {
 
   @override
   Widget build(BuildContext context) {
-    final colors = FTheme.of(context).colors;
+    final colors = AppPalette.of(context);
     final radius = widget.pill ? Radii.rFull : Radii.rSm;
 
     final chip = Material(
@@ -971,7 +971,7 @@ class _MoreButtonState extends State<_MoreButton> {
 
   @override
   Widget build(BuildContext context) {
-    final colors = FTheme.of(context).colors;
+    final colors = AppPalette.of(context);
 
     final body = Material(
       color: colors.secondary.withValues(alpha: 0.55),
@@ -1601,7 +1601,7 @@ class _StripDrawer extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final colors = FTheme.of(context).colors;
+    final colors = AppPalette.of(context);
     final screen = MediaQuery.of(context).size;
 
     // 当前集标题（原版 `flow__meta`：「N 集 · 正在播 第X集」）
@@ -1962,7 +1962,7 @@ class _EpisodeSheetState extends State<EpisodeSheet> {
 
   @override
   Widget build(BuildContext context) {
-    final colors = FTheme.of(context).colors;
+    final colors = AppPalette.of(context);
     final screen = MediaQuery.of(context).size;
     final shown = _shown;
 
@@ -2314,7 +2314,7 @@ class _EpisodeSearchField extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final colors = FTheme.of(context).colors;
+    final colors = AppPalette.of(context);
     return TextField(
       controller: controller,
       onChanged: onChanged,
@@ -2377,7 +2377,7 @@ class _ChunkPillState extends State<_ChunkPill> {
 
   @override
   Widget build(BuildContext context) {
-    final colors = FTheme.of(context).colors;
+    final colors = AppPalette.of(context);
 
     final body = Material(
       color: widget.active
@@ -2441,7 +2441,7 @@ class _SheetIconButtonState extends State<_SheetIconButton> {
 
   @override
   Widget build(BuildContext context) {
-    final colors = FTheme.of(context).colors;
+    final colors = AppPalette.of(context);
 
     final body = Material(
       color: Colors.transparent,

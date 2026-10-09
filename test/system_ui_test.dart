@@ -35,10 +35,10 @@
 
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:sourin_spike/ui/app_theme.dart';
 import 'package:sourin_spike/ui/system_ui.dart';
+import 'package:sourin_spike/ui/app_scaffold.dart';
 
 const int kBlack = 0xFF000000;
 const int kFloorLight = 0xFFEEF0F6;
@@ -241,17 +241,17 @@ void main() {
 
     /// 与生产同形：`SystemUiHost` 在 `MaterialApp.builder` 里（shell.dart:1881-1885），
     /// `FScaffold` 在它下面的页面里（shell.dart:3330）。
-    Widget foruiTree({int homeKey = 1}) {
-      final theme = FTheme.neutral.light.desktop;
+    Widget scaffoldTree({int homeKey = 1}) {
+      final theme = AppTheme.themeFor(Brightness.light);
       return MaterialApp(
         theme: ThemeData.light(),
         builder: (context, child) => SystemUiHost(
           brightness: Brightness.light,
           child: child ?? const SizedBox.shrink(),
         ),
-        home: FTheme(
+        home: AppThemeHost(
           data: theme,
-          child: FScaffold(
+          child: AppScaffold(
             key: ValueKey<int>(homeKey),
             child: const SizedBox.expand(),
           ),
@@ -259,28 +259,41 @@ void main() {
       );
     }
 
-    testWidgets('前提：forui 的 FScaffold 确实挂了 SystemUiOverlayStyle.dark 的 region',
+    /*
+     * ★ 这条的前提在移除 forui 之后**反转**了
+     *
+     * 原来这里断言"外壳（forui 的 FScaffold）挂了 `systemNavigationBarColor: 黑`
+     * 的 region" —— 因为只有存在这个**竞争者**，下面那几条才能测出
+     * 「我们的最后一刀有没有赢」。
+     *
+     * 现在那层 region 随 forui 一起没了：`AppScaffold` 刻意**不**发
+     * `AnnotatedRegion<SystemUiOverlayStyle>` —— 系统 UI 的唯一真相来源
+     * 是 `SystemUiHost`，多一个 region 就是多一个静默抢写的可能。
+     *
+     * ⚠️ 所以判据从「必须有竞争的 region」翻成「**绝不能**有」：
+     *    在旧的 forui 外壳下这条会红（那里确实挂了一个），因此它测得出反面。
+     */
+    testWidgets('★ 外壳不再挂自己的 SystemUiOverlayStyle region（唯一的真相来源是 SystemUiHost）',
         (tester) async {
-      await tester.pumpWidget(foruiTree());
+      await tester.pumpWidget(scaffoldTree());
       await tester.pump();
 
       final regions = tester
           .widgetList<AnnotatedRegion<SystemUiOverlayStyle>>(
               find.byType(AnnotatedRegion<SystemUiOverlayStyle>))
           .toList();
-      expect(regions, isNotEmpty,
-          reason: 'FScaffold 没挂 region ⇒ 本文件的用例无法复现真机现象，测试形状已失效');
       expect(
-        regions.map((r) => r.value).any((v) =>
-            v.systemNavigationBarColor == const Color(kBlack)),
-        isTrue,
-        reason: 'forui 的 region 值不再是黑的 ⇒ forui 已修，本组用例的前提变了，应当复核',
+        regions.where((r) =>
+            r.value.systemNavigationBarColor == const Color(kBlack)),
+        isEmpty,
+        reason: '外壳里出现了一条把导航栏按黑的 region —— 系统 UI 必须只有'
+            'SystemUiHost 一个真相来源，多写者会在每帧的层通道上互相抢写',
       );
     });
 
     testWidgets('★ 空闲帧：automaticSystemUiAdjustment 必须是关的（框架文档指定的开关）',
         (tester) async {
-      await tester.pumpWidget(foruiTree());
+      await tester.pumpWidget(scaffoldTree());
       await tester.pump();
 
       final views = WidgetsBinding.instance.renderViews.toList();
@@ -299,7 +312,7 @@ void main() {
     testWidgets('★ 空闲帧：平台通道上一条消息都不该有（去重生效，零开销）', (tester) async {
       installRecorder(tester);
       await dirty(tester);
-      await tester.pumpWidget(foruiTree());
+      await tester.pumpWidget(scaffoldTree());
       await tester.pump();
       expect(SystemChrome.latestStyle!.systemNavigationBarColor, const Color(kFloorLight));
 
@@ -321,7 +334,7 @@ void main() {
     testWidgets('★ 空闲帧：即使强制层通道开着，我们的最后一刀也必须赢', (tester) async {
       installRecorder(tester);
       await dirty(tester);
-      await tester.pumpWidget(foruiTree());
+      await tester.pumpWidget(scaffoldTree());
       await tester.pump();
 
       // 故意把通道重新打开，模拟「关不掉」的最坏情况：

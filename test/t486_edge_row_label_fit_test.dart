@@ -29,17 +29,18 @@
 //    这样下次谁再把分配改回"按比例"，`flutter test` 就会红。
 import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 
 import 'package:sourin_spike/ui/widgets/skip_marker_dialog.dart';
+import 'package:sourin_spike/ui/app_scaffold.dart';
+import 'package:sourin_spike/ui/app_theme.dart';
 
 /// 与 `t462` 同构的宿主 —— 生产外壳的**最小**复刻
 Widget _host(Widget child) {
-  final theme = FTheme.neutral.light.desktop;
+  final theme = AppTheme.themeFor(Brightness.light);
   return MaterialApp(
-    theme: theme.toApproximateMaterialTheme(),
-    builder: (context, c) => FTheme(data: theme, child: c ?? const SizedBox()),
+    theme: theme,
+    builder: (context, c) => AppThemeHost(data: theme, child: c ?? const SizedBox()),
     home: child,
   );
 }

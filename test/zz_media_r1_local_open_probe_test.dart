@@ -18,11 +18,11 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart' show MethodCall, MethodChannel;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart' as mui;
 import 'package:media_kit/media_kit.dart';
 import 'package:sourin_spike/core/clip_download.dart';
 import 'package:sourin_spike/core/ui_prefs.dart';
+import 'package:sourin_spike/ui/app_theme.dart';
 import 'package:sourin_spike/ui/cache_page.dart';
 import 'package:sourin_spike/ui/detail_page.dart';
 import 'package:sourin_spike/ui/media_page.dart';
@@ -37,12 +37,11 @@ Directory _sandbox(String name) {
   return d;
 }
 
+/// ★ forui 移除后（theme agent）的包装：直接用 AppTheme.themeFor
+///   —— 不再需要 FTheme 包装，也不会因为 forui 被删而编不过。
 Widget _appWith(Widget home) {
-  final theme = FTheme.neutral.dark.desktop;
   return mui.MaterialApp(
-    theme: theme.toApproximateMaterialTheme(),
-    builder: (c, child) =>
-        FTheme(data: theme, child: child ?? const mui.SizedBox()),
+    theme: AppTheme.themeFor(Brightness.dark),
     home: home,
   );
 }
