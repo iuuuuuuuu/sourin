@@ -435,6 +435,95 @@ class SettingsGesturePill extends StatelessWidget {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+//  空态
+// ═══════════════════════════════════════════════════════════════════════
+
+/// 空态引导（图标 + 标题 + 一句说明）
+///
+/// # 为什么要共用一个零件
+///
+/// 「搜索页没搜过」「搜索页搜了没找到」「插件列表空」「备份页空」
+/// 以前各写各的：图标尺寸 40/48/56 混用、说明文字有的有有的没有、
+/// 垂直留白从 24 到 96 不等 —— 同一件事在不同页面长得不一样，
+/// 用户会以为那是不同的功能，而不是同一件事的不同结果。
+///
+/// ⇒ 三层节奏（图标 → 标题 → 说明）由**这一处**定，
+///    调用方只给内容，视觉自然一致。
+class EmptyState extends StatelessWidget {
+  const EmptyState({
+    super.key,
+    required this.icon,
+    required this.title,
+    this.hint,
+    this.iconSize = 52,
+    this.padding = const EdgeInsets.symmetric(vertical: Sp.x16),
+  });
+
+  final IconData icon;
+  final String title;
+
+  /// 一句可选的引导文案（不说清楚"下一步做什么"的空态等于没有）
+  final String? hint;
+
+  final double iconSize;
+  final EdgeInsets padding;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    // ★ 图标衬在一个圆底上：空态大片留白里，孤零零一个线性图标
+    //   很容易被当成"图片没加载出来"。
+    return Padding(
+      padding: padding,
+      child: Column(
+        children: [
+          Container(
+            width: iconSize * 2,
+            height: iconSize * 2,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: colors.onSurface.withValues(alpha: 0.06),
+            ),
+            child: Icon(
+              icon,
+              size: iconSize,
+              color: colors.onSurfaceVariant.withValues(alpha: 0.75),
+            ),
+          ),
+          const SizedBox(height: Sp.x5),
+          Text(
+            title,
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: FontSizes.base,
+              fontWeight: FontWeight.w600,
+              color: colors.onSurface,
+            ),
+          ),
+          if (hint != null) ...[
+            const SizedBox(height: Sp.x2),
+            ConstrainedBox(
+              // ★ 空态说明不该铺满超宽屏（桌面 1440+ 时一行拉到 1200px
+              //   读起来很费力）；限宽 + 居中让两行就收住。
+              constraints: const BoxConstraints(maxWidth: 420),
+              child: Text(
+                hint!,
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: FontSizes.sm,
+                  height: 1.5,
+                  color: colors.onSurfaceVariant,
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 //  信息行 / 入口行
 // ═══════════════════════════════════════════════════════════════════════
 

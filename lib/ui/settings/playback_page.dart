@@ -995,8 +995,8 @@ class _PlaybackSettingsPageState extends State<PlaybackSettingsPage> {
          */
         Text(
           '出问题时请把这份日志发给作者 —— 里面记录了播放、下载、缓存的操作与失败原因。'
-          '本应用没有接入系统分享面板（依赖里没有分享插件），所以「分享」落成两条路：'
-          '**导出成 .log 文件**，或者**复制到剪贴板**后自己粘贴。',
+          '本应用没有接入系统分享面板，所以「分享」落成两条路：'
+          '导出成 .log 文件，或者复制到剪贴板后自己粘贴。',
           style: TextStyle(fontSize: FontSizes.sm, color: colors.onSurfaceVariant),
         ),
         const SizedBox(height: Sp.x4),
