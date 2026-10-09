@@ -7,8 +7,21 @@
 //   forWork() 会建剧名文件夹。不真的碰盘，就测不出"用户填了个不存在的盘符
 //   会不会退回去"这种事。
 //
-// ⚠️ 隔离：本探针**只**用 .probe 下的临时目录当"用户指定目录"，
-//   绝不碰 %APPDATA%\app.sourin.player，也绝不写用户的 Videos。
+// ⚠️ 隔离：本探针**只**用临时目录，**绝不**碰 %APPDATA%\app.sourin.player，
+//   也**绝不**写用户的 Videos\源影。
+//
+// ★★ 2026-10-10（review agent 查出、lead 修）：原文件头声称「绝不写用户的
+//    Videos」，但那是**假的** —— 用例 ① / ④ / ⑤ 会走到「未配置」分支，
+//    `DownloadDir._resolveRoot()` 读 `Platform.environment['USERPROFILE']`
+//    并 `create(recursive:true)` 于 `Videos\源影` ⇒ 真的在用户目录里建了目录。
+//    （`setConfiguredDir` 只影响「用户指定目录」这一层，管不到默认兜底。）
+//
+//    修法：本文件**要求以隔离的 USERPROFILE 运行**（见文件末尾的说明与
+//    `tools/run_tests.sh` 里的调用）⇒ 默认兜底落在临时盘。
+//    ⚠️ 不能在测试里改 `Platform.environment['USERPROFILE']` —— 它在
+//    `flutter_test` 里是**只读**的（实测 `Unsupported operation: Cannot
+//    modify unmodifiable map`），所以隔离必须由**进程环境**提供。
+//    用例 ⓪ 是这条前提的自检：前提不成立时它直接红，而不是默默写真实目录。
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
@@ -16,11 +29,36 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:sourin_spike/core/download_dir.dart';
 import 'package:sourin_spike/core/ui_prefs.dart';
 
+/// 路径是否落在「临时/隔离」目录之下
+///
+/// ★★ 只按**尾部标记**判，不比整串（2026-10-10 实测踩过）：
+/// `Directory.systemTemp` 在 Windows 上解析成 8.3 短名
+/// （C:\Users\IUUUUU~1\AppData\Local\Temp），而环境变量里的 USERPROFILE
+/// 是长名（C:\Users\iuuuuuuuu\AppData\Local\...）
+/// ⇒ 直接 startsWith(systemTemp.path) 会假红。
+/// 尾部标记足以区分「系统临时目录」与「真实用户目录 C:\Users\<你>」。
+bool underTemp(String p) {
+  final n = p.replaceAll('/', r'\').toLowerCase();
+  return const [r'\appdata\local\temp', r'\temp', r'\tmp'].any(n.contains);
+}
 void main() {
   late Directory tmp;
 
+
+  setUpAll(() {
+    // 前提自检：USERPROFILE 必须已经指向临时盘（由**进程环境**提供，
+    // Platform.environment 在测试里改不了）。不成立就在用例 ⓪ 里红。
+    final home = Platform.environment['USERPROFILE'] ?? '';
+    if (!underTemp(home)) {
+      // ignore: avoid_print
+      print('[T3_20] ⚠ USERPROFILE=$home —— 本文件必须以隔离的 USERPROFILE 运行，'
+          '否则会在用户真实的 Videos\\源影 里建目录');
+    }
+  });
+
   setUp(() {
-    tmp = Directory('D:\\WishProject\\sourin-flutter-spike\\.probe\\t3_20\\dl')
+    tmp = Directory('${Directory.systemTemp.path}${Platform.pathSeparator}'
+            'sourin-t3_20-dl')
       ..createSync(recursive: true);
     // 每个用例从"空偏好"开始（UiPrefs 是 static，不重置会互相串）
     UiPrefs.debugResetForTest();
@@ -30,6 +68,20 @@ void main() {
   tearDown(() {
     UiPrefs.debugResetForTest();
     DownloadDir.debugReset();
+  });
+
+  test('⓪ ★★ 隔离自检（防假绿）：默认兜底**不许**落到真实用户目录', () async {
+    // 本文件的隔离由**进程环境**提供（Platform.environment 在测试里是只读的，
+    // 实测报 `Cannot modify unmodifiable map`）⇒ 前提不成立时这条必须红，
+    // 而不是默默在用户真实的 Videos\源影 里建目录。
+    final home = Platform.environment['USERPROFILE'] ?? '';
+    expect(home, isNotEmpty, reason: '本文件必须以隔离的 USERPROFILE 运行');
+    expect(underTemp(home), isTrue,
+        reason: 'USERPROFILE=$home 必须指向临时目录，否则本文件会写真实用户目录');
+
+    final r = await DownloadDir.root();
+    expect(underTemp(r), isTrue,
+        reason: '★ 默认下载根必须落在临时目录内（实测 resolve 到 $r）');
   });
 
   test('① 没配置 ⇒ 走默认（非空、且目录真实存在）', () async {
