@@ -62,7 +62,7 @@ library;
 // # 本文件怎么验（不看"好不好看"，只看**可判定的量**）
 //
 // ```text
-// ①-B：面板祖先里必须有一个 **Brightness.dark** 的 FTheme
+// ①-B：面板祖先里必须有一个 **Brightness.dark** 的 AppThemeHost
 //      （而不是"我觉得它变黑了"）
 // ②  ：视频区描边的矩形必须**等于** BoxFit.contain 的几何
 //      （1280x800 窗口 + 16:9 → 1280x720，上下各留 40）
@@ -74,13 +74,15 @@ import 'dart:io';
 
 import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:media_kit/media_kit.dart';
 
 import 'package:sourin_spike/core/models.dart';
 import 'package:sourin_spike/ui/player_page.dart';
 import 'package:sourin_spike/ui/remote_bridge.dart';
+import 'package:sourin_spike/ui/app_palette.dart';
+import 'package:sourin_spike/ui/app_scaffold.dart';
+import 'package:sourin_spike/ui/app_theme.dart';
 
 List<Episode> eps(int n) => [
       for (var i = 1; i <= n; i++)
@@ -174,8 +176,8 @@ void main() {
 
       Brightness? found;
       panelText.first.visitAncestorElements((e) {
-        if (e.widget is FTheme) {
-          found = (e.widget as FTheme).data.colors.brightness;
+        if (e.widget is AppThemeHost) {
+          found = (e.widget as AppThemeHost).data.brightness;
           return false; // 找到最近的，停
         }
         return true;
@@ -206,11 +208,11 @@ void main() {
       const light = Brightness.light;
       await t.pumpWidget(
         MaterialApp(
-          home: FTheme(
-            data: FTheme.neutral.light.desktop,
+          home: AppThemeHost(
+            data: AppTheme.themeFor(Brightness.light),
             child: Builder(
               builder: (ctx) => Text(
-                '${FTheme.of(ctx).colors.brightness}',
+                '${AppPalette.of(ctx).brightness}',
                 textDirection: TextDirection.ltr,
               ),
             ),

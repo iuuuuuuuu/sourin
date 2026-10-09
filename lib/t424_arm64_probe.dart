@@ -71,7 +71,6 @@ import 'package:flutter/scheduler.dart';
 //    产品用的是 `material_ui` 那套（`lib\shell.dart:35`），
 //    所以对照臂必须同源，否则测的是**另一个 widget**。
 import 'package:material_ui/material_ui.dart';
-import 'package:forui/forui.dart';
 import 'package:liquid_glass_widgets/liquid_glass_widgets.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:path_provider/path_provider.dart';
@@ -81,8 +80,8 @@ import 'core/ffi.dart';
 import 'core/ui_prefs.dart';
 import 'shell.dart';
 import 'ui/app_theme.dart';
-import 'ui/theme_bridge.dart';
 import 'ui/widgets/window_frame.dart';
+import 'ui/app_scaffold.dart';
 
 const String kTag = '[T424]';
 
@@ -101,7 +100,7 @@ String _workDir = '';
 /// 1   A   MaterialApp 裸壳
 /// 2   B   + 产品 theme:materialTheme
 /// ── 以下五段把产品 builder 链（lib\shell.dart:1174-1458）**逐层**加上 ──
-/// 3   C1  + builder: FTheme
+/// 3   C1  + builder: AppThemeHost
 /// 4   C2  + FToaster                ← Overlay.wrap ⇒ Clip.hardEdge
 /// 5   C2n 机制探针：同构 Overlay，Clip.none（与 C2 是**最小对**）
 /// 6   C3  + WindowFrame             （Android 上 :562 直接 return child）
@@ -121,7 +120,7 @@ const List<int> kStageColors = <int>[
   0xFF1E63C8, // 0  蓝     PRE-INIT 金丝雀
   0xFFE8001E, // 1  红     A MaterialApp 裸壳
   0xFF1EC863, // 2  绿     B + 产品 theme
-  0xFFC81EC8, // 3  洋红   C1 + builder:FTheme
+  0xFFC81EC8, // 3  洋红   C1 + builder:AppThemeHost
   0xFFE8C81E, // 4  黄     C2 + FToaster（Overlay.wrap ⇒ Clip.hardEdge）
   0xFF1EC8C8, // 5  青     C2n 机制探针：同构 Overlay，Clip.none
   0xFFC81E63, // 6  玫红   C3 + WindowFrame
@@ -353,10 +352,7 @@ Future<void> main() async {
 
   // ── B：A + 产品 theme:materialTheme ──────────────────────────
   final brightness = AppTheme.resolve(systemBrightness: Brightness.dark);
-  final theme = AppTheme.themeFor(brightness);
-  final materialTheme = brightness == Brightness.light
-      ? buildLightMaterialTheme(theme)
-      : buildMaterialTheme(theme);
+  final materialTheme = AppTheme.themeFor(brightness);
   runApp(RepaintBoundary(
     key: _rootKey,
     child: MaterialApp(
@@ -382,8 +378,8 @@ Future<void> main() async {
     child: MaterialApp(
       debugShowCheckedModeBanner: false,
       theme: materialTheme,
-      builder: (context, child) => FTheme(
-        data: theme,
+      builder: (context, child) => AppThemeHost(
+        data: materialTheme,
         child: child ?? const SizedBox.shrink(),
       ),
       home: const _Flat(color: Color(0xFFC81EC8), label: 'C1 + FTheme'),
@@ -403,11 +399,9 @@ Future<void> main() async {
     child: MaterialApp(
       debugShowCheckedModeBanner: false,
       theme: materialTheme,
-      builder: (context, child) => FTheme(
-        data: theme,
-        child: FToaster(
-          child: child ?? const SizedBox.shrink(),
-        ),
+      builder: (context, child) => AppThemeHost(
+        data: materialTheme,
+        child: child ?? const SizedBox.shrink(),
       ),
       home: const _Flat(color: Color(0xFFE8C81E), label: 'C2 + FToaster'),
     ),
@@ -424,8 +418,8 @@ Future<void> main() async {
     child: MaterialApp(
       debugShowCheckedModeBanner: false,
       theme: materialTheme,
-      builder: (context, child) => FTheme(
-        data: theme,
+      builder: (context, child) => AppThemeHost(
+        data: materialTheme,
         child: Overlay.wrap(
           clipBehavior: Clip.none, // ← 与 C2 的**唯一**差别
           child: Stack(
@@ -449,13 +443,11 @@ Future<void> main() async {
     child: MaterialApp(
       debugShowCheckedModeBanner: false,
       theme: materialTheme,
-      builder: (context, child) => FTheme(
-        data: theme,
-        child: FToaster(
-          child: WindowFrame(
+      builder: (context, child) => AppThemeHost(
+        data: materialTheme,
+        child: WindowFrame(
             backdrop: AppTheme.floorColor(brightness),
             child: child ?? const SizedBox.shrink(),
-          ),
         ),
       ),
       home: const _Flat(color: Color(0xFFC81E63), label: 'C3 + WindowFrame'),
@@ -471,15 +463,13 @@ Future<void> main() async {
     child: MaterialApp(
       debugShowCheckedModeBanner: false,
       theme: materialTheme,
-      builder: (context, child) => FTheme(
-        data: theme,
-        child: FToaster(
-          child: WindowFrame(
+      builder: (context, child) => AppThemeHost(
+        data: materialTheme,
+        child: WindowFrame(
             backdrop: AppTheme.floorColor(brightness),
             child: ColoredBox(
               color: AppTheme.floorColor(brightness),
               child: child ?? const SizedBox.shrink(),
-            ),
           ),
         ),
       ),
@@ -494,15 +484,13 @@ Future<void> main() async {
     child: MaterialApp(
       debugShowCheckedModeBanner: false,
       theme: materialTheme,
-      builder: (context, child) => FTheme(
-        data: theme,
-        child: FToaster(
-          child: WindowFrame(
+      builder: (context, child) => AppThemeHost(
+        data: materialTheme,
+        child: WindowFrame(
             backdrop: AppTheme.floorColor(brightness),
             child: ColoredBox(
               color: AppTheme.floorColor(brightness),
               child: child ?? const SizedBox.shrink(),
-            ),
           ),
         ),
       ),

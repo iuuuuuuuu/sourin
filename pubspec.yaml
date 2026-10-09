@@ -102,14 +102,14 @@ dependencies:
   http: ^1.2.2
 
   # ★ 校验更新安装包的 SHA-256（与 Release 里的 SHA256SUMS.txt 对账）。
-  #   显式声明而非靠 forui 的传递依赖 —— forui 移除后它会消失，
-  #   而那时这个 import 会突然编不过（正是 material_ui 那段注释记过的坑）。
-  #   它已经在 pubspec.lock 里（3.0.7），这里只是提成直接依赖，不新增下载。
+  #   ⚠️ 它此前只是 forui 带进来的**传递依赖**（forui 已于 2026-10-09 移除，
+  #   那一刻就会消失）—— 正因为如此必须显式声明，否则 import 会突然编不过
+  #   （这正是 material_ui 那段注释记过的同一个坑）。
+  #   版本沿用 pubspec.lock 里原有的 3.0.7，不新增任何下载。
   crypto: ^3.0.7
-  forui: ^0.27.0
 
   # ═══════════════════════════════════════════════════════════════════════
-  # ★★★ material_ui —— **必须显式声明，不能靠 forui 传递依赖**（2026-09-23）
+  # ★★★ material_ui —— **必须显式声明**（2026-09-23，2026-10-09 移除 forui 后保留）
   # ═══════════════════════════════════════════════════════════════════════
   #
   # # 为什么会有这个包
@@ -120,8 +120,7 @@ dependencies:
   #
   # # 踩到的坑（实测，代价很大）
   #
-  # forui 0.27.0 的依赖是 `material_ui: ^1.0.0`，它自己的 `FTheme` 也
-  # 只认识 material_ui。而 `shell.dart` 当时写的是：
+  # 当时（引入 forui 之后）`shell.dart` 写的是：
   # ```dart
   # import 'package:material_ui/material_ui.dart';   // ← 只有这一个文件
   # ```
@@ -154,10 +153,9 @@ dependencies:
   # 修法：全部统一到 `material_ui`（见 test/material_split_test.dart
   # 里那三个断言，①复现 ②修法 ③在真实壳里成立）。
   #
-  # ⚠️ 为什么 pubspec 里也要写：如果只靠 forui 传递依赖，
-  #    将来 forui 升级把 material_ui 换掉/升 major，这里会**静默**变成
-  #    另一套 Material —— 又是一次同样的坑。显式声明才会在 `pub get`
-  #    时报冲突。
+  # ⚠️ 为什么 pubspec 里必须**显式**写：本项目已经没有第二个 UI 包了，
+  #    但如果哪天有人拖进一个依赖 `flutter/material` 的包，这个坑会
+  #    原样重演。显式声明至少能让人在 `pub get` 时立刻看见这条依赖。
   material_ui: ^1.4.0
 
   # ★ 液态玻璃（用户 2026-09-24 要求「参考 github 开源项目，不要硬自己实现」）

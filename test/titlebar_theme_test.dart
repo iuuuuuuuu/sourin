@@ -20,12 +20,12 @@
 // ```dart
 // color: brightness == Brightness.light
 //     ? LightTokens.bgBase
-//     : FTheme.of(context).colors.background,   // ← 这一行
+//     : AppPalette.of(context).background,   // ← 这一行
 // ```
 // `brightness` 是**自己解析**的（对），但深色分支取色走 `FTheme.of(context)`，
 // 而 builder 的 `context` 在 `FTheme` **上面**（`FTheme` 注入在 builder
 // 的**返回值**里）。forui 的 `FTheme.of` 找不到祖先时**不抛异常**，
-// 静默兜底成 `FTheme.neutral.light.touch`（forui `src/theme/theme.dart:140`）
+// 静默兜底成 `AppTheme.themeFor(Brightness.light)`（forui `src/theme/theme.dart:140`）
 // —— 也就是**浅色**，`background = #FFFFFF` 纯白。
 //
 // 实测日志（`lib/ab2_diag_probe.dart` 探针）：
@@ -65,10 +65,10 @@ import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 
 import 'package:sourin_spike/ui/app_theme.dart';
+import 'package:sourin_spike/ui/app_scaffold.dart';
 
 /// 剥掉注释行（静态断言里做文本匹配**必须先剥注释**）
 ///
@@ -140,7 +140,7 @@ void main() {
        * 两个 `X.of(context)` 都会**静默**兜底成浅色（都不抛异常）：
        * ```text
        * Theme.of        → ThemeData.fallback()（Material 3 亮色）
-       * FTheme.of       → FTheme.neutral.light.touch（forui 亮色）
+       * FTheme.of       → AppTheme.themeFor(Brightness.light)（forui 亮色）
        * ```
        * 所以这里断言的是**"在这个范围内一次都不许出现"**，
        * 而不是"用对了值"—— 因为用对值这件事无法靠文本断言保证，
@@ -155,7 +155,7 @@ builder 的 context 在主题注入点**上面**，`$forbidden` 会**静默**兜
 ```text
 MaterialApp
  ├ builder(context, child)   ← 这个 context 不是主题的子孙
- │   └ FTheme(data: theme)   ← 注入在 builder 的**返回值**里
+ │   └ AppThemeHost(data: theme)   ← 注入在 builder 的**返回值**里
  └ theme: materialTheme
 ```
 
@@ -188,7 +188,7 @@ color: AppTheme.floorColor(brightness),
        * 所以地板色**必须**是同一个值，否则两者必然不一致。
        */
       final dark = AppTheme.floorColor(Brightness.dark);
-      expect(dark, AppTheme.themeFor(Brightness.dark).colors.background,
+      expect(dark, AppTheme.colorsFor(Brightness.dark).background,
           reason: '深色地板色必须等于 forui 深色 background —— '
               '这正是内容区 FScaffold 画的那一层，两者必须同源');
       // forui neutralDark.background = #0A0A0A
@@ -200,7 +200,7 @@ color: AppTheme.floorColor(brightness),
       final dark = AppTheme.floorColor(Brightness.dark);
       /*
        * 这条是**直接**冲着这个 bug 来的：
-       * 兜底成 `FTheme.neutral.light.touch` 时 background = #FFFFFF。
+       * 兜底成 `AppTheme.themeFor(Brightness.light)` 时 background = #FFFFFF。
        * 用"亮度"而不是"等于白"来断言 —— 将来 forui 换了浅色档位
        * （比如改成 #FAFAFA）这条仍然有效。
        */
@@ -214,7 +214,7 @@ color: AppTheme.floorColor(brightness),
 
 成因九成是取色走了主题系统的**静默浅色兜底**：
 ```text
-FTheme.of(context) → FTheme.neutral.light.touch → background #FFFFFF
+FTheme.of(context) → AppTheme.themeFor(Brightness.light) → background #FFFFFF
 Theme.of(context)  → ThemeData.fallback()       → 亮色
 ```
 修法：只认 `AppTheme.resolve(...)` 算出来的 brightness。
@@ -233,8 +233,10 @@ Theme.of(context)  → ThemeData.fallback()       → 亮色
        */
       expect(light, isNot(const Color(0xFFFFFFFF)),
           reason: '★ 浅色地板不能是纯白 —— 白叠白会让玻璃完全消失');
-      expect(light, isNot(AppTheme.themeFor(Brightness.light).colors.background),
-          reason: '★ 浅色**故意**不用 forui 的 background（它是纯白）');
+      expect(light, AppTheme.themeFor(Brightness.light).colorScheme.surface,
+          reason: '★★ 浅色地板必须与浅色**内容区底色同源** —— '
+              '这两层是叠在一起的（窗口圆角外 + 内容区），不同源就会出现'
+              '「圆角外一条浅灰、内容区一片白」的割裂。');
     });
 
     test('★ 深色与浅色地板必须真的不同（否则切换无效）', () {

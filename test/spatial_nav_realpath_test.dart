@@ -60,11 +60,12 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:sourin_spike/core/device.dart';
 import 'package:sourin_spike/shell.dart';
 import 'package:sourin_spike/ui/spatial_nav.dart';
+import 'package:sourin_spike/ui/app_scaffold.dart';
+import 'package:sourin_spike/ui/app_theme.dart';
 
 /// 可聚焦块
 ///
@@ -999,11 +1000,11 @@ void main() {
       Device.overrideKind(DeviceKind.tv);
       addTearDown(() => Device.overrideKind(null));
 
-      final theme = FTheme.neutral.dark.desktop;
+      final theme = AppTheme.themeFor(Brightness.dark);
       await t.pumpWidget(MaterialApp(
-        theme: theme.toApproximateMaterialTheme(),
+        theme: theme,
         builder: (ctx, child) =>
-            FTheme(data: theme, child: child ?? const SizedBox()),
+            AppThemeHost(data: theme, child: child ?? const SizedBox()),
         home: Column(children: [
           _threeInARow(a, b, c),
           const Expanded(
@@ -1504,11 +1505,11 @@ void main() {
       Device.overrideKind(DeviceKind.tv);
       addTearDown(() => Device.overrideKind(null));
 
-      final theme = FTheme.neutral.dark.desktop;
+      final theme = AppTheme.themeFor(Brightness.dark);
       await t.pumpWidget(MaterialApp(
-        theme: theme.toApproximateMaterialTheme(),
+        theme: theme,
         builder: (ctx, child) =>
-            FTheme(data: theme, child: child ?? const SizedBox()),
+            AppThemeHost(data: theme, child: child ?? const SizedBox()),
         home: const ShellPage(coreError: 'PathAccessException: Permission denied'),
       ));
       await t.pump(const Duration(milliseconds: 100));

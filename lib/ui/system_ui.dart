@@ -2,6 +2,7 @@ import 'package:flutter/services.dart';
 import 'package:material_ui/material_ui.dart';
 
 import 'app_theme.dart';
+import '../ui/app_theme.dart';
 
 /// 把系统栏（状态栏 + 导航栏）刷成与 App 内容区同色 —— task-17。
 ///

@@ -17,6 +17,7 @@ import '../../core/app_update/app_update_controller.dart';
 import '../../core/app_update/install.dart';
 import '../../core/app_update/release.dart';
 import '../tokens.dart';
+import 'app_toast.dart';
 import 'release_notes.dart';
 
 /// 显示更新对话框。返回 true 表示用户点了「下载」
@@ -107,7 +108,7 @@ class _UpdateDialogState extends State<_UpdateDialog> {
                         final msg = await InstallLaunch.openInBrowser(
                             widget.asset!.browserUrl);
                         if (!context.mounted) return;
-                        _toast(context, msg ?? '请在浏览器里完成更新。');
+                        showAppToast(context, msg ?? '请在浏览器里完成更新。');
                         Navigator.pop(context, false);
                         return;
                       }
@@ -120,10 +121,6 @@ class _UpdateDialogState extends State<_UpdateDialog> {
       },
     );
   }
-
-  void _toast(BuildContext context, String msg) {
-    ScaffoldMessenger.maybeOf(context)?.showSnackBar(SnackBar(content: Text(msg)));
-  }
 }
 
 class _Progress extends StatelessWidget {
@@ -133,13 +130,18 @@ class _Progress extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
+    // ⚠️ 这里用 colorScheme.error 而不是 AppPalette.of(...).error ——
+    //   `AppPalette.of` 在 MaterialApp **之外**会直接断言失败，而这个对话框
+    //   也可能被嵌进别的宿主（探针、未来的独立路由）。colorScheme 是
+    //   Material 自带的、任何 Theme 下都拿得到的那一份。
+    final danger = colors.error;
     if (d.error != null) {
       return Row(children: [
-        Icon(Icons.error_outline, size: 18, color: colors.error),
+        Icon(Icons.error_outline, size: 18, color: danger),
         const SizedBox(width: Sp.x2),
         Expanded(
           child: Text(d.error!,
-              style: TextStyle(fontSize: FontSizes.sm, color: colors.error)),
+              style: TextStyle(fontSize: FontSizes.sm, color: danger)),
         ),
       ]);
     }

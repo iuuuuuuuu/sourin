@@ -58,10 +58,11 @@
 //    （同一个坑已记在 `test\bottom_bar_fit_test.dart:71-87`。）
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 
 import 'package:sourin_spike/shell.dart';
+import 'package:sourin_spike/ui/app_scaffold.dart';
+import 'package:sourin_spike/ui/app_theme.dart';
 import 'package:sourin_spike/ui/spatial_nav.dart' show BottomBarMarker;
 
 /// 复刻 `SourinApp.build` 的树结构（`FTheme` 在 `MaterialApp.builder` 里）
@@ -70,11 +71,11 @@ import 'package:sourin_spike/ui/spatial_nav.dart' show BottomBarMarker;
 /// `FTheme.of(context)` 取色，少了这一层会抛异常，于是测试测的是
 /// "我的壳拼错了"，不是被测结构。
 Widget _appWith({required Widget home}) {
-  final theme = FTheme.neutral.dark.desktop;
+  final theme = AppTheme.themeFor(Brightness.dark);
   return MaterialApp(
-    theme: theme.toApproximateMaterialTheme(),
+    theme: theme,
     builder: (context, child) =>
-        FTheme(data: theme, child: child ?? const SizedBox()),
+        AppThemeHost(data: theme, child: child ?? const SizedBox()),
     home: home,
   );
 }

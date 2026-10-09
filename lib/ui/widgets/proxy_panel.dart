@@ -85,11 +85,11 @@
 //    并行的"模型，下次字段变更就会改一处漏一处（这正是当初那个 bug 的形态）。
 //    唯一来源是 `models.dart::ProxyConfig`。
 
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 
 import '../../core/sourin_api.dart';
 import '../tokens.dart';
+import '../../ui/app_palette.dart';
 
 // ═══════════════════════════════════════════════════════════════════════
 //  组件
@@ -348,7 +348,7 @@ class _ProxyPanelState extends State<ProxyPanel> {
 
   @override
   Widget build(BuildContext context) {
-    final colors = FTheme.of(context).colors;
+    final colors = AppPalette.of(context);
 
     if (_loading) {
       return Padding(
@@ -615,14 +615,14 @@ class _ProxyPanelState extends State<ProxyPanel> {
     );
   }
 
-  Widget _label(String t, FColors colors) => Text(
+  Widget _label(String t, AppPalette colors) => Text(
         t,
         style: TextStyle(fontSize: FontSizes.cap, color: colors.mutedForeground),
       );
 
   Widget _input({
     required TextEditingController controller,
-    required FColors colors,
+    required AppPalette colors,
     required String hint,
     bool obscure = false,
     VoidCallback? onDone,
@@ -646,13 +646,13 @@ class _ProxyPanelState extends State<ProxyPanel> {
     );
   }
 
-  Widget _modePill(ProxyMode m, bool selected, FColors colors) =>
+  Widget _modePill(ProxyMode m, bool selected, AppPalette colors) =>
       _modePill2(m.label, selected, colors, () => _setMode(m));
 
   Widget _modePill2(
     String label,
     bool selected,
-    FColors colors,
+    AppPalette colors,
     VoidCallback onTap,
   ) {
     return InkWell(

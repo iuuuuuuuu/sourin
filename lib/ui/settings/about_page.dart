@@ -30,6 +30,7 @@ import '../../core/app_update/release.dart';
 import '../../core/app_update/route.dart';
 import '../../core/sourin_api.dart';
 import '../tokens.dart';
+import '../widgets/app_toast.dart';
 import '../widgets/settings_kit.dart';
 import '../widgets/settings_sub_page.dart';
 import '../widgets/update_dialog.dart';
@@ -82,46 +83,44 @@ class AboutSettingsPageState extends State<AboutSettingsPage> {
   /// 手动检查更新
   Future<void> _checkNow() async {
     final c = AppUpdateController.instance;
-    final messenger = ScaffoldMessenger.of(context);
     final res = await c.check(manual: true);
     if (!mounted) return;
 
     final rel = res.release;
     if (rel == null) {
       // 没连上 / 已是最新 —— 都只给一句话，不弹错误
-      messenger.showSnackBar(SnackBar(
-        content: Text(res.message ?? '当前已是最新版本'),
-      ));
+      showAppToast(context, res.message ?? '当前已是最新版本');
       return;
     }
     final platform = UpdateHttp.currentTarget().$1;
     final wantDownload = await showUpdateDialog(context, rel, platform: platform);
     if (!wantDownload) return;
-    await _downloadAndInstall(c, rel, platform, messenger);
+    await _downloadAndInstall(c, rel, platform);
   }
 
   Future<void> _downloadAndInstall(
     AppUpdateController c,
     ReleaseInfo rel,
     UpdatePlatform platform,
-    ScaffoldMessengerState messenger,
   ) async {
     final file = await c.downloadRelease(rel);
     if (!mounted) return;
     if (file == null) {
-      final err = c.download.error ?? '下载未完成';
-      messenger.showSnackBar(SnackBar(content: Text(err)));
+      showAppToast(context, c.download.error ?? '下载未完成',
+          style: errToastStyle());
       return;
     }
     if (!InstallLaunch.canInstallDirectly) {
       final url = selectAsset(rel, platform)?.browserUrl ?? rel.htmlUrl;
       final msg = await InstallLaunch.openInBrowser(url);
-      messenger.showSnackBar(SnackBar(content: Text(msg ?? '请在浏览器里完成更新')));
+      if (!mounted) return;
+      showAppToast(context, msg ?? '请在浏览器里完成更新');
       return;
     }
     final msg = await InstallLaunch.open(file);
+    if (!mounted) return;
     if (msg != null) {
-      messenger.showSnackBar(SnackBar(content: Text(msg)));
+      showAppToast(context, msg);
     } else if (Platform.isWindows) {
       // 安装向导已拉起 ⇒ 退出，让安装程序接管
       exit(0);

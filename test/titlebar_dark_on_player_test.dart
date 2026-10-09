@@ -202,7 +202,7 @@ void main() {
     test('★ `_WinButton` 必须支持自定义图标色（否则黑底黑图标）', () {
       /*
        * 深色态若不传图标色，会 fallback 到
-       * `FTheme.of(context).colors.foreground` —— 浅色主题下那是**深色**，
+       * `AppPalette.of(context).foreground` —— 浅色主题下那是**深色**，
        * 在纯黑标题栏上就是"黑底黑图标"，看不见。
        */
       expect(
