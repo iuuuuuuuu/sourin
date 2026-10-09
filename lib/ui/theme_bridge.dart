@@ -52,6 +52,7 @@ import 'package:material_ui/material_ui.dart';
 
 import 'app_palette.dart';
 import 'app_typeface.dart';
+import 'theme/theme_pack.dart';
 
 // ★ task-50 候选 C2：二级页转场改为「用户选的风格」
 //   ⚠️ 不能写在 `material_ui` 那行之前 —— dart 惯例：package import 在前，
@@ -59,7 +60,8 @@ import 'app_typeface.dart';
 import 'widgets/page_transition_route.dart';
 
 /// 组件统一的圆角（= 原 forui `style.borderRadius.md`）
-const _radius = BorderRadius.all(Radius.circular(10));
+const _defaultRadius = 10.0;
+const _radius = BorderRadius.all(Radius.circular(_defaultRadius));
 
 RoundedSuperellipseBorder _shape({BorderSide side = BorderSide.none}) =>
     RoundedSuperellipseBorder(side: side, borderRadius: _radius);
@@ -105,10 +107,45 @@ PageTransitionsTheme buildPageTransitionsTheme() {
 /// ⚠️ 深 / 浅是**两条独立分支**而不是一个按 brightness 分流后统一补色的
 ///    函数 —— 因为要补的角色不同（浅色要反过来设 surface / onSurface / 描边）。
 ///    ★ 所以**任何一处修复都必须在另一处同步做**，否则只有一半主题被修好。
-ThemeData buildAppTheme(Brightness brightness) {
-  return brightness == Brightness.light
-      ? _buildLight()
-      : _buildDark();
+ThemeData buildAppTheme(Brightness brightness, {ThemePack? pack}) {
+  final td = brightness == Brightness.light
+      ? _buildLight(pack?.palette)
+      : _buildDark(pack?.palette);
+
+  // 主题包可以微调**形状**，让不同调色板有自己的"性格"（圆角更方的科技风、
+  // 更圆的卡片风）。只允许这两个参数 —— 字号/间距一放开，主题包就能把
+  // 全站排版搞乱，那不叫"主题"叫"换皮"。
+  final r = pack?.radius;
+  if (r == null || r == _defaultRadius) return td;
+
+  final radius = BorderRadius.all(Radius.circular(r));
+  final shape = WidgetStateProperty.all(
+      RoundedSuperellipseBorder(borderRadius: radius));
+  return td.copyWith(
+    cardTheme: td.cardTheme.copyWith(
+      shape: RoundedSuperellipseBorder(
+          borderRadius: radius, side: td.cardTheme.shape is OutlinedBorder
+              ? (td.cardTheme.shape as OutlinedBorder).side
+              : BorderSide.none),
+    ),
+    dialogTheme: DialogThemeData(
+        shape: RoundedSuperellipseBorder(borderRadius: radius)),
+    bottomSheetTheme: BottomSheetThemeData(
+        shape: RoundedSuperellipseBorder(borderRadius: radius)),
+    snackBarTheme: td.snackBarTheme.copyWith(
+        shape: RoundedSuperellipseBorder(borderRadius: radius)),
+    listTileTheme: ListTileThemeData(
+        shape: RoundedSuperellipseBorder(borderRadius: radius)),
+    chipTheme: ChipThemeData(shape: RoundedSuperellipseBorder(borderRadius: radius)),
+    filledButtonTheme: FilledButtonThemeData(
+        style: td.filledButtonTheme.style?.copyWith(shape: shape)),
+    elevatedButtonTheme: ElevatedButtonThemeData(
+        style: td.elevatedButtonTheme.style?.copyWith(shape: shape)),
+    outlinedButtonTheme: OutlinedButtonThemeData(
+        style: td.outlinedButtonTheme.style?.copyWith(shape: shape)),
+    textButtonTheme: TextButtonThemeData(
+        style: td.textButtonTheme.style?.copyWith(shape: shape)),
+  );
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -352,8 +389,8 @@ ThemeData _withColors(ThemeData base, AppPalette c) =>
 //  深色
 // ═══════════════════════════════════════════════════════════════════════
 
-ThemeData _buildDark() {
-  final c = AppPalette.dark;
+ThemeData _buildDark([AppPalette? override]) {
+  final c = override ?? AppPalette.dark;
   final t = AppTypeface.forPlatform(Brightness.dark);
 
   // 边框角色**不能带 alpha** —— ColorScheme 的描边会被当实色画。
@@ -444,11 +481,16 @@ class LightTokens {
   static const surface2 = Color(0xFFF5F7FA);
 }
 
-ThemeData _buildLight() {
+ThemeData _buildLight([AppPalette? override]) {
   final t = AppTypeface.forPlatform(Brightness.light);
 
-  // 浅色板从 LightTokens 派生 —— 它的每个值都有原版 CSS 变量作出处。
-  final c = AppPalette.light.copyWith(
+  // 浅色板的默认值从 LightTokens 派生 —— 每个值都有原版 CSS 变量作出处。
+  //
+  // ⚠️ 主题包给了 `override` 时**完全用它**，不再逐字段覆盖 ——
+  //    否则「用户在浅色主题包里配了 background」会被这行悄悄改回
+  //    `LightTokens.bgBase`，表现为"导入的主题包不生效"。
+  final c = override ??
+      AppPalette.light.copyWith(
     background: LightTokens.bgBase,
     foreground: LightTokens.textPrimary,
     mutedForeground: LightTokens.textSecondary,
