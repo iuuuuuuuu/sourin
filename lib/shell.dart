@@ -58,6 +58,7 @@ import 'package:window_manager/window_manager.dart';
 import 'package:path_provider/path_provider.dart';
 
 import 'core/app_tray.dart';
+import 'ui/app_update_bootstrap.dart';
 import 'core/device.dart';
 import 'core/ffi.dart';
 import 'core/ui_prefs.dart';
@@ -732,6 +733,11 @@ Future<void> main() async {
    *    而托盘晚 50ms 出现对用户毫无影响。失败已由 `start()` 自己吞并留日志。
    */
   unawaited(AppTray.instance.start());
+
+  // ★ 版本更新检查（每天至多一次，用户可在「关于」里关闭）。
+  //   不 await：检查走网络，等它会让首帧等一次 HTTP。
+  //   逻辑全在 `ui/app_update_bootstrap.dart`，这里只是挂钩点。
+  unawaited(AppUpdateBootstrap.run());
 }
 
 /// 让桌面窗口显示出来（★ 只在 `kIsDesktop` 下调用）
