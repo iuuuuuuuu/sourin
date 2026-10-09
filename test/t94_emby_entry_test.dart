@@ -127,14 +127,19 @@ void main() {
       );
     });
 
-    test('★ 入口落在「内容源」分组内（不是散落别处）', () {
-      final group = code.indexOf("SettingsGroupLabel(text: '内容源')");
+    test('★ 入口落在「内容源与插件」分组内（不是散落别处）', () {
+      // ★ 2026-10-10：组名从「内容源」改成「内容源与插件」——
+      //   这一组里除了 JS 插件还有 Emby 源，原名盖不住。
+      //   判据（同语义，只是锚点字符串跟着改）：Emby 必须在该组标签与
+      //   下一个组标签「播放与观看」**之间**。
+      final group =
+          code.indexOf("SettingsGroupLabel(text: '内容源与插件')");
       final entry = code.indexOf("title: 'Emby',");
       final nextGroup = code.indexOf("SettingsGroupLabel(text: '播放与观看')");
       expect(group > 0 && entry > 0 && nextGroup > 0, isTrue,
           reason: '★ 前置：三个锚点都必须找得到');
       expect(group < entry && entry < nextGroup, isTrue,
-          reason: '★ Emby 是内容源（JS 插件形态）⇒ 必须落在「内容源」组里',
+          reason: '★ Emby 是内容源（JS 插件形态）⇒ 必须落在「内容源与插件」组里',
       );
     });
 

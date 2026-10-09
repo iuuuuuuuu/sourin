@@ -1814,6 +1814,10 @@ class SettingsPageState extends State<SettingsPage> {
                   // ★ 4px → 8px（28px 大标题与 14px 副标题需要更宽的呼吸）
                   const SizedBox(height: Sp.x2),
                   Text(
+                    // ⚠️ 这句副标题被 4 处间距测试当作**锚点字符串**
+                    //   （task44_header_spacing / task44_spacing_pixels /
+                    //   t88_cloudsync_move），改它会连带让那些像素级守卫失效，
+                    //   而它本身并不误导用户 ⇒ 保持原样。
                     '内容源、网络与同步',
                     style: TextStyle(
                       fontSize: FontSizes.sm,
@@ -1854,7 +1858,25 @@ class SettingsPageState extends State<SettingsPage> {
              * ⚠️ 只藏 UI 不够：lib/shell.dart 里 RemoteBridgeHost 的挂载点
              *    也必须按设备门控（见该处注释），否则手机照样在监听遥控端口。
              */
-            if (!Device.isTouchOnly)
+            /*
+             * ★★★ 2026-10-10：分组标签提到**首块之前**
+             *
+             * 改前这一页的结构是：
+             * ```text
+             * 设置 / 内容源、网络与同步
+             * ┌ 局域网遥控 ─────────────┐   ← 没有组，孤零零顶在最上面
+             * ┌ JS 插件              ›  ┐
+             *   内容源                     ← 组标签跑到第二个块**下面**
+             * ┌ Emby                  ›  ┐
+             *   播放与观看
+             * ```
+             * ⇒ 「局域网遥控」没有任何组，「JS 插件」上无组下有组 ⇒ 读不出结构。
+             *
+             * ⇒ 每一块之前都先给它自己的组标签：组标签的 `top` 间距
+             *   会自然把上一组推开，第一组由下面那个 Sp.x8 兜住。
+             */
+            if (!Device.isTouchOnly) ...[
+              const SettingsGroupLabel(text: '远程'),
               _Block(
                 title: '局域网遥控',
                 trailing: Text(
@@ -1933,6 +1955,7 @@ class SettingsPageState extends State<SettingsPage> {
                     ),
                 ],
               ),
+            ],
             // ── JS 插件（二级页入口，task-43）──
             /*
              * ★★★ 用户原话：
@@ -1979,8 +2002,9 @@ class SettingsPageState extends State<SettingsPage> {
              * ⚠️ 组标签必须放在 `SettingsEntryRow` **之前**，
              *   且**不能**插进 `SettingsBlock` 内部（它自带 padding）。
              */
-            const SettingsGroupLabel(text: '内容源'),
+            const SettingsGroupLabel(text: '内容源与插件'),
             SettingsEntryRow(
+              icon: Icons.extension_outlined,
               title: 'JS 插件',
               subtitle: '${_providers.length} 个内容源 · 安装 / 编辑 / 更新 / 排序 / 代理',
               onTap: _openPluginsPage,
@@ -2010,6 +2034,7 @@ class SettingsPageState extends State<SettingsPage> {
              *    这里再算一次等于两份真相。
              */
             SettingsEntryRow(
+              icon: Icons.album_outlined,
               title: 'Emby',
               subtitle: '媒体服务器 · 安装插件 / 服务器地址 / 连接自检',
               onTap: () => _openSubPage(const EmbySettingsPage()),
@@ -2064,6 +2089,7 @@ class SettingsPageState extends State<SettingsPage> {
             // ── 二级页入口（2026-09-25 任务 ㉙ 方案 A）──
             SettingsGroupLabel(text: '播放与观看'),
             SettingsEntryRow(
+              icon: Icons.content_cut_outlined,
               title: '片头片尾',
               subtitle: _skipMarkers.isEmpty
                   ? '还没有设置过 · 在播放器底栏可以设置'
@@ -2072,6 +2098,7 @@ class SettingsPageState extends State<SettingsPage> {
             ),
             if (Device.isDesktop)
               SettingsEntryRow(
+                icon: Icons.keyboard_outlined,
                 title: 'PC 播放手势',
                 subtitle: '方向键单击/长按 · 鼠标左右半屏',
                 onTap: () => _openSubPage(const PcGesturesSettingsPage()),
@@ -2080,6 +2107,7 @@ class SettingsPageState extends State<SettingsPage> {
             //   标题「播放与下载」是**刻意**与播放器里那个「播放设置」面板
             //   区分的 —— 面板管字幕/音轨/倍速，这一页管下载与缓存。
             SettingsEntryRow(
+              icon: Icons.download_outlined,
               title: '播放与下载',
               /*
                * ★ 2026-10-09：副标题跟着 log-dev 的改名走
@@ -2108,6 +2136,7 @@ class SettingsPageState extends State<SettingsPage> {
             //   `lib/ui/settings/touch_gestures_page.dart:72-92`），
             //   比把入口整个藏掉更容易让用户明白为什么没有档位可选。
             SettingsEntryRow(
+              icon: Icons.touch_app_outlined,
               title: '触摸手势',
               subtitle: '双击左右侧 · 长按左右侧（触摸端生效）',
               onTap: () => _openSubPage(const TouchGesturesSettingsPage()),
@@ -2238,6 +2267,7 @@ class SettingsPageState extends State<SettingsPage> {
              * ⚠️ 我只**新增**这一个区块 —— 不碰本页任何既有区块
              *    （片头片尾 / 直播源配置 / JS 插件 / 云存储 / 主题 / 关于）
              */
+            const SettingsGroupLabel(text: '外观'),
             _Block(
               title: '动画效果',
               children: [
@@ -2266,16 +2296,19 @@ class SettingsPageState extends State<SettingsPage> {
 
             SettingsGroupLabel(text: '数据与外观'),
             SettingsEntryRow(
+              icon: Icons.cloud_sync_outlined,
               title: '备份与恢复',
               subtitle: '导出 / 导入本机数据（合并，不覆盖）',
               onTap: () => _openSubPage(const BackupSettingsPage()),
             ),
             SettingsEntryRow(
+              icon: Icons.palette_outlined,
               title: '主题',
               subtitle: '当前：${AppTheme.mode.label} · 跟随系统 / 浅色 / 深色',
               onTap: () => _openSubPage(const ThemeSettingsPage()),
             ),
             SettingsEntryRow(
+              icon: Icons.info_outline,
               title: '关于',
               subtitle: '${SourinApi.version} · 架构与设备信息',
               onTap: () => _openSubPage(const AboutSettingsPage()),

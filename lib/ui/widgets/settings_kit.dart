@@ -600,24 +600,39 @@ class SettingsInfoRow extends StatelessWidget {
 ///    `Material` 才能画出涟漪。设置页外层是 `Scaffold`（自带 `Material`），
 ///    但二级页可能不是，所以这里**自带一层 `Material`** 保底
 ///    （`type: MaterialType.transparency` 不改变视觉）。
+///
+/// # ★★ 2026-10-10：左侧图标
+///
+/// 改前所有入口行长一个样：只有标题+副标题，十几行排下来
+/// 用户只能**逐行读**才知道哪行是哪行。
+/// ⇒ 加一枚**单色描边图标**：一眼扫过去按"形状"分组，不用读字。
+/// 图标用 `onSurfaceVariant`（不是 `primary`）—— 它只是定位点，
+/// 一屏十几枚彩色图标会抢掉标题的注意力。
 class SettingsEntryRow extends StatelessWidget {
   const SettingsEntryRow({
     super.key,
     required this.title,
     required this.subtitle,
     required this.onTap,
+    this.icon,
   });
 
   final String title;
   final String subtitle;
   final VoidCallback onTap;
 
+  /// 左侧图标（不给 = 不画，保持既有调用点零影响）
+  final IconData? icon;
+
+  /// 图标衬底圆片的尺寸（与 `icon` 成对出现）
+  static const double _iconPlate = 34;
+
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
     // ★ 内容带（t509）：左右那两层已去掉（理由同 `SettingsBlock`）。
     return Padding(
-      padding: const EdgeInsets.only(bottom: Sp.x3),
+      padding: const EdgeInsets.only(bottom: Sp.x2),
       child: Material(
         type: MaterialType.transparency,
         child: InkWell(
@@ -635,6 +650,22 @@ class SettingsEntryRow extends StatelessWidget {
             ),
             child: Row(
               children: [
+                if (icon != null) ...[
+                  Container(
+                    width: _iconPlate,
+                    height: _iconPlate,
+                    decoration: BoxDecoration(
+                      color: colors.onSurface.withValues(alpha: 0.06),
+                      borderRadius: BorderRadius.circular(_iconPlate / 3),
+                    ),
+                    child: Icon(
+                      icon,
+                      size: 18,
+                      color: colors.onSurfaceVariant,
+                    ),
+                  ),
+                  const SizedBox(width: Sp.x3),
+                ],
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -675,9 +706,22 @@ class SettingsEntryRow extends StatelessWidget {
   }
 }
 
-/// 一级页上的**分组小标题**（"播放与观看" / "数据与外观"）
+/// 一级页上的**分组小标题**（"内容源与插件" / "播放与观看" / "外观" …）
 ///
-/// 5 个入口行平铺会显得散，分两组让用户扫起来有结构。
+/// # 为什么要重做这个零件（2026-10-10）
+///
+/// 改前它是一行 12px 的灰字。问题不是小，是**认不出它是分组**：
+/// ```text
+/// ┌ 局域网遥控 ────────────────────┐   ← 20px 大标题（区块）
+/// ┌ JS 插件                   ›   ┐   ← 16px 标题（入口行）
+///   内容源与插件                     ← 12px 灰字
+/// ```
+/// 三种字号、三种角色排在一起，用户读到「JS 插件」根本不知道
+/// 自己在一个组里、上一个组叫什么。
+///
+/// ⇒ 现在：左侧一枚 3px 竖条 + 组名 + 一条延伸到右边的细分割线。
+///   竖条与「区块标题」那枚 4px 竖条是**同一个零件**（见 `SearchPage`），
+///   一页之内两处标题共用一个视觉信号 ⇒ 读起来是同一套系统。
 class SettingsGroupLabel extends StatelessWidget {
   const SettingsGroupLabel({super.key, required this.text});
 
@@ -688,15 +732,36 @@ class SettingsGroupLabel extends StatelessWidget {
     final colors = Theme.of(context).colorScheme;
     // ★ 内容带（t509）：左右那两层已去掉（理由同 `SettingsBlock`）。
     return Padding(
-      padding: const EdgeInsets.only(top: Sp.x3, bottom: Sp.x2),
-      child: Text(
-        text,
-        style: TextStyle(
-          fontSize: FontSizes.cap,
-          fontWeight: FontWeight.w600,
-          letterSpacing: 0.6,
-          color: colors.onSurfaceVariant,
-        ),
+      // ★ top 给足：分组标签的职责就是把上一组"关"在外面，
+      //   Sp.x3(12) 太贴，读起来像上一块的第三行。
+      padding: const EdgeInsets.only(top: Sp.x5, bottom: Sp.x3),
+      child: Row(
+        children: [
+          Container(
+            width: 3,
+            height: 14,
+            decoration: BoxDecoration(
+              color: colors.primary,
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+          const SizedBox(width: Sp.x2),
+          Text(
+            text,
+            style: TextStyle(
+              fontSize: FontSizes.cap,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 0.8,
+              color: colors.onSurface.withValues(alpha: 0.85),
+            ),
+          ),
+          const SizedBox(width: Sp.x3),
+          // ★ 余下的空间画一条细线：把"到这一行为止是同一组"说成视觉事实，
+          //   而不是靠留白暗示。
+          Expanded(
+            child: Container(height: 1, color: colors.outlineVariant),
+          ),
+        ],
       ),
     );
   }
