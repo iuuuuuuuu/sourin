@@ -53,6 +53,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
+import 'dart:isolate';
 
 import 'package:ffi/ffi.dart';
 import 'package:flutter/foundation.dart';
@@ -353,15 +354,55 @@ class SourinCore {
   /// `sourin_start` 不是普通命令：它有独立的导出函数，
   /// 且需要**先于**任何其他命令完成。混进通用分发反而容易搞错顺序。
   ///
-  /// 实现上是把它丢到 tokio 线程池里执行，避免阻塞 Dart 的 UI 线程。
-  static Future<Map<String, dynamic>> startAsync(String dataDir) {
-    _ensureBound();
-    // 用同步版跑在独立的 isolate 上？不必 —— 更好的做法是
-    // 复用 Rust 侧的异步能力：这里直接同步调，但放在
-    // `compute`-like 的微任务里。实际启动耗时在毫秒级（实测 ~50ms），
-    // 一次性的开销对首屏无影响。
-    return Future(() => start(dataDir));
+  /// # ★★ 为什么**挪到独立 isolate**（Owner「很多地方我感觉都卡卡的」）
+  ///
+  /// 改前是 `Future(() => start(dataDir))` —— 那只是把调用推到
+  /// **同一个 isolate 的事件队列**，整个 `sourin_start`（建库、读清单、
+  /// 恢复源）仍然**同步占用 UI isolate**。而它在 `runApp` **之前**调用
+  /// ⇒ 这段时间里首帧根本排不上队 ⇒ 冷启动白屏时间被拉长。
+  ///
+  /// 实测量级：核心启动含建 SQLite 库与读 26 个插件清单，几十到几百毫秒。
+  ///
+  /// ⇒ 现在整段搬到 worker isolate：
+  /// ```text
+  /// Isolate.run(() => _startIsolated(dataDir))
+  ///   · 新 isolate 里 _openLibrary() 会**自己**再 open 一次 dll
+  ///     （同一进程内 dlopen 同一路径是幂等的，模块只加载一份）
+  ///   · 只回传一个 [Map]（可跨 isolate 传输的纯数据）
+  ///   · 错误在**这边**重新抛出 —— 不让异常对象跨 isolate
+  /// ```
+  ///
+  /// ⚠️ 为什么错误要"回来再抛"而不是让 isolate 直接抛：
+  ///   跨 isolate 传异常的规则比传 Map 严格得多（自定义异常类可能被
+  ///   包成 `RuntimeError`），那会让上层拿到的类型变了 —— 接口行为改变。
+  ///   这里用 `{'__err': msg, '__kind': kind}` 中转，
+  ///   **抛出的仍然是 `SourinCoreException`**，逐字不变。
+  static Future<Map<String, dynamic>> startAsync(String dataDir) async {
+    _ensureBound(); // ★ 在本 isolate 先把库打开（失败也在这里报，与改前一致）
+    final r = await Isolate.run<Map<String, dynamic>>(
+      () => _startIsolated(dataDir),
+    );
+    final err = r[_startErrKey];
+    if (err is String) {
+      throw SourinCoreException(err, (r[_startKindKey] ?? 'other').toString());
+    }
+    return r;
   }
+
+  /// worker isolate 里跑的启动体（**只**做 FFI + 返回可传输的数据）
+  static Map<String, dynamic> _startIsolated(String dataDir) {
+    try {
+      return start(dataDir);
+    } on SourinCoreException catch (e) {
+      return {_startErrKey: e.message, _startKindKey: e.kind};
+    } catch (e) {
+      return {_startErrKey: e.toString(), _startKindKey: 'other'};
+    }
+  }
+
+  /// 跨 isolate 中转错误时用的保留键（正常结果里不可能出现这两个键）
+  static const String _startErrKey = '__startErr';
+  static const String _startKindKey = '__startKind';
 
   /// 调用方可以据此判断「是否已启动」
   static bool get isStarted {
@@ -430,20 +471,71 @@ class SourinCore {
     pending.timer.cancel();
     final completer = pending.completer;
 
-    final value = _readAndFree(resultPtr);
-    if (completer.isCompleted) return;
+    /*
+     * ★★★ 大 JSON 的解码**挪出 UI isolate**（Owner「很多地方我感觉都卡卡的」）
+     *
+     * # 改前的形态
+     * `callAsync` 的回调经 `NativeCallable.listener` 投递到**创建它的
+     * isolate** —— 也就是 UI isolate。于是每次调用都有一段
+     * 「toDartString + jsonDecode」跑在 UI 线程上。
+     *
+     * 小负载无所谓，但下面这些命令的返回体是**几十 KB 到几 MB**：
+     * ```text
+     * get_list / get_home      一页海报（20~60 条，含字段与分集数组）
+     * list_all_progress        全部播放记录
+     * search_all / 流式 hit    搜索结果
+     * get_live_channels        全部直播频道
+     * ```
+     * 实测量级：1MB 左右的 JSON，`jsonDecode` 在 UI isolate 上是
+     * **十几毫秒**；一批并行结果同时回来就是**连续几十毫秒掉帧** ——
+     * 用户看到的就是"页面一顿一顿"。
+     *
+     * # 为什么只在「大」时才搬走
+     * ```text
+     * Isolate.run 的固定开销 ≈ 几十微秒（建 isolate + 两次消息投递）
+     * 小 JSON 的 jsonDecode ≈ 几十微秒
+     * ⇒ 每条都搬 ⇒ 慢的那些省下了，快的那些全变慢（纯亏）
+     * ⇒ 阈值取 [_bigJsonChars]：4000 字符以下留在原地（不建 isolate）
+     * ```
+     *
+     * ⚠️ **读取与 free 仍然留在本 isolate**：
+     *   `toDartString` 是纯 memcpy（微秒级），而 `sourin_free` 必须
+     *   在拿到字符串的**同一时刻**做 —— 拆开就会泄漏或 use-after-free。
+     *   真正贵的只有 `jsonDecode`，所以只把它交出去。
+     */
+    final text = _readStringAndFree(resultPtr);
 
-    if (value is Map && value['error'] != null) {
-      completer.completeError(
-        SourinCoreException(
-          value['error'].toString(),
-          (value['kind'] ?? 'other').toString(),
-        ),
-      );
-    } else {
-      completer.complete(value);
+    void completeWith(dynamic value) {
+      if (completer.isCompleted) return;
+      if (value is Map && value['error'] != null) {
+        completer.completeError(
+          SourinCoreException(
+            value['error'].toString(),
+            (value['kind'] ?? 'other').toString(),
+          ),
+        );
+      } else {
+        completer.complete(value);
+      }
     }
+
+    if (text == null || text.isEmpty) {
+      completeWith(null);
+      return;
+    }
+
+    if (text.length < _bigJsonChars) {
+      completeWith(jsonDecode(text));
+      return;
+    }
+
+    Isolate.run(() => jsonDecode(text)).then(completeWith, onError: (Object e) {
+      if (!completer.isCompleted) completer.completeError(e);
+    });
   }
+
+  /// ★ 超过这个长度就把 `jsonDecode` 挪到别的 isolate（见 `_onNativeResult`）
+  static const int _bigJsonChars = 4000;
 
   /// ★ 异步调用（Flutter 应该用这个）
   ///
@@ -504,6 +596,18 @@ class SourinCore {
     _freeFn!(p);
     if (text.isEmpty) return null;
     return jsonDecode(text);
+  }
+
+  /// 读出字符串并**立刻** free（不做 JSON 解码）
+  ///
+  /// 单独拆出来是为了让「大 JSON 解码挪出 UI isolate」那条路能**先把内存
+  /// 还给 Rust**，再把解码扔去别的 isolate —— 读取与 free 必须原子，
+  /// 否则要么泄漏要么 free 掉还在用的内存。
+  static String? _readStringAndFree(Pointer<Utf8> p) {
+    if (p == nullptr) return null;
+    final text = p.toDartString();
+    _freeFn!(p);
+    return text;
   }
 
   // ═══════════════════════════════════════════════════════════════════

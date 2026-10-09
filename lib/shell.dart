@@ -2664,7 +2664,11 @@ class _ShellPageState extends State<ShellPage>
         sum += v;
       }
       if (!mounted) return;
-      if (sum != _unread) setState(() => _unread = sum);
+      if (sum != _unread) {
+        setState(() => _unread = sum);
+        _bottomBarState.value =
+            _BottomBarState(tab: _tab, unread: sum);
+      }
       debugPrint('[SHELL] 追更徽标(还剩未看) = $sum（${following.length} 部追更）');
     } catch (e) {
       debugPrint('[SHELL] 追更徽标取数失败（保留旧值 $_unread）: $e');
@@ -3347,6 +3351,7 @@ class _ShellPageState extends State<ShellPage>
     //      只释放一个会漏（本项目踩过"两处同构必须一起改"）。
     _activeTab.dispose();
     _liveVisible.dispose();
+    _bottomBarState.dispose();
     // ★★★ task-14 ⑨（2026-10-04）：离场窗口的定时器必须一起取消 ——
     //   否则 shell 被销毁后它还挂着，flutter_test 会直接判红：
     //   A Timer is still pending even after the widget tree was disposed.
@@ -3451,6 +3456,8 @@ class _ShellPageState extends State<ShellPage>
        * "页面已切但可见性还没变"的一帧（隐藏页会晚一拍才停播放器）。
        */
       _activeTab.value = t;
+      // ★ 底栏订阅的值（见 `_bottomBar`）：只有这两项变化才重建底栏
+      _bottomBarState.value = _BottomBarState(tab: t, unread: _unread);
     });
     // ★ 投影到既有 LivePage(visible:) 签名（单向，见 `_syncVisibility`）
     //
@@ -3561,6 +3568,20 @@ class _ShellPageState extends State<ShellPage>
     if (t == AppTab.settings) {
       _settingsKey.currentState?.loadAll();
     }
+    /*
+     * ★★★ 底栏徽标也顺手刷一次（Owner「很多地方我感觉都卡卡的」）
+     *
+     * 徽标是"还需要看多少集"，它会因**任何**页面的写操作变：
+     * 播放页看完一集、详情页点追更/收藏 —— 那些都不经过追更页。
+     * 改前只有 `initState` 跑一次 `_refreshUnread()` ⇒ 徽标可以
+     * 整晚停在旧数字上（用户只有切到追更页才会看到刷新）。
+     *
+     * 为什么放在 `_switchTo` 的**末尾**（而不是每个分支里）：
+     * 它是一次 FFI 往返，必须排在本次切页真正要做的取数**之后**，
+     * 否则用户会看到"切页卡了一下才出内容"。
+     * ⚠️ 不 await —— 与其它四支一致（刷新是"最终一致"的）。
+     */
+    unawaited(_refreshUnread());
   }
 
   /// ★ 按 tab 序号算切换方向（对齐原版 L41–45）
@@ -4420,12 +4441,7 @@ class _ShellPageState extends State<ShellPage>
            *    永远不会因为屏幕尺寸而判错。这里照做。
            */
             child: BottomBarMarker(
-              child: _BottomBar(
-                current: _tab,
-                unread: _unread,
-                colors: colors,
-                onSelect: _switchTo,
-              ),
+              child: _bottomBar(colors),
             ),
           ),
         ],
@@ -4434,6 +4450,60 @@ class _ShellPageState extends State<ShellPage>
     ),     // ← FScaffold 的收尾
     );     // ← ShellScope 的收尾
   }
+
+  /// ★★★ 底栏只订阅「它真正依赖的两个值」（Owner「很多地方我感觉都卡卡的」）
+  ///
+  /// # 改前的形态与它的代价
+  ///
+  /// `_BottomBar` 直接写在 `_ShellPageState.build` 里，读 `_tab` / `_unread`
+  /// ⇒ **每一次 shell 的 `setState` 都会重建整条底栏**：
+  ///
+  /// ```text
+  /// shell 的 setState 来源（实测逐条列过）：
+  ///   · _switchTo              切 tab
+  ///   · 离场窗口结束的 Timer    每次切 tab 后 260ms 又一次
+  ///   · _refreshUnread         徽标数字变了
+  ///   · _syncMaximized         窗口最大化状态变了
+  ///   · 空间导航/搜索结果的回调
+  /// ⇒ 而底栏里躺着一整块**液态玻璃**（BackdropFilter / saveLayer 一类），
+  ///   外加 5 个 `_BottomItem`（各自带 AnimatedContainer + FocusableActionDetector）
+  /// ```
+  ///
+  /// 底栏本身只在 **`_tab` 变**和 **`_unread` 变**时需要重建。
+  /// 其余那些 `setState`（尤其是切 tab 之后 260ms 那次"离场窗口收尾"）
+  /// 与它**毫无关系** —— 却每次都要把玻璃重画一遍。
+  ///
+  /// # 改法（结构不变，观感逐字不变）
+  ///
+  /// 把 `_tab` 与 `_unread` 折成一个 `ValueNotifier<_BottomBarState>`，
+  /// 用 [ValueListenableBuilder] 订阅 ⇒
+  /// ```text
+  /// 切 tab / 徽标变 → 重建底栏（与改前逐帧相同）
+  /// 其它 setState    → **底栏完全不重建**
+  /// ```
+  ///
+  /// ⚠️ 为什么不是 `const`/`identical`：`_BottomBar` 的入参里 `colors`
+  ///   与 `onSelect` 每次都可能是新对象，而 `ValueListenableBuilder` 的
+  ///   **builder 只在值变化时**被调 —— 那才是我们要的粒度。
+  ///
+  /// ⚠️ 底栏的液态玻璃**观感必须逐字不变**（Owner 唯一满意的部分）：
+  ///   本改动只改**什么时候重建**，不动 `GlassContainer` 的任何一个参数。
+  Widget _bottomBar(FColors colors) {
+    return ValueListenableBuilder<_BottomBarState>(
+      valueListenable: _bottomBarState,
+      builder: (context, s, _) => _BottomBar(
+        current: s.tab,
+        unread: s.unread,
+        colors: colors,
+        onSelect: _switchTo,
+      ),
+    );
+  }
+
+  /// 底栏订阅的值（只有这两项 —— 见 [`_bottomBar`] 的说明）
+  final _bottomBarState = ValueNotifier<_BottomBarState>(
+    const _BottomBarState(tab: AppTab.home, unread: 0),
+  );
 
   Widget _pageFor(AppTab t) {
     switch (t) {
@@ -5987,6 +6057,22 @@ class _ErrCard extends StatelessWidget {
 // ```
 // ⚠️ **不要**指望 `FocusTraversalGroup` 让方向键移动焦点 ——
 //    它只响应 Tab/Shift+Tab（实测：按 → 十次 tab 不动）。
+/// 底栏订阅的那两个值（相等性可判 ⇒ 不会误触发重建）
+@immutable
+class _BottomBarState {
+  const _BottomBarState({required this.tab, required this.unread});
+
+  final AppTab tab;
+  final int unread;
+
+  @override
+  bool operator ==(Object other) =>
+      other is _BottomBarState && other.tab == tab && other.unread == unread;
+
+  @override
+  int get hashCode => Object.hash(tab, unread);
+}
+
 class _BottomBar extends StatelessWidget {
   const _BottomBar({
     required this.current,
