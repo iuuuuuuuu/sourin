@@ -21,6 +21,9 @@ use sourin_core::provider::MediaProvider;
 use sourin_core::registry::Registry;
 use std::sync::Arc;
 
+mod support;
+use support::real_creds_required_echo;
+
 const REAL_STORE: &str = r"C:\Users\iuuuuuuuu\AppData\Roaming\app.sourin.player\plugins\.data";
 
 fn probe_dir(tag: &str) -> std::path::PathBuf {
@@ -153,8 +156,13 @@ fn b64url_encode(data: &[u8]) -> String {
     out
 }
 
+#[ignore = "走真实网络 + 真实第三方账号重登链路：站点随时可能改接口/弹验证码，结果不稳定（且需要开发机上的真实凭据）。手动跑：cargo test -- --ignored --nocapture"]
 #[tokio::test]
 async fn t38_expired_token_full_chain() {
+    // ★ 需要开发机上的真实凭据；本机没有就跳过（见 tests/support/mod.rs）
+    if let Some(_why) = real_creds_required_echo("t38_expired_token_full_chain") {
+        return;
+    }
     let dir = probe_dir("expired");
     seed(&dir);
 
@@ -222,8 +230,13 @@ async fn t38_expired_token_full_chain() {
 }
 
 /// ★ 阳性对照：**没有凭据**时才该报 expired（UI 显示"需要验证码"）
+#[ignore = "走真实网络 + 真实第三方账号重登链路：站点随时可能改接口/弹验证码，结果不稳定（且需要开发机上的真实凭据）。手动跑：cargo test -- --ignored --nocapture"]
 #[tokio::test]
 async fn t38_no_credentials_is_expired() {
+    // ★ 需要开发机上的真实凭据；本机没有就跳过（见 tests/support/mod.rs）
+    if let Some(_why) = real_creds_required_echo("t38_no_credentials_is_expired") {
+        return;
+    }
     let dir = probe_dir("nocred");
     seed(&dir);
 

@@ -28,6 +28,9 @@ use sourin_core::provider::SessionState;
 use sourin_core::registry::Registry;
 use std::sync::Arc;
 
+mod support;
+use support::real_creds_required_echo;
+
 const REAL_STORE: &str = r"C:\Users\iuuuuuuuu\AppData\Roaming\app.sourin.player\plugins\.data";
 
 fn probe_dir(tag: &str) -> std::path::PathBuf {
@@ -48,8 +51,13 @@ async fn cycani_at(dir: std::path::PathBuf) -> JsPluginProvider {
     p
 }
 
+#[ignore = "走真实网络 + 真实第三方账号重登链路：站点随时可能改接口/弹验证码，结果不稳定（且需要开发机上的真实凭据）。手动跑：cargo test -- --ignored --nocapture"]
 #[tokio::test]
 async fn t38_corrupt_session_with_credentials_reports_expired() {
+    // ★ 需要开发机上的真实凭据；本机没有就跳过（见 tests/support/mod.rs）
+    if let Some(_why) = real_creds_required_echo("t38_corrupt_session_with_credentials_reports_expired") {
+        return;
+    }
     let dir = probe_dir("corrupt");
     let src = std::path::PathBuf::from(REAL_STORE).join("cycani.json");
     std::fs::copy(&src, dir.join("cycani.json")).unwrap();
