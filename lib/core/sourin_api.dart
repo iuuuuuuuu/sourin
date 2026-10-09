@@ -1506,8 +1506,63 @@ class SourinApi {
   static Future<void> disconnectSync() =>
       SourinCore.callAsync('disconnect_sync');
 
+  // ═══════════════════════════════════════════════════════════════════
+  //  云盘同步 · 探针注入点
+  // ═══════════════════════════════════════════════════════════════════
+  //
+  // ⚠️ **生产路径永不为非 null** —— 只有 widget 测试会装一次，
+  //    测试结束即复原。产品代码里没有任何地方写它们。
+  //
+  // # 为什么需要（这是实测逼出来的）
+  //
+  // 面板**绝大部分 UI 只在「已连接」时存在**：
+  //
+  // ```text
+  // 连接详情（服务/地址/账号/目录/上次同步/上次备份）  ← 只有已连接才有
+  // 四个动作按钮（测试连接/立即同步/立即备份/断开）   ← 只有已连接才有
+  // 自动同步设置区                                  ← 只有已连接才有
+  // 云端备份列表（含删除按钮）                       ← 只有已连接才有
+  // ```
+  //
+  // 而 `flutter test` 环境里**加载不了核心库**（worktree 根目录没有
+  // `sourin_core.dll`）⇒ `syncStatus()` 抛异常 ⇒ 面板走降级分支
+  // ⇒ 永远停在「未配置」态 ⇒ 上面那些**一条都渲染不出来**。
+  //
+  // 结果就是：这块 UI 既没有截图、也没有布局断言，等于没测。
+  // 有了下面这几个注入点，测试就能造出「已连接 + 有备份列表」的形态，
+  // 把真正会被用户看到的界面**渲染出来并量它**。
+  //
+  // # 纪律：只给**只读**的三个接口
+  //
+  // 注入点只覆盖 `sync_status` / `sync_settings_get` / `sync_backup_list`
+  // —— 它们都只是读。写接口（configure / test / sync / 备份 / 删除）
+  // **不给注入点**：测试不需要它们，而且注入了就等于把「按钮点了会发生什么」
+  // 从测试里拿掉，那正是最该测的部分（真跑由 t94 在 Rust 侧端到端覆盖）。
+  @visibleForTesting
+  static Future<SyncStatus> Function()? debugSyncStatusFetcher;
+
+  @visibleForTesting
+  static Future<SyncSettings> Function()? debugSyncSettingsFetcher;
+
+  @visibleForTesting
+  static Future<List<SyncBackupEntry>> Function()? debugSyncBackupListFetcher;
+
+  /// 装/卸这三个注入点（`null` = 恢复真实实现）
+  @visibleForTesting
+  static void installSyncDebugFetchers({
+    Future<SyncStatus> Function()? status,
+    Future<SyncSettings> Function()? settings,
+    Future<List<SyncBackupEntry>> Function()? backups,
+  }) {
+    debugSyncStatusFetcher = status;
+    debugSyncSettingsFetcher = settings;
+    debugSyncBackupListFetcher = backups;
+  }
+
   /// 同步状态（设置页据此显示「已连接 / 未配置」）
   static Future<SyncStatus> syncStatus() async {
+    final f = debugSyncStatusFetcher;
+    if (f != null) return f();
     final r = await SourinCore.callAsync('sync_status');
     return SyncStatus.fromJson(jmap(r) ?? {});
   }
@@ -1535,6 +1590,8 @@ class SourinApi {
   /// `autoBackupIntervalMinutes: 1440`、`autoEnabled: false`）。
   /// 因为它比「用户配云盘」早得多就会被调用（一进「备份与恢复」页就调）。
   static Future<SyncSettings> syncSettings() async {
+    final f = debugSyncSettingsFetcher;
+    if (f != null) return f();
     final r = await SourinCore.callAsync('sync_settings_get');
     return SyncSettings.fromJson(jmap(r) ?? {});
   }
@@ -1571,6 +1628,8 @@ class SourinApi {
   ///
   /// ★ 没配云盘时后端返回**空列表**（不是报错）—— 界面会无条件调它。
   static Future<List<SyncBackupEntry>> syncBackupList() async {
+    final f = debugSyncBackupListFetcher;
+    if (f != null) return f();
     final r = await SourinCore.callAsync('sync_backup_list');
     return jlist<SyncBackupEntry>(r, SyncBackupEntry.fromJson).toList();
   }

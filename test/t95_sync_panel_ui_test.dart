@@ -23,6 +23,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:sourin_spike/core/models.dart';
+import 'package:sourin_spike/core/sourin_api.dart';
 import 'package:sourin_spike/ui/app_theme.dart';
 import 'package:sourin_spike/ui/theme/theme_pack.dart';
 import 'package:sourin_spike/ui/widgets/sync_panel.dart';
@@ -172,6 +173,178 @@ void main() {
       expect(head.left >= panel.left - 0.5, true, reason: '$size 下标题左溢出');
       expect(head.right <= panel.right + 0.5, true, reason: '$size 下标题右溢出');
     }
+  });
+
+  // ─────────────────────────────────────────────
+  // ★ 「已连接」形态 —— 面板里**大部分** UI 只在这时存在
+  // ───────────────────────────────���─────────────
+  //
+  // 前面所有用例都在「未配置」态，因为测试环境加载不了核心库。
+  // 可那样一来，下面这些**一条都渲染不出来**：
+  //
+  // ```text
+  // 连接详情（服务/地址/账号/目录/上次同步/上次备份）
+  // 四个动作按钮（测试连接/立即同步/立即备份/断开）
+  // 自动同步设置区（开关 + 两个间隔 + 保留份数）
+  // 云端备份列表（含逐份删除按钮）
+  // ```
+  //
+  // ⇒ 靠 `SourinApi.installSyncDebugFetchers`（只读三接口的注入点，
+  //   见 sourin_api.dart 的注释）造出这个形态，把用户真正会看到的界面
+  //   渲染出来并量它。
+  tearDown(() => SourinApi.installSyncDebugFetchers());
+
+  /// 造一个「已连上坚果云、开了自动同步、云端有 3 份备份」的形态
+  void installConnected() {
+    final when = DateTime(2026, 9, 29, 10, 11).millisecondsSinceEpoch;
+    SourinApi.installSyncDebugFetchers(
+      status: () async => const SyncStatus(
+        connected: true,
+        backend: 'WebDAV（坚果云 / Nextcloud / 群晖）',
+        deviceId: 'dev-a',
+      ),
+      settings: () async => SyncSettings(
+        connected: true,
+        baseUrl: 'https://dav.jianguoyun.com/dav/',
+        username: 'someone@example.com',
+        remoteDir: 'sourin',
+        retainCount: 10,
+        autoEnabled: true,
+        autoIntervalMinutes: 30,
+        autoBackupIntervalMinutes: 1440,
+        lastSyncAt: when,
+        lastBackupAt: when,
+      ),
+      backups: () async => const [
+            SyncBackupEntry(
+                name: 'dsh-backup-客厅电视-20260929-101112.zip',
+                bytes: 12 * 1024 * 1024,
+                modified: 1759234272000),
+            SyncBackupEntry(
+                name: 'dsh-backup-书房台式机-20260928-080000.zip',
+                bytes: 3 * 1024 * 1024,
+                modified: 1759147872000),
+            SyncBackupEntry(
+                name: 'dsh-backup-客厅电视-20260927-203000.zip',
+                bytes: 11 * 1024 * 1024,
+                modified: 1759061400000),
+          ],
+    );
+  }
+
+  /// 挂「已连接」形态的面板
+  Future<void> pumpConnected(WidgetTester tester, Size size,
+      {Brightness brightness = Brightness.dark}) async {
+    installConnected();
+    await setShotViewport(tester, size);
+    await pumpPanel(tester, brightness: brightness);
+  }
+
+  testWidgets('⑦ ★ 已连接态：连接详情 + 四个动作按钮 + 设置区 + 备份列表都在',
+      (tester) async {
+    await pumpConnected(tester, const Size(1440, 900));
+
+    // 仪器自检：注入点真的生效（否则下面全是假绿）
+    expect(find.text('已连接'), findsOneWidget, reason: '必须真处在已连接态');
+
+    // ① 连接详情 —— 用户靠这几行确认自己没连错地方
+    expect(find.textContaining('someone@example.com'), findsOneWidget);
+    expect(find.textContaining('https://dav.jianguoyun.com/dav/'), findsOneWidget);
+    expect(find.textContaining('sourin'), findsWidgets);
+    expect(find.textContaining('上次同步'), findsOneWidget);
+    expect(find.textContaining('上次备份'), findsOneWidget);
+
+    // ② 四个动作
+    for (final label in ['测试连接', '立即同步', '立即备份', '断开']) {
+      expect(find.text(label), findsOneWidget, reason: '「$label」按钮必须渲染出来');
+    }
+
+    // ③ 自动同步设置区
+    expect(find.text('自动同步'), findsWidgets);
+    expect(find.text('数据变动就同步'), findsOneWidget);
+    expect(find.textContaining('云端最多保留'), findsOneWidget);
+
+    // ④ 云端备份列表：三份都在，且删除按钮逐份都有
+    expect(find.textContaining('云端备份（3 份）'), findsOneWidget);
+    expect(find.byIcon(Icons.delete_outline), findsNWidgets(3));
+
+    // ⑤ 中文设备名 + 大小被还原成人话（不是原始文件名）
+    expect(find.textContaining('客厅电视'), findsWidgets);
+    expect(find.textContaining('2026-09-29 10:11:12'), findsOneWidget);
+    expect(find.textContaining('12.0 MB'), findsOneWidget);
+  });
+
+  testWidgets('⑧ ★ 已连接态：默认配色下无异常、无溢出、截图非空',
+      (tester) async {
+    for (final size in const [Size(1440, 900), Size(412, 915), Size(1920, 1080)]) {
+      await pumpConnected(tester, size);
+      expect(tester.takeException(), isNull, reason: '$size 下不得有布局异常');
+      expect(find.byType(ErrorWidget), findsNothing, reason: '$size 下不能是 ErrorWidget');
+
+      // 逐个量：每一行备份、每一个按钮都在面板内
+      final panel = tester.getRect(find.byType(SyncPanel));
+      for (final label in ['测试连接', '立即同步', '立即备份', '断开']) {
+        final r = tester.getRect(find.text(label));
+        expect(panel.left - 0.5 <= r.left && r.right <= panel.right + 0.5, true,
+            reason: '$size 下「$label」${r.size} 溢出面板 ${panel.size}');
+      }
+
+      final f = await saveViewShot(tester, 'sync_panel_connected_${size.width.toInt()}');
+      expect(f.lengthSync(), greaterThan(4000),
+          reason: '$size 的截图只有 ${f.lengthSync()} 字节，疑似空图');
+    }
+  });
+
+  testWidgets('⑨ ★ 已连接态在每套内置配色下都渲染得出来', (tester) async {
+    installConnected();
+    for (final pack in ThemePackStore.builtins) {
+      await setShotViewport(tester, const Size(1440, 900));
+      await tester.pumpWidget(MaterialApp(
+        debugShowCheckedModeBanner: false,
+        theme: AppTheme.themeForPack(pack.brightness, pack),
+        home: const Scaffold(
+          body: Padding(
+            padding: EdgeInsets.all(24),
+            child: SingleChildScrollView(child: SyncPanel()),
+          ),
+        ),
+      ));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 50));
+
+      expect(tester.takeException(), isNull, reason: '配色「${pack.name}」下不得有异常');
+      expect(find.text('已连接'), findsOneWidget, reason: '配色「${pack.name}」下必须还是已连接态');
+      expect(find.text('立即同步'), findsOneWidget, reason: '配色「${pack.name}」下按钮必须渲染');
+
+      final f = await saveViewShot(tester, 'sync_panel_connected_pack_${pack.id}');
+      expect(f.lengthSync(), greaterThan(4000),
+          reason: '配色「${pack.name}」的已连接态截图只有 ${f.lengthSync()} 字节');
+    }
+  });
+
+  testWidgets('⑩ ★ 已连接态在明暗两种模式下都能渲染', (tester) async {
+    for (final b in Brightness.values) {
+      await pumpConnected(tester, const Size(1440, 900), brightness: b);
+      expect(tester.takeException(), isNull, reason: '$b 下不得有异常');
+      expect(find.text('已连接'), findsOneWidget);
+      final f = await saveViewShot(tester, 'sync_panel_connected_${b.name}');
+      expect(f.lengthSync(), greaterThan(4000));
+    }
+  });
+
+  testWidgets('⑪ ★ 阴性对照：注入点撤掉后回到未配置态（证明注入是有效的）',
+      (tester) async {
+    // 上面每一条都建立在「注入点生效」这个前提上。
+    // 这里把它拆掉，确认面板真的回到未配置形态 ——
+    // 否则「已连接态的断言全绿」可能只是因为它们在未配置态也成立。
+    SourinApi.installSyncDebugFetchers();
+    await setShotViewport(tester, const Size(1440, 900));
+    await pumpPanel(tester);
+
+    expect(find.text('已连接'), findsNothing, reason: '拆掉注入点后不该还是已连接');
+    expect(find.text('立即同步'), findsNothing, reason: '未配置时不该有「立即同步」');
+    expect(find.byIcon(Icons.delete_outline), findsNothing);
+    expect(find.textContaining('someone@example.com'), findsNothing);
   });
 
   testWidgets('③ 「配置云盘」对话框真能打开（未配置时唯一的入口）',
