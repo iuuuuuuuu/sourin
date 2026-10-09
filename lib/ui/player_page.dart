@@ -903,7 +903,6 @@ class _PlayerPageState extends State<PlayerPage>
   ///   ② 任意中间帧两者 **不透明度之和 ≈ 1**（不许出现「两个都看得见」）。
   /// 由 `debugPlayerBackArrowGeometry()` 读出来。
   final GlobalKey _topBarBackKey = GlobalKey();
-  final GlobalKey _floatingBackKey = GlobalKey();
 
   /// 播放页根 `Focus` 的节点（task-42）
   ///
@@ -7808,20 +7807,6 @@ class _PlayerPageState extends State<PlayerPage>
       _biliSheetOpen ||
       // ★ task-31 ⑤ 在线搜索字幕面板（同款全屏浮层）
       _subtitlePanelOpen;
-
-  /// 常驻悬浮返回键是否允许出现
-  /*
-   * ★★★ 常驻悬浮返回键是否允许出现（2026-10-07，用户缺陷②）
-   *
-   * 用户原话：
-   * > 就是箭头指的位置,你看到了吗?而且我现在无法返回到首页了
-   *
-   * 判据与取舍见 `_FloatingBackButton` 的长注释。这里只强调一点：
-   * 它**故意不看** `_controlsVisible` —— 那个字段正是缺陷本身。
-   */
-  bool get _canUseFloatingBack =>
-      Device.isDesktop && _error == null && !_anySheetOpen;
-
   /// ★★★ 错误态下顶栏那枚返回箭头**必须仍然可用**（Owner 2026-10-09 新增）
   ///
   /// ══════════════════════════════════════════════════════════════════
@@ -10725,10 +10710,6 @@ Future<void> _exitPlayer() async {
                          * 而顶栏那枚又因 `visible == false` 被 IgnorePointer 挡住。
                          * 见 `_canUseTopBarBack` 的长注释。
                          */
-                        onFloatingBack:
-                            (_canUseFloatingBack || _canUseTopBarBack)
-                                ? () => unawaited(_exitPlayer())
-                                : null,
                         /*
                          * ★ 顶栏渐变条的可见性 —— 与**底栏同一条判据**
                          *
@@ -10794,11 +10775,7 @@ Future<void> _exitPlayer() async {
                         fade: _canUseTopBarBack
                             ? kAlwaysCompleteAnimation
                             : _controlsFade,
-                        floatingFade: _canUseTopBarBack
-                            ? kAlwaysCompleteAnimation
-                            : _controlsFade,
                         backArrowKey: _topBarBackKey,
-                        floatingBackKey: _floatingBackKey,
                         /*
                          * ★★★ task-16（Owner：「全屏左上角这个单独的返回icon,
                          *     还没消失」）—— 悬浮键的**常驻**判据。
@@ -10811,7 +10788,6 @@ Future<void> _exitPlayer() async {
                          *    不是本按钮自己的矩形 —— 用户的本意是
                          *    「鼠标在画面上就该有返回口」。
                          */
-                        pointerInside: _pointerInside,
                       ),
 
                     /*
@@ -12543,72 +12519,6 @@ bool? debugPlayerRewindTimerActive() => _livePlayerState?._rewindTimer != null;
 /// 累计调用 `_takeScreenshot` 的次数（★ task-21 P1-30 探针用），无播放页时返回 null
 int? debugPlayerScreenshotCalls() => _livePlayerState?._screenshotCalls;
 
-/// ★★★ 2026-10-08（Owner 追加：顶栏与底栏联动）
-///
-/// 读**两条控制条真实的不透明度** —— 判据不是「`_controlsVisible` 是什么」，
-/// 而是「用户眼睛里看到的是不是淡出了」。
-///
-/// # 为什么必须读动画值而不是读那个 bool
-/// ```text
-/// 本次修的正是「bool 对了、画面没变」这一类缺陷：
-///   · 顶栏改前 `visible: _controlsVisible` 传对了，
-///     但 `_controlsFade.value` 恒 1.0（没人驱动）⇒ 画面**从不变**；
-///   · 而且外层那个 `|| _canUseFloatingBack` 让它**根本没被卸下**。
-/// ⇒ 只读 bool 的断言对这两个都**看不出来**（假绿）。
-/// ```
-///
-/// 返回 `(顶栏不透明度, 底栏不透明度)`；无播放页时返回 null。
-///
-/// ⚠️ 两条读的是**同一个** `_controlsFade` —— 这正是「联动」的实现方式，
-///    所以正常情况下两个数**必须相等**。
-/// ★★★ 2026-10-09（缺陷 2）：读**两枚返回箭头**的矩形与悬浮键的不透明度
-///
-/// # 为什么必须读矩形 + 不透明度，而不是读「传没传 fade」
-/// ```text
-/// 「传了 fade」只是**声明**，证明不了用户看到的是什么。
-/// 用户报的原话是「返回图标在控件隐藏后仍然残留」——
-/// 那是**两枚箭头同屏**。所以判据必须是两条可量的读数：
-///   ① 两枚箭头的矩形**位置**重合（同一枚箭头的两个位置）；
-///   ② 悬浮键 opacity = 1 - f、顶栏条 opacity = f ⇒ 两者之和 ≈ 1。
-/// ```
-///
-/// 返回 `(顶栏箭头矩形, 悬浮键矩形, 悬浮键不透明度)`；
-/// 没有对应 key / 没挂树时该元素为 null。
-///
-/// ⚠️ 参数类型必须是 `GlobalKey?`（`Key?` 没有 `currentContext`）。
-(Rect?, Rect?, double?)? debugPlayerBackArrowGeometry() {
-  final s = _livePlayerState;
-  if (s == null) return null;
-
-  Rect? boxOf(GlobalKey? k) {
-    final ctx = k?.currentContext;
-    if (ctx == null) return null;
-    final ro = ctx.findRenderObject();
-    if (ro is! RenderBox || !ro.attached) return null;
-    return ro.localToGlobal(Offset.zero) & ro.size;
-  }
-
-  double? opacityOf(GlobalKey? k) {
-    final ctx = k?.currentContext;
-    if (ctx == null) return null;
-    double? found;
-    ctx.visitAncestorElements((e) {
-      final w = e.widget;
-      if (w is Opacity) {
-        found = w.opacity;
-        return false;
-      }
-      return true;
-    });
-    return found;
-  }
-
-  return (
-    boxOf(s._topBarBackKey),
-    boxOf(s._floatingBackKey),
-    opacityOf(s._floatingBackKey),
-  );
-}
 
 /// ★★★ 错误态返回箭头探针（Owner 2026-10-09 新增缺陷）
 ///
@@ -13491,191 +13401,6 @@ Future<File> debugUniqueShotFile(Directory dir, {DateTime? now}) =>
  * （= `_T`）之后，任何「按文件顺序切 [起, 终)」的静态约束都不会把它
  * 切进底栏那一段。**不要**把本类挪到 `_BottomBar` 之前。
  */
-class _FloatingBackButton extends StatelessWidget {
-  const _FloatingBackButton({
-    required this.onBack,
-    this.fade,
-    this.arrowKey,
-    this.pointerInside,
-  });
-
-  final VoidCallback onBack;
-
-  /// ★★★ 交叉淡化用的**同一个**动画源（2026-10-09，缺陷 2 修复）
-  ///
-  /// # 错在哪（改之前）
-  /// ```text
-  /// 渲染处的判据是 `if (!visible && onFloatingBack != null)` ——
-  /// 它是**硬切**：visible 一翻 false 这一帧悬浮键就整个出现，
-  /// 而此时顶栏那枚箭头还在 _controlsFade 的淡出途中
-  /// => **两枚箭头同屏**，用户看到的就是「返回图标在控件隐藏后仍然残留」。
-  /// ```
-  ///
-  /// # 为什么这么改
-  /// ```text
-  /// 两枚箭头不是两个控件，而是**同一枚箭头的两个位置**：
-  ///   顶栏可见  => 画在顶栏里（跟着渐变条一起淡出）
-  ///   顶栏隐藏  => 画在悬浮位（跟着同一条曲线淡入）
-  /// => 用**同一条** _controlsFade 驱动：顶栏 opacity = f，悬浮键 opacity = 1 - f，
-  ///    两者之和恒为 1 => 任意中间帧都只有「一枚箭头应有的总亮度」。
-  /// ```
-  ///
-  /// ⚠️ 传 null 时保持改动前的行为（opacity 恒 1，硬显示）——
-  ///    那是给「没有顶栏动画」的调用路径留的兜底，不是主路径。
-  final Animation<double>? fade;
-
-  /// 探针用的定位锚点（不参与布局与绘制）
-  final Key? arrowKey;
-
-  /// 指针**是否还在播放页内**（task-16 新增）—— 悬浮键的「常驻」判据
-  ///
-  /// ```text
-  /// true  / null  指针在页内（null = 调用点没传）⇒ 与改前**逐字节相同**
-  /// false         指针已离开        ⇒ opacity × 0 ⇒ 不画、不挡
-  /// ```
-  ///
-  /// ★ 为什么必须由**宿主**传进来、而不是本类自己挂 MouseRegion：
-  ///   本件是 `Stack` 里一个 `Positioned`，它的矩形只有 40×40 ——
-  ///   拿它当 hover 判据会变成「鼠标必须正好压在那枚箭头上才显示」，
-  ///   而用户的本意是「鼠标在**画面上**就该有返回口」。
-  ///   ⇒ 判据归整页级的那个 `MouseRegion`（宿主），本件只负责乘因子。
-  ///
-  /// ⚠️ null 是**兜底**（保持改前的常驻行为），不是主路径：
-  ///   主路径由 `_TopBar` 把宿主的 `_pointerInside` 透传下来。
-  final bool? pointerInside;
-
-  /// 与左上角留白；避开窗口圆角（`SetWindowRgn` 半径 9px）
-  static const double _kInset = Sp.x3;
-
-  @override
-  Widget build(BuildContext context) {
-    /*
-     * ★★★ 缺陷 2 二次修正（2026-10-09）：`Positioned` 必须在最外层
-     *
-     * # 改前错在哪（实测读数量到 `Rect.fromLTRB(0.0, 0.0, 48.0, 48.0)`）
-     * ```text
-     * 改前结构 = AnimatedBuilder( Opacity( Positioned( ... ) ) )
-     *
-     * `Positioned` 是 `ParentDataWidget` —— 它只对**直接的** `Stack` 父级生效
-     * （`parent_data.dart` 的 `applyParentData` 走最近的 `RenderStack`）。
-     * 中间隔了 AnimatedBuilder / Opacity 两层后，它拿不到 `StackParentData`
-     * => `left` / `top` 被**静默忽略**（不报错、不抛异常）
-     * => 悬浮键落在 `(0, 0)`，也就是屏幕**最左上角**。
-     * ```
-     * 症状：控制条隐藏后，返回箭头跳/错到左上角原点，与顶栏那枚**不是同一位置** ——
-     * 用户读作「返回图标残留 / 错位」，正是 Owner 第 2 条本身。
-     *
-     * ⇒ 正确结构 = `Positioned( AnimatedBuilder( Opacity( ... ) ) )`：
-     *   定位归 Positioned（必须最外层，且它只被最近的 Stack 认）；
-     *   淡入淡出归内层 AnimatedBuilder。两者互不干扰。
-     *
-     * ⚠️ `fade == null` 时**仍然**要返回 Positioned —— 改前那条 `return inner`
-     *    直接返回了 Positioned 本身（那时它还是直接子级，侥幸生效）；
-     *    现在 Positioned 提到外层后，null 分支也必须在它里面。
-     */
-    final f = fade;
-    /*
-     * ★★★ 2026-10-09（Owner：「全屏左上角这个单独的返回icon,还没消失」）
-     *
-     * # 用户看到的是什么
-     * ```text
-     * 全屏播放时，控制条 3 秒后自动收起 —— 但左上角**还留着一枚返回箭头**
-     * （截图里它单独挂在黑边/画面上）。用户读作"没消失"。
-     * ```
-     *
-     * # 为什么它本来"应该"淡出却没淡出
-     * ```text
-     * 上面（见 `fade` 的文档）说得很清楚：悬浮键用 `1 - f` 淡入，
-     * 而 f = _controlsFade，控制条隐藏时 f → 0 ⇒ 悬浮键 opacity → 1。
-     * ⇒ **它是故意"常驻"的**：设计目标是"控制条藏了也要有返回口"。
-     *
-     * 但那个目标只在**鼠标移过去时**才需要 —— 一直挂在画面上就是残留。
-     * 而且 opacity 到 0 之后**仍然参与命中测试**（Opacity 不挡 hit test），
-     * 于是还会吃掉左上角的点击（例如点到播放器却不触发暂停）。
-     * ```
-     *
-     * # 改法：淡出 + 真的移出命中区
-     * ```text
-     * ① 用 `IgnorePointer` 把"完全透明"那一帧的点击放行；
-     * ② 用 `Visibility` 的 `maintainState` 保留子树（动画还能继续），
-     *    但 opacity 为 0 时不画 —— 双保险，任何渲染器上都不会有残影。
-     * ```
-     *
-     * ⚠️ **不动** `1 - f` 这个映射：它是缺陷 2 的交叉淡化（两枚箭头不同屏），
-     *    zz_t2 探针按它算几何。这里只补"透明之后别挡、别画"。
-     */
-    return Positioned(
-      left: _kInset,
-      top: _kInset + MediaQuery.of(context).padding.top,
-      child: f == null
-          ? _inner()
-          : AnimatedBuilder(
-              animation: f,
-              // child 优化：每帧只重建 Opacity，按钮子树不重建
-              child: _inner(),
-              builder: (context, child) {
-                /*
-                 * ══════════════════════════════════════════════════════
-                 * ★★★ 2026-10-09（task-16）Owner：「全屏左上角这个单独的
-                 *     返回icon,还没消失」—— 截图里控制条已全部收起。
-                 * ══════════════════════════════════════════════════════
-                 *
-                 * # 改前为什么"故意常驻"，以及它为什么是错的
-                 * ```text
-                 * 上面（`fade` 的文档）写得很清楚：悬浮键用 `1 - f` 淡入，
-                 * f = _controlsFade，控制条隐藏时 f → 0 ⇒ 悬浮键 opacity → 1。
-                 * ⇒ 那是**刻意**的：目标是「控制条藏了也要有返回口」。
-                 *
-                 * 但那个目标只在**指针还在页面上**时才需要 ——
-                 * 指针一走，它就是画面上的一块残留。
-                 * ```
-                 *
-                 * # 改法：`1 - f` **原样保留**，只乘一个 hover 因子
-                 * ```text
-                 *   opacity = (1 - f) × hover
-                 *     hover = 1  指针在页面内  ⇒ 与改前逐字节相同（返回口还在）
-                 *     hover = 0  指针已离开    ⇒ 0 ⇒ 不画、不挡（本次修的）
-                 * ```
-                 * ★ 为什么**不是**改 `1 - f`：那个映射是缺陷 2 的交叉淡化
-                 *   （顶栏箭头 opacity = f、悬浮键 = 1 - f，两者之和恒为 1），
-                 *   动它会让「两枚箭头不同屏」的契约失效。
-                 *   乘一个 0/1 因子则**完全不碰**那条契约 ——
-                 *   hover=1 时结果逐位相同，hover=0 时两枚**都不画**（和仍 ≤ 1）。
-                 *
-                 * ⚠️ `hover` 为 null（调用点没传）⇒ 按**改前**行为处理（恒常驻），
-                 *    那是给「没有 hover 概念的调用路径」留的兜底，不是主路径。
-                 */
-                final hover = (pointerInside ?? true) ? 1.0 : 0.0;
-                final opacity =
-                    ((1.0 - f.value).clamp(0.0, 1.0) * hover).clamp(0.0, 1.0);
-                // 完全透明 ⇒ 不画、不挡（否则就是用户看到的"残留"）
-                final gone = opacity <= 0.001;
-                return IgnorePointer(
-                  ignoring: gone,
-                  child: Opacity(
-                    opacity: opacity,
-                    child: gone ? const SizedBox.shrink() : child,
-                  ),
-                );
-              },
-            ),
-    );
-  }
-
-  /// 箭头本体（不含定位与淡入淡出）
-  Widget _inner() => Material(
-        color: Colors.black38,
-        shape: const CircleBorder(),
-        clipBehavior: Clip.antiAlias,
-        child: IconButton(
-          key: arrowKey,
-          onPressed: onBack,
-          iconSize: 22,
-          tooltip: '返回',
-          icon: const Icon(Icons.arrow_back, color: Colors.white),
-        ),
-      );
-}
 
 class _TopBar extends StatelessWidget {
   const _TopBar({
@@ -13685,13 +13410,9 @@ class _TopBar extends StatelessWidget {
     required this.onBack,
     this.onHints,
     this.providerName,
-    this.onFloatingBack,
     this.visible = true,
     this.fade,
-    this.floatingFade,
     this.backArrowKey,
-    this.floatingBackKey,
-    this.pointerInside,
   });
 
   final String title;
@@ -13708,7 +13429,6 @@ class _TopBar extends StatelessWidget {
   /// 常驻悬浮返回键的回调；null = 不画这一枚
   ///
   /// 见 `_FloatingBackButton` 的长注释（用户缺陷②）。
-  final VoidCallback? onFloatingBack;
 
   /// 整条顶栏（返回箭头 + 标题 + 站名 + 快捷键）是否画出来
   ///
@@ -13745,11 +13465,9 @@ class _TopBar extends StatelessWidget {
   /// ★ 为什么不能再写「悬浮返回键不参与淡出」（旧注释的原话）
   /// 那句在**硬切**实现下才是对的；硬切的后果是两枚箭头同屏，
   /// 于是用户看到「返回图标在控件隐藏后仍然残留」（见 _FloatingBackButton 注释）。
-  final Animation<double>? floatingFade;
 
   /// 顶栏那枚箭头 / 悬浮键箭头的定位锚点（探针用，不参与布局）
   final Key? backArrowKey;
-  final Key? floatingBackKey;
 
   /// 指针是否还在播放页内（task-16）—— 透传给 [_FloatingBackButton]
   ///
@@ -13757,7 +13475,6 @@ class _TopBar extends StatelessWidget {
   ///   本件（`_TopBar`）是宿主的直接子级，宿主已经把 `_pointerInside`
   ///   算好了；`_FloatingBackButton` 是它内部的 `Positioned`，
   ///   自己去挂 `MouseRegion` 只会量到那 40×40 的按钮矩形（见该字段说明）。
-  final bool? pointerInside;
 
   /// 站名 pill 的最大宽度
   ///
@@ -13976,14 +13693,20 @@ class _TopBar extends StatelessWidget {
          *   **不受 `_controlsVisible` 门控** —— 它就是为了解决
          *   「控制条隐藏后没有返回口」这个缺陷而加的。
          */
-        if (!visible && onFloatingBack != null)
-          _FloatingBackButton(
-            onBack: onFloatingBack!,
-            fade: floatingFade,
-            arrowKey: floatingBackKey,
-            // ★ task-16：悬浮键只在「指针还在页内」时常驻（见该字段的长注释）
-            pointerInside: pointerInside,
-          ),
+        /*
+         * ★★★ 2026-10-09（Owner 第 16 条 · task-16 定案）：**删除**独立悬浮返回键
+         *
+         * ```text
+         * 改前：控制条一藏，左上角那枚「常驻」的圆形返回键就满不透明地留在画面上
+         *       （Owner 原话：「全屏左上角这个单独的返回icon,还没消失」）。
+         * 半成品方案（`(1 - f) × 指针在页内`）在全屏下**无效** ——
+         *       全屏时指针恒在页内，那个因子恒为 1。
+         * 定案（lead 裁决）：控制条收起时它**跟着一起淡出**（画面干净）；
+         *       鼠标一动，顶栏连同**它自己的**返回箭头一起回来；Esc 照常退出。
+         * ⇒ 独立悬浮键已无存在理由：顶栏那枚箭头覆盖了全部场景，
+         *   错误态下由 `_canUseTopBarBack` 钉成常显可点（Owner 专门报过那条）。
+         * ```
+         */
       ],
     );
   }
