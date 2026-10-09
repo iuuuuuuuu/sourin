@@ -17,6 +17,7 @@ import '../../core/app_update/app_update_controller.dart';
 import '../../core/app_update/install.dart';
 import '../../core/app_update/release.dart';
 import '../tokens.dart';
+import 'app_toast.dart';
 import 'release_notes.dart';
 
 /// 显示更新对话框。返回 true 表示用户点了「下载」
@@ -107,7 +108,7 @@ class _UpdateDialogState extends State<_UpdateDialog> {
                         final msg = await InstallLaunch.openInBrowser(
                             widget.asset!.browserUrl);
                         if (!context.mounted) return;
-                        _toast(context, msg ?? '请在浏览器里完成更新。');
+                        showAppToast(context, msg ?? '请在浏览器里完成更新。');
                         Navigator.pop(context, false);
                         return;
                       }
@@ -120,10 +121,6 @@ class _UpdateDialogState extends State<_UpdateDialog> {
       },
     );
   }
-
-  void _toast(BuildContext context, String msg) {
-    ScaffoldMessenger.maybeOf(context)?.showSnackBar(SnackBar(content: Text(msg)));
-  }
 }
 
 class _Progress extends StatelessWidget {
@@ -133,13 +130,21 @@ class _Progress extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
+    // ★ 用 colorScheme.error 而不是 AppPalette.of(...).error —— 两者取值一致
+    //   （theme_bridge.dart 把角色展平进 ColorScheme），而这个对话框从头到尾
+    //   用的都是 colorScheme；只把错误色换成色板会变成"一半一半"。
+    //   ⚠️ 历史：早先这里试过 AppPalette.of，它当时在 MaterialApp 之外会
+    //   **assert 崩掉**；现已改成按 Theme.brightness 兜底（2026-10-10）。
+    //   也就是说这里换回 AppPalette 现在也是安全的 —— 留着这条注释是为了
+    //   下一个人别再重新踩一次那个坑。
+    final danger = colors.error;
     if (d.error != null) {
       return Row(children: [
-        Icon(Icons.error_outline, size: 18, color: colors.error),
+        Icon(Icons.error_outline, size: 18, color: danger),
         const SizedBox(width: Sp.x2),
         Expanded(
           child: Text(d.error!,
-              style: TextStyle(fontSize: FontSizes.sm, color: colors.error)),
+              style: TextStyle(fontSize: FontSizes.sm, color: danger)),
         ),
       ]);
     }
