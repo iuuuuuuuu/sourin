@@ -14116,8 +14116,10 @@ const double _kBottomBarMiniWidth = 528;
 
 /// ★ 底栏那一条的高度 —— popover 层用它把面板顶到条的上沿
 ///
-/// ⚠️ 与 `PlayerBottomBar` 内部那个 `_barHeight` 是**同一份数字**：
-///   两个数必须一致，否则面板会盖住条或悬空。
+/// ⚠️ 这是**唯一**一份数字：`PlayerBottomBar` 里那个已经删掉了。
+///   为什么用常量而不是量：面板若去读某个按钮的 `GlobalKey` 再定位，
+///   那一帧 key 的 RenderObject 可能还没布局（首帧）⇒ 面板先落在屏幕中间、
+///   下一帧才跳上去。用常量则位置**每一帧都对**。
 const double _kPlayerBottomBarHeight = 96;
 
 class _BottomBar extends StatelessWidget {

@@ -409,14 +409,6 @@ class PlayerBottomBar extends StatelessWidget {
   Widget _morePanel() =>
       PlayerMoreMenu(groups: more.groups, onDismiss: controller.close);
 
-  /// 底栏自身的高度（含进度行 + 按钮行），用来把面板顶到条的上沿
-  ///
-  /// ★ 为什么要**算**而不是量：面板若去读某个按钮的 `GlobalKey` 再定位，
-  ///   那一次 `build` 里 key 的 RenderObject 可能还没布局（第一帧），
-  ///   会出现「面板先落在屏幕中间，下一帧才跳上去」。
-  ///   这里用常量高度，位置**每一帧都对**。
-  static const double _barHeight = 96;
-
   Widget _body(BuildContext context) {
     final bottomInset = MediaQuery.paddingOf(context).bottom;
     return Container(
