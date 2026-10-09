@@ -5663,6 +5663,11 @@ class _PlayerPageState extends State<PlayerPage>
     if (!mounted) return false;
     setState(() {
       _error = null;
+      // ★ 与其余 8 处一样：清 `_error` 必须同时清 `_errorKind`。
+      //   否则截图之后若真的起播失败，会拿到**上一条**错误的 kind，
+      //   把「网络问题」显示成「请重新登录」（陈旧 kind 误判）。
+      //   由 test/login_prompt_trigger_test.dart 的「8 / 9 → 9 / 9」那条盯着。
+      _errorKind = null;
       _loading = false;
       _playing = true;
       _controlsVisible = true;
