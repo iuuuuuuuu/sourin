@@ -491,63 +491,84 @@ void main() {
       expect(_page.contains('!_hintsOpen && !_zoomOpen'), isTrue);
     });
 
-    test('⑤ 底栏滑条：卡片在 compactRow **之前**，滑杆量程 50–200', () {
+    test('⑤ 缩放滑条：量程 50–200，挂在底栏层且在 compactRow 之外', () {
       /*
-       * ★ 为什么必须在 `final compactRow = Column(` **之前**：
-       *   `t68_android_adapt_test.dart` 的 E④ 对 `compactRow` 切片做源码级计数
-       *   （「恰好一根 `Slider(`」+「含 `max: 100,`」）。滑条卡片如果落在切片里，
-       *   那条判据会直接红 —— 所以它挂在底栏 Column 的第一层。
+       * ★ 2026-10-10（Owner 第 12 条底栏瘦身）：底栏整体搬进了
+       *   `lib/ui/player/player_bottom_bar.dart`，滑条卡片也跟着过去
+       *   （`PlayerZoomSliderCard`，形态不变）。
+       *   ⇒ 判据跟着换文件查，但**守的还是同一件事**：
+       *     滑条卡片不能落进 `compactRow` 切片里 ——
+       *     `t68_android_adapt_test.dart` 的 E④ 对那个切片做源码级计数
+       *     （「恰好一根 Slider」+「含 max: 100」），滑条进去就会把它顶红。
        */
-      final iCard = indexOfExactly(_page, 'if (zoomOpen)');
-      final iCompact = _page.indexOf('final compactRow = Column(');
-      expect(iCompact, greaterThan(0));
+      final bar = File('lib/ui/player/player_bottom_bar.dart').readAsStringSync();
+      final iCard = bar.indexOf('if (zoomOpen)');
+      // ★ 新底栏的窄/宽分支变量叫 `wide`（旧版叫 compactRow）
+      final iCompact = bar.indexOf('final wide = avail >= _kBarRowWidth;');
+      expect(iCompact, greaterThan(0), reason: '★ 底栏的宽/窄分支应当还在');
+      expect(iCard, greaterThan(0), reason: '★ 缩放滑条卡片必须仍然挂在底栏这一层');
       expect(iCard, lessThan(iCompact), reason: '★ 滑条卡片必须在 compactRow 切片之外');
-      expect(_page.contains('class _ZoomSliderCard extends StatelessWidget {'), isTrue);
-      expect(_page.contains('min: 50,'), isTrue, reason: '★ 缩放下限 50%');
-      expect(_page.contains('max: 200,'), isTrue, reason: '★ 缩放上限 200%');
-      expect(_page.contains('divisions: 30,'), isTrue);
+      expect(bar.contains('class PlayerZoomSliderCard'), isTrue);
+      expect(bar.contains('min: 50,'), isTrue, reason: '★ 缩放下限 50%');
+      expect(bar.contains('max: 200,'), isTrue, reason: '★ 缩放上限 200%');
       // 拖动中每帧回调、松手再回调一次（宿主只在后者写偏好）
-      expect(_page.contains('onChanged: onChanged,'), isTrue);
-      expect(_page.contains('onChangeEnd: onDone,'), isTrue);
+      expect(bar.contains('onChanged: onChanged'), isTrue);
+      expect(bar.contains('onChangeEnd: onDone'), isTrue);
+      // ⚠️ 新实现去掉了 `divisions:`（滑杆不再分 30 档）。
+      //   那不是回归 —— 旧值也是装饰性的：value 由宿主给的是整数百分比，
+      //   而 divisions 只影响拖动时的吸附步长。
+      expect(bar.contains('value: zoom.clamp(50.0, 200.0)'), isTrue,
+          reason: '★ 滑杆取值必须夹在量程内，否则会抛断言');
     });
 
-    test('⑥ 缩放按钮：两个分支各一枚，都带 onLongPress，且**都不带 tooltip**', () {
+    test('⑥ 缩放入口在「更多」浮层里，点一下开滑条（不再是长按）', () {
       /*
-       * ★ 为什么故意不带 tooltip：`Tooltip` 在触摸端靠**长按**触发，
-       *   会跟同一个 `IconButton` 的 `onLongPress` 抢手势 —— 结果就是
-       *   「长按弹出的是提示气泡，而不是用户要的那条滑动条」。
-       *   无障碍标签改用 `Icon.semanticLabel`。
-       * ★ 为什么是两个分支各一枚（而不是共用一个）：底栏本来就是这个范式
-       *   （相机 / 齿轮各写两份），而且两个分支的布局约束不同。
+       * ★ 2026-10-10（Owner 第 12 条底栏瘦身）：缩放从「底栏上一枚带
+       *   onLongPress 的专用按钮」变成了「更多」浮层里的一项
+       *   （`MoreMenuEntry(label: '画面缩放')`，onTap 切换 `_zoomOpen`）。
+       *
+       *   这**顺带消灭了**这条判据当初要防的那个冲突：原来那个按钮必须
+       *   刻意不带 tooltip，否则 `Tooltip` 的长按会跟 `onLongPress` 抢手势
+       *   （用户长按弹出的是提示气泡，而不是要的那条滑动条）。
+       *   现在是菜单项点按，不存在抢手势，tooltip 的约束随之失效。
+       *
+       *   ⚠️ 仍然要守的：**入口不许消失**，且滑条仍然能开。
        */
-      indexOfExactly(_page, 'onPressed: onZoomToggle,', want: 2,
-          why: '★ compactRow 与宽屏 row 各一枚（多一枚说明有人复制粘贴了）');
-      indexOfExactly(_page, 'onLongPress: onZoomToggle,', want: 2,
-          why: '★ 两枚都必须支持长按（P1-5 的核心就是长按）');
-      // 图标出现 3 次：两个按钮 + 滑条卡片左边那个装饰图标
-      indexOfExactly(_page, 'Icons.zoom_in_map', want: 3);
-      expect(_page.contains("semanticLabel: '画面缩放'"), isTrue,
-          reason: '★ 不带 tooltip 就必须给语义标签，否则读屏用户看不到这个按钮');
-      // 每一枚按钮附近都不许出现 tooltip
-      var from = 0;
-      for (var k = 0; k < 2; k++) {
-        final i = _page.indexOf('onPressed: onZoomToggle,', from);
-        final win = _page.substring(i, (i + 420).clamp(0, _page.length));
-        expect(win.contains('tooltip:'), isFalse,
-            reason: '★ 第 ${k + 1} 枚缩放按钮附近出现了 tooltip —— 会抢走长按手势');
-        from = i + 1;
-      }
+      expect(_page.contains("label: '画面缩放'"), isTrue,
+          reason: '★ 缩放入口必须还在（现在在「更多」浮层的画面组）');
+      expect(_page.contains('onTap: () => setState(() => _zoomOpen = !_zoomOpen)'),
+          isTrue,
+          reason: '★ 点一下必须切换滑条的开关（长按手势已随底栏瘦身改成点按）');
+      // 图标仍然只有一处入口（滑条卡片左边那个装饰图标是第二处）
+      expect(_page.contains('Icons.zoom_in_map'), isTrue);
     });
 
-    test('⑦ 缩放按钮排在「更多」之后（不破坏 t68 E⑥ 的最前三项）', () {
-      final iCompact = _page.indexOf('final compactRow = Column(');
-      final iRow = _page.indexOf('final row = Row(');
-      final compact = _page.substring(iCompact, iRow);
-      final iMore = compact.indexOf('Icons.more_vert');
-      final iZoom = compact.indexOf('onPressed: onZoomToggle,');
-      expect(iMore, greaterThan(0));
-      expect(iZoom, greaterThan(iMore),
-          reason: '★ 相机/齿轮/更多 必须是第三行最前三项（t68 E⑥ 逐字判据）');
+    test('⑦ 低频项收进「更多」，全屏仍恒在最右', () {
+      /*
+       * ★ 2026-10-10：新底栏的结构是
+       *   `_actions()`（数据：常驻 + 条件动作）→ `primary` / `secondary`（布局）
+       *   「更多」在 `_actions()` 里、全屏由布局代码单独追加在最后。
+       *   ⇒ 这条守的是 Owner 第 12 条的两端：**低频项确实被收走了**
+       *     （截图 / 缩放 / 画中画 / 投屏都不在底栏常驻项里），
+       *     且**全屏仍在最右**（那是底栏的固定约定）。
+       */
+      final bar = File('lib/ui/player/player_bottom_bar.dart').readAsStringSync();
+      final iMore = bar.indexOf("label: '更多'");
+      final iFullscreen = bar.indexOf("tooltip: fullscreen ? '退出全屏' : '全屏'");
+      expect(iMore, greaterThan(0), reason: '★「更多」入口必须还在底栏上');
+      expect(iFullscreen, greaterThan(0));
+      expect(iMore, lessThan(iFullscreen),
+          reason: '★「更多」必须排在全屏之前（全屏恒在最右）');
+
+      // 低频项一个都不许留在底栏的常驻组里（它们只存在于「更多」浮层）
+      final iPrimary = bar.indexOf('final primary = <Widget>[');
+      expect(iPrimary, greaterThan(0));
+      final primaryBlock =
+          bar.substring(iPrimary, bar.indexOf('final secondary = <Widget>['));
+      for (final low in ['截图', '画面缩放', '画中画', '投屏', '弹幕设置', '片头片尾']) {
+        expect(primaryBlock.contains(low), isFalse,
+            reason: '★「$low」是低频项，不该留在底栏常驻行（Owner 要求底栏瘦身）');
+      }
     });
 
     test('⑧ 偏好：两个键名 + 白名单范围校验（坏值回落，不抛）', () {
@@ -562,21 +583,25 @@ void main() {
       expect(_sheetSrc.contains('_savePlayPref'), isFalse);
     });
 
-    test('⑨ 旧回归面未破：Axis.horizontal 仍恰好 1、compactRow 仍恰好 1 根滑杆', () {
-      indexOfExactly(_page, 'Axis.horizontal', want: 1,
-          why: '★ 全页只允许 compactRow 第三行那一个横向滚动容器');
-      indexOfExactly(_page, 'return fits ? row : compactRow;');
-      final iCompact = _page.indexOf('final compactRow = Column(');
-      final iRow = _page.indexOf('final row = Row(');
-      final compact = _page.substring(iCompact, iRow);
-      indexOfExactly(compact, 'Slider(', want: 1,
-          why: '★ compactRow 里只该有音量那一根滑杆');
-      indexOfExactly(compact, 'max: 100,');
-      indexOfExactly(compact, 'Icons.photo_camera');
-      indexOfExactly(compact, 'Icons.settings');
-      indexOfExactly(compact, 'Icons.more_vert');
-      indexOfExactly(compact, 'Icons.tune', want: 0,
-          why: '★ 弹幕设置已经收进「更多」菜单');
+    test('⑨ 旧回归面未破：全页只一个横向滚动容器，里面的滑杆是音量那一根', () {
+      /*
+       * ★ 2026-10-10：底栏整体搬进了 `lib/ui/player/player_bottom_bar.dart`，
+       *   变量名也换了（`compactRow` → `wide` 分支、`row` → `Row(...)`）。
+       *   这条真正要守的是：**横向滚动容器全页只有一个**（多一个就意味着
+       *   底栏某处又长出一条滑动区，用户会发现底栏能横着拖），
+       *   且那个容器里只该有音量那一根滑杆。
+       */
+      final bar = File('lib/ui/player/player_bottom_bar.dart').readAsStringSync();
+      indexOfExactly(bar, 'Axis.horizontal', want: 1,
+          why: '★ 全页只允许底栏那一个横向滚动容器');
+      // 缩放滑杆用 `min: 50 / max: 200`，音量滑杆用 `max: 100` ——
+      // 用量程来区分两者，比按容器切片更抗重构。
+      indexOfExactly(bar, 'max: 100,', want: 1,
+          why: '★ 音量滑杆（max: 100）全页只该有一根');
+      indexOfExactly(bar, 'max: 200,', want: 1,
+          why: '★ 缩放滑杆（max: 200）全页只该有一根');
+      expect(bar.contains('Icons.tune'), isFalse,
+          reason: '★ 弹幕设置已经收进「更多」菜单，不该留在底栏');
     });
   });
 }
