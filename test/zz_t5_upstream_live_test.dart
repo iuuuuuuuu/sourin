@@ -50,6 +50,22 @@ const Timeout kTimeout = Timeout(Duration(minutes: 5));
 const String _dllRel = r'build\windows\x64\runner\Release\sourin_core.dll';
 final bool _dllReady = File(_dllRel).existsSync();
 
+/// 门控原因（skip 时会打出来）
+///
+/// ⚠️ 本测试要**真核心 + 真插件文件**才有意义；两者都没有时
+///   「author / upstream 有值」这类断言要么恒假要么恒真，两种都是假信号。
+const String _gateReason =
+    '需要真核心（$_dllRel）与真插件文件（环境变量 SOURIN_PLUGIN_SRC）才有意义。'
+    '跑法：先 `flutter build windows --release -t lib/shell.dart`，'
+    '并把 SOURIN_PLUGIN_SRC 指向一个装有 .js 的目录（不要指向 Owner 的真实数据目录）。';
+
+/// ★ 插件源目录 —— **只从环境变量取**，缺省不拷任何文件
+///
+/// ⚠️ 改前硬编码 `%APPDATA%\app.sourin.player\plugins`（Owner 的真实数据）。
+///   那是只读拷贝、不会写坏什么，但共用说明第 4 节要求一切走隔离目录 ——
+///   显式注入也让"这台机器到底装了几个插件"不再影响结果。
+String? get _pluginSrc => Platform.environment['SOURIN_PLUGIN_SRC'];
+
 void _preloadCoreDll() {
   if (!_dllReady) return;
   DynamicLibrary.open(File(_dllRel).absolute.path);
@@ -196,11 +212,14 @@ void main() {
     if (dataDir.existsSync()) dataDir.deleteSync(recursive: true);
     dataDir.createSync(recursive: true);
 
-    // ── 把**真实**的 28 个插件拷进隔离目录（只读源目录，绝不写）──
-    final src = Directory(
-        '${Platform.environment['APPDATA']}\\app.sourin.player\\plugins');
+    // ── 插件文件只从 `SOURIN_PLUGIN_SRC` 拷进隔离目录 ──
+    //
+    // ⚠️ 改前硬编码 `%APPDATA%\app.sourin.player\plugins`（Owner 的真实数据目录）。
+    //   那是只读拷贝、不会写坏，但共用说明第 4 节要求一切走隔离目录 ⇒
+    //   改成显式注入；不设就不拷，本机装了几个插件不再影响结果。
+    final src = _pluginSrc == null ? null : Directory(_pluginSrc!);
     final dst = Directory('${dataDir.path}/plugins')..createSync(recursive: true);
-    if (src.existsSync()) {
+    if (src != null && src.existsSync()) {
       for (final e in src.listSync()) {
         if (e is File && e.path.toLowerCase().endsWith('.js')) {
           final name = e.uri.pathSegments.last;
@@ -209,7 +228,8 @@ void main() {
         }
       }
     }
-    log('拷入真实插件 $copied 个 → ${dst.absolute.path}');
+    log('拷入插件 $copied 个 → ${dst.absolute.path}'
+        '${src == null ? '（未设 SOURIN_PLUGIN_SRC ⇒ 不拷，只验空集）' : ''}');
 
     final started = await SourinApi.start(dataDir.absolute.path);
     log('start() = $started');
@@ -225,9 +245,33 @@ void main() {
   });
 
   // ═══════════════════════════════════════════════════════════════════
+  //
+  // ★★ 2026-10-10 门控补齐：环境依赖型测试缺条件时必须 **skip**，不能红
+  //
+  // 改前 `setUpAll` 里 `_dllReady == false` 时只是 `return`，
+  // 而每条用例**并没有** `skip:` ⇒ 核心不在时 `listPlugins()` 抛
+  // 「核心尚未启动」，两条用例全红。
+  //
+  // 为什么这条测试确实需要真核心：它验的是 `list_plugins` 从真实
+  // 插件文件里解析出 `author` / `upstream` —— 没有核心就没有读数，
+  // 任何断言都会退化成对空列表的全称断言（恒真假绿）。
+  //
+  // ⚠️ 数据源也换掉：改前从 **Owner 真实的 `%APPDATA%\app.sourin.player\plugins`**
+  //   拷插件。共用说明第 4 节要求一切走隔离目录 ⇒ 改成可注入的
+  //   `SOURIN_PLUGIN_SRC`，缺省不拷（空插件集）⇒ 本机没装插件时
+  //   「author/upstream 非空」那条会红，因此判据也一并放宽成
+  //   「字段存在且格式正确」（见用例内注释）。
 
   testWidgets('A. listPlugins 带回 author + upstream（真 FFI 读数）',
       (tester) async {
+    if (!_dllReady) return markTestSkipped(_gateReason);
+    if (copied == 0) {
+      return markTestSkipped(
+        '本用例的判据是「拷进来的每个 .js 都能被 list_plugins 解析出 '
+        '@author / upstream」，必须先设置 SOURIN_PLUGIN_SRC 指向装有 '
+        '对应 .js 的目录。',
+      );
+    }
     final r = await _ffi(tester, () => SourinApi.listPlugins());
     log('A| 插件 ${r.plugins.length} 个 / 加载失败 ${r.failed.length} 个');
 
@@ -280,6 +324,13 @@ void main() {
   // ═══════════════════════════════════════════════════════════════════
 
   testWidgets('B. 卡片真的画出「标识 chip + 上游链接」（真控件）', (tester) async {
+    if (!_dllReady) return markTestSkipped(_gateReason);
+    if (copied == 0) {
+      return markTestSkipped(
+        '本用例硬编码了「影视天涯」这张卡与它的上游链接，'
+        '必须先设置 SOURIN_PLUGIN_SRC 指向装有对应 .js 的目录。',
+      );
+    }
     await tester.binding.setSurfaceSize(const Size(1280, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
 
