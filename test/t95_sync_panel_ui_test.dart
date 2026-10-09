@@ -23,6 +23,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:sourin_spike/core/models.dart';
+import 'package:sourin_spike/ui/app_theme.dart';
 import 'package:sourin_spike/ui/widgets/sync_panel.dart';
 
 import 'support/ui_shot.dart';
@@ -99,18 +100,25 @@ void main() {
 
   /// 挂一个 SyncPanel。核心库在测试环境里加载不了，
   /// 面板的三支 `_reload()` 都包了 try/catch ⇒ 照常渲染（见 t91 文件头）。
-  Future<void> pumpPanel(WidgetTester tester) async {
+  /// [brightness] 走**生产本体**的主题（`AppTheme.themeFor`），
+  /// 不再自造 `ThemeData`。
+  ///
+  /// ★ 为什么必须用真的那个：原先这里用 `ThemeData(brightness: dark)` 自搭壳，
+  ///   于是截图与真机的主题**完全不是一回事** —— 主题 agent 换掉 forui、
+  ///   改色板，我这条测试照样全绿（实测：合并前后四张 PNG **字节完全相同**，
+  ///   说明它对主题改动是瞎的）。自造壳的测试等于没测视觉。
+  Future<void> pumpPanel(WidgetTester tester,
+      {Brightness brightness = Brightness.dark}) async {
     await tester.pumpWidget(
       MaterialApp(
         debugShowCheckedModeBanner: false,
-        theme: ThemeData(
-          brightness: Brightness.dark,
-          fontFamily: 'Microsoft YaHei UI',
+        theme: AppTheme.themeFor(brightness),
+        home: Scaffold(
+          body: Padding(
+            padding: const EdgeInsets.all(24),
+            child: SingleChildScrollView(child: const SyncPanel()),
+          ),
         ),
-        home: const Scaffold(body: Padding(
-          padding: EdgeInsets.all(24),
-          child: SingleChildScrollView(child: SyncPanel()),
-        )),
       ),
     );
     await tester.pump();
@@ -195,5 +203,26 @@ void main() {
     expect(tester.takeException(), isNull);
     final f = await saveViewShot(tester, 'sync_panel_tv_unconfigured');
     expect(f.existsSync(), isTrue);
+  });
+
+  testWidgets('⑥ ★ 明暗两套主题下都渲染得出来（面板是二级页，两种都得能用）',
+      (tester) async {
+    for (final b in Brightness.values) {
+      for (final size in const [Size(1440, 900), Size(412, 915)]) {
+        await setShotViewport(tester, size);
+        await pumpPanel(tester, brightness: b);
+        expect(tester.takeException(), isNull,
+            reason: '$b / $size 下不得有异常');
+        expect(find.byType(ErrorWidget), findsNothing, reason: '$b 下不能是 ErrorWidget');
+        expect(find.text('云盘同步'), findsOneWidget, reason: '$b 下块头必须渲染出来');
+
+        final f = await saveViewShot(
+            tester, 'sync_panel_${b.name}_${size.width.toInt()}');
+        expect(f.existsSync(), isTrue);
+        // 像素级自检：真渲染出的图不能是一张纯色（那就等于「什么都没画」）
+        expect(f.lengthSync(), greaterThan(4000),
+            reason: '$b / $size 的截图只有 ${f.lengthSync()} 字节，疑似空图');
+      }
+    }
   });
 }
