@@ -193,6 +193,7 @@ import 'settings/emby_page.dart';
  * 本文件有并发写入者（task-6 在改插件更新 UI），改动面越小冲突越小。
  */
 import 'widgets/overlay_motion.dart';
+import 'widgets/app_toast.dart';
 import 'widgets/plugin_edit_dialog.dart';
 import 'widgets/plugin_speedtest.dart';
 import 'widgets/settings_kit.dart';
@@ -274,25 +275,29 @@ class SettingsPageState extends State<SettingsPage> {
   ///    （空态 UI）的语义原样保留。
   bool _firstLoadDone = false;
 
-  String? _toast;
-
   /// ★★★ 数据版本号 + toast 通知（task-43，「JS 插件」二级页要用）
   ///
-  /// # 为什么需要这两个
-  /// ```text
-  /// 二级页是 `Navigator.push` 上来的**另一条路由** —— 不在本 State
-  /// 的子树里，所以：
-  ///   ① host 的 `setState` **不会**重建它 ⇒
-  ///      操作后（loadAll 已刷新数据）界面看着不变，像「点了没反应」。
-  ///   ② host 的 toast 画在**宿主自己的 Stack** 里 ⇒
-  ///      被整屏的路由盖住 ⇒ `_flash()` 的 59 处反馈**全部看不见**。
-  /// ```
-  /// ⇒ 两个 `ValueNotifier`，二级页自己订阅、自己画。
+  /// # `_dataRev`：二级页是 `Navigator.push` 上来的**另一条路由**
+  ///
+  /// 不在本 State 的子树里 ⇒ host 的 `setState` **不会**重建它 ⇒
+  /// 操作后（`loadAll` 已刷新数据）界面看着不变，像「点了没反应」。
+  /// 二级页订阅它、自己重建。
+  ///
+  /// # `_toastRev`：★ 2026-10-10 起**已不再被写**（死通道）
+  ///
+  /// 它当初存在的唯一理由是「host 的 toast 画在宿主自己的 Stack 里，
+  /// 被整屏的 push 路由盖住 ⇒ `_flash()` 的反馈全部看不见」。
+  /// 现在 `_flash` 走 `showAppToast`，而宿主 `ToastHost` 挂在
+  /// `lib/shell.dart` 的 `MaterialApp.builder` 里、**Navigator 之外**
+  /// ⇒ 二级页天然能弹，这条同步链路不再需要。
+  ///
+  /// ⚠️ **故意保留**（连同二级页里读它的 `ValueListenableBuilder`）：
+  ///   它现在是恒 `null` 的一路通道 ⇒ 只画不出东西（死代码，不是坏行为）。
+  ///   等二级页也切到 `showAppToast` 时可以连同读取点一起清掉；
+  ///   现在删，一旦某个读取点漏改就是「二级页没反馈」的新回归。
   ///
   /// ⚠️ 用 `ValueNotifier` 而不是让二级页 `addListener(host)`：
   ///    `State` **不是** `Listenable`（只有 `ChangeNotifier` 是）。
-  /// ⚠️ host 自己的 toast 渲染**原样保留** —— 这两个只是**追加**通道，
-  ///    不替换既有行为（一级页的 toast 仍由 `_toast` 字段驱动）。
   final _dataRev = ValueNotifier<int>(0);
   final _toastRev = ValueNotifier<String?>(null);
 
@@ -577,16 +582,44 @@ class SettingsPageState extends State<SettingsPage> {
     }
   }
 
+  /// 弹一条操作反馈
+  ///
+  /// ★ 2026-10-10：`_flash(msg)` → `showAppToast(context, msg)`
+  ///
+  /// 改前是「自绘黑底胶囊」：自己 `setState` + 一个 3 秒的
+  /// `Future.delayed` 清屏。
+  ///
+  /// # 为什么不自己画了（三个理由）
+  ///
+  /// ```text
+  /// ① 宿主已经挂好了 —— `lib/shell.dart` 的 `MaterialApp.builder` 里
+  ///    `ToastHost(child: _TitleBarHost(child: …))`，位置与自绘标题栏
+  ///    **同一层**（Navigator 之外）⇒ 首页/详情页/播放页/本页的
+  ///    **所有**二级路由都收得到。
+  ///    （`test/toast_host_mounted_test.dart` 有守卫：删掉挂载立刻红。）
+  /// ② 自己画的版本有个**结构缺陷**：`_flash` 写在宿主 State 里，
+  ///    而 JS 插件二级页是 `Navigator.push` 上去的**另一条路由** ——
+  ///    所以必须额外维护一个 `_toastRev` + 二级页里自己再画一份
+  ///    （`lib/ui/settings_page.dart:3591` 那个 `ValueListenableBuilder`）。
+  ///    统一组件在 shell 层，二级页**天然**能弹 ⇒ 这条同步链路不必存在。
+  /// ③ 观感更好且**可关闭**：常驻 ✕ + Esc 可关 + 2.6s 后 1.2s 渐隐。
+  /// ```
+  ///
+  /// # ⚠️ `_toastRev` / `_toast` 字段与二级页的读取点**故意保留**
+  ///
+  /// 它们还被 `_PluginsPageState`（二级页自己那份 toast 绘制）读着，
+  /// 删字段会连带删掉二级页的显示逻辑 —— 那是超出本轮范围的改动。
+  ///
+  /// ⇒ 只换**发射端**（`_flash` 的实现），接收端原样留着。
+  ///    注意 `_flash` 现在**不再写**这两个字段，所以旧通道不会触发
+  ///    ⇒ 同一条消息**不会**弹两次。代价是二级页那个
+  ///    `ValueListenableBuilder` 目前恒为 `null`（不画任何东西）——
+  ///    这是"死代码"而不是"坏行为"，等二级页也切到 `showAppToast`
+  ///    时可以连同 `_toastRev` 一起清掉。留一条不触发的新通道，
+  ///    比删掉之后发现某个读取点漏了要安全。
   void _flash(String msg) {
     if (!mounted) return;
-    setState(() => _toast = msg);
-    // ★ task-43：二级页在另一条路由上，看不到宿主 Stack 里的 toast
-    _toastRev.value = msg;
-    Future.delayed(const Duration(seconds: 3), () {
-      if (!mounted) return;
-      if (_toast == msg) setState(() => _toast = null);
-      if (_toastRev.value == msg) _toastRev.value = null;
-    });
+    showAppToast(context, msg);
   }
 
   // ═══════════════════════════════════════════════════════════════════
@@ -2306,62 +2339,6 @@ class SettingsPageState extends State<SettingsPage> {
           ],
         ),
 
-        // ── Toast ──
-        if (_toast != null)
-          Positioned(
-            left: 0,
-            right: 0,
-            /*
-             * ★★ 2026-09-24 实测修复：`Sp.x10`(40) → `Sp.bottomBarInset`(90)
-             *
-             * # 原来的问题（真机截图取证，不是我猜的）
-             *
-             * 底栏改成了**悬浮玻璃**（`shell.dart` 的 Stack，不占布局空间），
-             * 而 toast 只让了 40px —— 于是它**正好落在玻璃底栏底下**：
-             * ```text
-             * 截图（PrintWindow）：toast 被底栏的模糊层糊住，
-             * 文字完全不可辨认，只看得见一团黑色圆角矩形
-             * ```
-             * 后果：**所有 `_flash()` 的反馈都读不到** ——
-             * 包括这次任务 R 刚加的「N 个源不可用」「全部正常」
-             *「已重新加载 N 个插件」「已导入「X」」。
-             * 提示发出来了、用户看不见 = 等于没发。
-             *
-             * # 为什么用 `Sp.bottomBarInset` 而不是把数字调大
-             *
-             * 那个 token 的注释写着它的**存在理由**就是这件事：
-             * > 页面内容底部留白 —— **给悬浮底栏让位**
-             * > 桌面 底栏 58 + 间隙 12 + 余量 20 = 90
-             * 它已经被 ListView 的 padding 用了（见 `build()` 开头），
-             * 这里用同一个值，toast 与"内容最底边"对齐 ——
-             * 视觉上一致，且**桌面/TV 自动分别取 90 / 110**
-             *（TV 底栏更高，写死 90 在 TV 上仍会被盖）。
-             *
-             * ⚠️ 我自己定的教训：**新增"贴在底部"的浮动元素时，
-             *    先看有没有现成的 inset token** —— 这个坑的代价是
-             *    一个功能（健康检测）看起来"点了没反应"。
-             */
-            bottom: Sp.bottomBarInset,
-            child: Center(
-              child: Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: Sp.x5,
-                  vertical: Sp.x3,
-                ),
-                decoration: BoxDecoration(
-                  color: Colors.black.withValues(alpha: 0.85),
-                  borderRadius: Radii.rFull,
-                ),
-                child: Text(
-                  _toast!,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: FontSizes.sm,
-                  ),
-                ),
-              ),
-            ),
-          ),
       ],
     );
   }
