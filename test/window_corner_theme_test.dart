@@ -123,7 +123,7 @@ void main() {
       final light = AppTheme.floorColor(Brightness.light);
 
       // ★ 这条是本文件的核心断言：
-      //   若哪天有人把 `backdrop` 改成 `FTheme.of(context).colors.background`
+      //   若哪天有人把 `backdrop` 改成 `AppPalette.of(context).background`
       //   （在 builder 的 context 上必然兜底成**浅色** #FFFFFF），
       //   深色那一遍就会拿到浅色值 —— 而这两个值必须不同。
       expect(

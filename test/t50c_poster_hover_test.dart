@@ -53,12 +53,11 @@ import 'dart:io';
 
 import 'package:flutter/gestures.dart' show PointerDeviceKind;
 import 'package:flutter_test/flutter_test.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 
 import 'package:sourin_spike/ui/app_theme.dart';
-import 'package:sourin_spike/ui/theme_bridge.dart';
 import 'package:sourin_spike/ui/widgets/poster_card.dart';
+import 'package:sourin_spike/ui/app_scaffold.dart';
 
 // ═══════════════════════════════════════════════════════════════════════
 //  0. 读数落盘（★ 控制台可能吞 stdout，产物文件不能没有读数）
@@ -112,12 +111,10 @@ Widget host(
   final theme = AppTheme.themeFor(brightness);
   return MaterialApp(
     debugShowCheckedModeBanner: false,
-    theme: brightness == Brightness.light
-        ? buildLightMaterialTheme(theme)
-        : buildMaterialTheme(theme),
+    theme: theme,
     builder: (ctx, c) {
       final base = MediaQuery.maybeOf(ctx) ?? const MediaQueryData();
-      return FTheme(
+      return AppThemeHost(
         data: theme,
         child: MediaQuery(
           data: base.copyWith(disableAnimations: reduceMotion),

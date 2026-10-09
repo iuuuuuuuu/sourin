@@ -50,13 +50,12 @@
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 
 import 'package:sourin_spike/ui/app_theme.dart';
-import 'package:sourin_spike/ui/theme_bridge.dart';
 import 'package:sourin_spike/ui/tokens.dart';
 import 'package:sourin_spike/ui/widgets/poster_card.dart';
+import 'package:sourin_spike/ui/app_scaffold.dart';
 
 /*
  * ⚠️ task-58：DetailPage 已不再是**独立页面**（Owner 裁决③），
@@ -102,7 +101,7 @@ String hex255(Color c) {
 
 /// 用**生产同一套**主题构造（`shell.dart:726-729` 的那两步）
 ///
-/// ⚠️ 不能只用 `FTheme.neutral.light.desktop` —— 那会跳过
+/// ⚠️ 不能只用 `AppTheme.themeFor(Brightness.light)` —— 那会跳过
 ///    `buildLightMaterialTheme` / `buildMaterialTheme`，
 ///    于是 `Theme.of(context).colorScheme.onSurface` 拿到的是
 ///    forui 的中性兜底值，**不是用户看到的那个**。
@@ -111,10 +110,8 @@ Widget host(Widget child, {required Brightness brightness}) {
   final theme = AppTheme.themeFor(brightness);
   return MaterialApp(
     debugShowCheckedModeBanner: false,
-    theme: brightness == Brightness.light
-        ? buildLightMaterialTheme(theme)
-        : buildMaterialTheme(theme),
-    builder: (_, c) => FTheme(data: theme, child: c ?? const SizedBox()),
+    theme: theme,
+    builder: (_, c) => AppThemeHost(data: theme, child: c ?? const SizedBox()),
     home: Scaffold(
       backgroundColor: AppTheme.floorColor(brightness),
       body: Center(child: child),

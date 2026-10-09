@@ -71,7 +71,6 @@ import 'package:flutter/scheduler.dart';
 //    产品用的是 `material_ui` 那套（`lib\shell.dart:35`），
 //    所以对照臂必须同源，否则测的是**另一个 widget**。
 import 'package:material_ui/material_ui.dart';
-import 'package:forui/forui.dart';
 import 'package:liquid_glass_widgets/liquid_glass_widgets.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:path_provider/path_provider.dart';
@@ -81,8 +80,8 @@ import 'core/ffi.dart';
 import 'core/ui_prefs.dart';
 import 'shell.dart';
 import 'ui/app_theme.dart';
-import 'ui/theme_bridge.dart';
 import 'ui/widgets/window_frame.dart';
+import 'ui/app_scaffold.dart';
 
 const String kTag = '[T423]';
 
@@ -321,10 +320,7 @@ Future<void> main() async {
 
   // ── B：A + 产品 theme:materialTheme ──────────────────────────
   final brightness = AppTheme.resolve(systemBrightness: Brightness.dark);
-  final theme = AppTheme.themeFor(brightness);
-  final materialTheme = brightness == Brightness.light
-      ? buildLightMaterialTheme(theme)
-      : buildMaterialTheme(theme);
+  final materialTheme = AppTheme.themeFor(brightness);
   runApp(RepaintBoundary(
     key: _rootKey,
     child: MaterialApp(
@@ -341,15 +337,13 @@ Future<void> main() async {
     child: MaterialApp(
       debugShowCheckedModeBanner: false,
       theme: materialTheme,
-      builder: (context, child) => FTheme(
-        data: theme,
-        child: FToaster(
-          child: WindowFrame(
+      builder: (context, child) => AppThemeHost(
+        data: materialTheme,
+        child: WindowFrame(
             backdrop: AppTheme.floorColor(brightness),
             child: ColoredBox(
               color: AppTheme.floorColor(brightness),
               child: child ?? const SizedBox.shrink(),
-            ),
           ),
         ),
       ),
@@ -364,15 +358,13 @@ Future<void> main() async {
     child: MaterialApp(
       debugShowCheckedModeBanner: false,
       theme: materialTheme,
-      builder: (context, child) => FTheme(
-        data: theme,
-        child: FToaster(
-          child: WindowFrame(
+      builder: (context, child) => AppThemeHost(
+        data: materialTheme,
+        child: WindowFrame(
             backdrop: AppTheme.floorColor(brightness),
             child: ColoredBox(
               color: AppTheme.floorColor(brightness),
               child: child ?? const SizedBox.shrink(),
-            ),
           ),
         ),
       ),

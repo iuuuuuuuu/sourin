@@ -32,13 +32,12 @@
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 
 import 'package:sourin_spike/core/models.dart';
 import 'package:sourin_spike/ui/app_theme.dart';
-import 'package:sourin_spike/ui/theme_bridge.dart';
 import 'package:sourin_spike/ui/widgets/detail_raw_meta.dart';
+import 'package:sourin_spike/ui/app_scaffold.dart';
 
 /// 造两个线路：A（选中）与 B（未选中）
 List<PlaySource> _two() => const [
@@ -48,7 +47,7 @@ List<PlaySource> _two() => const [
 
 /// 用**生产同一套**主题构造（`shell.dart:726-729`）
 ///
-/// ⚠️ 不能用 `theme.toApproximateMaterialTheme()` —— 那会跳过
+/// ⚠️ 不能用 `theme` —— 那会跳过
 ///    `buildLightMaterialTheme` / `buildMaterialTheme`，
 ///    于是 `Theme.of(context).colorScheme.primary` 拿到的是
 ///    **forui 的中性兜底色**（浅色下是近黑 `0.09`），
@@ -65,12 +64,10 @@ Widget _host(Widget child, {required Brightness brightness}) {
   final theme = AppTheme.themeFor(brightness);
   return MaterialApp(
     debugShowCheckedModeBanner: false,
-    theme: brightness == Brightness.light
-        ? buildLightMaterialTheme(theme)
-        : buildMaterialTheme(theme),
-    builder: (_, c) => FTheme(data: theme, child: c ?? const SizedBox()),
+    theme: theme,
+    builder: (_, c) => AppThemeHost(data: theme, child: c ?? const SizedBox()),
     home: Scaffold(
-      backgroundColor: theme.colors.background,
+      backgroundColor: theme.colorScheme.surface,
       body: Center(child: child),
     ),
   );

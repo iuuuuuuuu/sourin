@@ -29,7 +29,6 @@ import 'dart:io';
 
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:forui/forui.dart';
 // ⚠️ 不要单独再 import `package:flutter/rendering.dart` ——
 //    `material_ui` 已经转出了 `RenderBox` 等全部用到的符号，
 //    多那一行会得到 `unnecessary_import`
@@ -38,6 +37,8 @@ import 'package:material_ui/material_ui.dart';
 import 'package:sourin_spike/core/device.dart';
 import 'package:sourin_spike/core/models.dart';
 import 'package:sourin_spike/ui/widgets/episode_strip.dart';
+import 'package:sourin_spike/ui/app_scaffold.dart';
+import 'package:sourin_spike/ui/app_theme.dart';
 
 /// 造 N 集（标题带序号，方便断言"渲染的是哪几集"）
 List<Episode> _eps(int n) => [
@@ -143,10 +144,10 @@ String stripComments(String src) {
 ///    必须用 `material_ui` 的 `MaterialApp` —— 用 `flutter/material`
 ///    会拿到 `ThemeData.fallback()`（亮色），测试环境和生产不一致。
 Widget _host(Widget child) {
-  final theme = FTheme.neutral.dark.desktop;
+  final theme = AppTheme.themeFor(Brightness.dark);
   return MaterialApp(
-    theme: theme.toApproximateMaterialTheme(),
-    builder: (_, c) => FTheme(data: theme, child: c ?? const SizedBox()),
+    theme: theme,
+    builder: (_, c) => AppThemeHost(data: theme, child: c ?? const SizedBox()),
     home: Scaffold(body: child),
   );
 }

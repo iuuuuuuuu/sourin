@@ -41,11 +41,12 @@
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 
 import 'package:sourin_spike/core/models.dart';
 import 'package:sourin_spike/ui/widgets/source_bar.dart';
+import 'package:sourin_spike/ui/app_scaffold.dart';
+import 'package:sourin_spike/ui/app_theme.dart';
 
 /// 造一个源（只给影响判据的字段，其余用默认值）
 ProviderManifest _p(
@@ -63,10 +64,10 @@ ProviderManifest _p(
 
 /// 宿主（照 `source_bar_test.dart` 的 harness —— 主题走 forui + material 双挂）
 Widget _host(Widget child) {
-  final data = FTheme.neutral.dark.desktop;
+  final data = AppTheme.themeFor(Brightness.dark);
   return MaterialApp(
-    theme: data.toApproximateMaterialTheme(),
-    builder: (_, c) => FTheme(data: data, child: c ?? const SizedBox()),
+    theme: data,
+    builder: (_, c) => AppThemeHost(data: data, child: c ?? const SizedBox()),
     home: Scaffold(body: Center(child: child)),
   );
 }

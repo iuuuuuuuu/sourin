@@ -27,23 +27,20 @@
 // ```
 // 其中 A 用**计数器**验证 State 真的被复用（而不是"看起来像复用"）。
 import 'package:flutter_test/flutter_test.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 
 import 'package:sourin_spike/ui/app_theme.dart';
-import 'package:sourin_spike/ui/theme_bridge.dart';
 import 'package:sourin_spike/ui/tokens.dart';
 import 'package:sourin_spike/ui/widgets/poster_card.dart';
+import 'package:sourin_spike/ui/app_scaffold.dart';
 
 /// 用生产同一套主题（`shell.dart:726-729` 的两步）
 Widget host(Widget child, {Brightness brightness = Brightness.light}) {
   final theme = AppTheme.themeFor(brightness);
   return MaterialApp(
     debugShowCheckedModeBanner: false,
-    theme: brightness == Brightness.light
-        ? buildLightMaterialTheme(theme)
-        : buildMaterialTheme(theme),
-    builder: (_, c) => FTheme(data: theme, child: c ?? const SizedBox()),
+    theme: theme,
+    builder: (_, c) => AppThemeHost(data: theme, child: c ?? const SizedBox()),
     home: Scaffold(
       backgroundColor: AppTheme.floorColor(brightness),
       body: Center(child: child),

@@ -29,7 +29,7 @@
  *
  * # 为什么必须用生产同一套主题（照抄 `task32_source_highlight_test.dart:49-77`）
  * ```text
- * 用 `theme.toApproximateMaterialTheme()` 会跳过 buildLightMaterialTheme，
+ * 用 `theme` 会跳过 buildLightMaterialTheme，
  * `colors.primary` 变成 forui 的中性兜底色 ⇒ 测的不是用户看到的画面。
  * ```
  *
@@ -55,14 +55,13 @@
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 
 import 'package:sourin_spike/core/models.dart';
 import 'package:sourin_spike/ui/app_theme.dart';
-import 'package:sourin_spike/ui/theme_bridge.dart';
 import 'package:sourin_spike/ui/tokens.dart';
 import 'package:sourin_spike/ui/widgets/detail_raw_meta.dart';
+import 'package:sourin_spike/ui/app_scaffold.dart';
 
 /// 被测文件（红度证明按这个路径改 / 还原）
 const String kBtnSrc = 'lib/ui/widgets/detail_raw_meta.dart';
@@ -120,11 +119,9 @@ Widget _host(Widget child, {required Brightness brightness, bool reduceMotion = 
   final theme = AppTheme.themeFor(brightness);
   return MaterialApp(
     debugShowCheckedModeBanner: false,
-    theme: brightness == Brightness.light
-        ? buildLightMaterialTheme(theme)
-        : buildMaterialTheme(theme),
+    theme: theme,
     // ★ builder 在 Navigator 之上 ⇒ 下游（含 home）都看得到这个 MediaQuery
-    builder: (BuildContext ctx, Widget? c) => FTheme(
+    builder: (BuildContext ctx, Widget? c) => AppThemeHost(
       data: theme,
       child: MediaQuery(
         data: (MediaQuery.maybeOf(ctx) ?? const MediaQueryData())
@@ -133,7 +130,7 @@ Widget _host(Widget child, {required Brightness brightness, bool reduceMotion = 
       ),
     ),
     home: Scaffold(
-      backgroundColor: theme.colors.background,
+      backgroundColor: theme.colorScheme.surface,
       body: Center(child: child),
     ),
   );

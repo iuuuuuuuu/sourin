@@ -25,6 +25,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:material_ui/material_ui.dart';
 
 import 'package:sourin_spike/ui/app_theme.dart';
+import 'package:sourin_spike/ui/theme_bridge.dart';
 
 /// WCAG 相对亮度
 double _relLum(Color c) {
@@ -47,11 +48,11 @@ String _hex(Color c) {
 void main() {
   test('★ 浅色主题：底色真实色值 + 对比度（不依赖截图）', () {
     final ft = AppTheme.themeFor(Brightness.light);
-    final matTheme = buildLightMaterialTheme(ft);
+    final matTheme = ft;
     final cs = matTheme.colorScheme;
 
-    debugPrint('[NOPIXEL] 浅色 forui.background  = ${_hex(ft.colors.background)}');
-    debugPrint('[NOPIXEL] 浅色 forui.foreground  = ${_hex(ft.colors.foreground)}');
+    debugPrint('[NOPIXEL] 浅色 palette.background  = ${_hex(AppTheme.colorsFor(Brightness.light).background)}');
+    debugPrint('[NOPIXEL] 浅色 palette.foreground  = ${_hex(AppTheme.colorsFor(Brightness.light).foreground)}');
     debugPrint('[NOPIXEL] 浅色 material.surface  = ${_hex(cs.surface)}');
     debugPrint('[NOPIXEL] 浅色 material.onSurface = ${_hex(cs.onSurface)}');
 
@@ -77,11 +78,11 @@ void main() {
   });
 
   test('★ 深色主题：底色真实色值 + 对比度', () {
-    final ft = AppTheme.themeFor(Brightness.dark);
-    debugPrint('[NOPIXEL] 深色 forui.background = ${_hex(ft.colors.background)}');
-    debugPrint('[NOPIXEL] 深色 forui.foreground = ${_hex(ft.colors.foreground)}');
+    final p = AppTheme.colorsFor(Brightness.dark);
+    debugPrint('[NOPIXEL] 深色 palette.background = ${_hex(p.background)}');
+    debugPrint('[NOPIXEL] 深色 palette.foreground = ${_hex(p.foreground)}');
 
-    final r = _ratio(ft.colors.foreground, ft.colors.background);
+    final r = _ratio(p.foreground, p.background);
     debugPrint('[NOPIXEL] 深色 对比度 = ${r.toStringAsFixed(2)}:1');
     expect(r, greaterThanOrEqualTo(4.5),
         reason: '深色主题下正文对比度必须 >= 4.5:1 —— '
@@ -89,28 +90,23 @@ void main() {
   });
 
   test('★★ 两套主题底色必须不同（否则"跟随主题"没生效）', () {
-    final l = buildLightMaterialTheme(AppTheme.themeFor(Brightness.light))
+    final l = buildAppTheme(Brightness.light)
         .colorScheme
         .surface;
-    final d = AppTheme.themeFor(Brightness.dark).colors.background;
+    final d = AppTheme.colorsFor(Brightness.dark).background;
     debugPrint('[NOPIXEL] 浅色底=${_hex(l)}  深色底=${_hex(d)}');
     expect(l, isNot(d), reason: '浅色与深色的底色必须不同 —— 否则切主题无效果');
   });
 
   test('★★ floorColor 与主题同源（防"圆角外与内容区不同色"）', () {
     for (final b in Brightness.values) {
-      final ft = AppTheme.themeFor(b);
       final floor = AppTheme.floorColor(b);
-      final bg = ft.colors.background;
-      debugPrint('[NOPIXEL] $b floorColor=${_hex(floor)} '
-          'forui.background=${_hex(bg)}');
-      if (b == Brightness.dark) {
-        expect(floor, bg, reason: '深色下 floorColor 必须 == forui.background');
-      } else {
-        // 浅色**故意**用 LightTokens.bgBase —— 见 app_theme.dart L191-196 的说明
-        expect(floor, LightTokens.bgBase,
-            reason: '浅色下 floorColor 必须是 LightTokens.bgBase（既有设计）');
-      }
+      // ★ 不变量：**地板色 == 同明暗下的内容区底色**，两套明暗都必须成立。
+      // 这两层是叠在一起的，不同源就会看到一条割裂的边。
+      final bg = AppTheme.themeFor(b).colorScheme.surface;
+      debugPrint('[NOPIXEL] $b floorColor=${_hex(floor)} surface=${_hex(bg)}');
+      expect(floor, bg,
+          reason: '\$b 下 floorColor 必须与内容区 surface 同源');
     }
   });
 }

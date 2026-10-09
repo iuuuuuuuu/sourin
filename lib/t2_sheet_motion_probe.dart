@@ -51,12 +51,12 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/scheduler.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'core/models.dart' show Episode;
 import 'ui/app_theme.dart';
+import 'ui/app_scaffold.dart';
 import 'ui/widgets/episode_strip.dart' show EpisodePanel, SheetTransition;
 
 /// 本构建期望看到哪一极（post = 修复后；pre = 改前）
@@ -359,11 +359,11 @@ Future<void> main() async {
       key: _rootKey,
       child: MaterialApp(
         debugShowCheckedModeBanner: false,
-        localizationsDelegates: FLocalizations.localizationsDelegates,
-        supportedLocales: FLocalizations.supportedLocales,
-        builder: (context, child) => FTheme(
+        localizationsDelegates: GlobalMaterialLocalizations.delegates,
+        supportedLocales: [Locale("zh", "CN"), Locale("en", "US")],
+        builder: (context, child) => AppThemeHost(
           data: AppTheme.themeFor(Brightness.light),
-          child: FScaffold(
+          child: AppScaffold(
             child: Material(type: MaterialType.transparency, child: child!),
           ),
         ),

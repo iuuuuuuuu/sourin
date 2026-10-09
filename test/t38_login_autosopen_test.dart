@@ -39,17 +39,18 @@
 // ```
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 
 import 'package:sourin_spike/core/models.dart';
 import 'package:sourin_spike/ui/widgets/provider_login_panel.dart';
+import 'package:sourin_spike/ui/app_scaffold.dart';
+import 'package:sourin_spike/ui/app_theme.dart';
 
 Widget _host(Widget child) {
-  final theme = FTheme.neutral.dark.desktop;
+  final theme = AppTheme.themeFor(Brightness.dark);
   return MaterialApp(
-    theme: theme.toApproximateMaterialTheme(),
-    builder: (context, c) => FTheme(
+    theme: theme,
+    builder: (context, c) => AppThemeHost(
       data: theme,
       child: c ?? const SizedBox(),
     ),

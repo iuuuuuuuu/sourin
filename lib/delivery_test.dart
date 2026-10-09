@@ -43,7 +43,6 @@ import 'dart:math' as math;
 import 'dart:io';
 
 import 'package:material_ui/material_ui.dart';
-import 'package:forui/forui.dart';
 /*
  * ★ 指针事件类型（`PointerDownEvent` / `PointerDeviceKind` /
  *   `kPrimaryMouseButton`）在 `flutter/gestures.dart` 里 ——
@@ -64,6 +63,7 @@ import 'ui/player_page.dart';
 import 'ui/app_theme.dart';
 import 'ui/theme_bridge.dart';
 import 'ui/titlebar_visibility.dart';
+import 'ui/app_palette.dart';
 
 /// 把 Color 打成 `#RRGGBB`（诊断输出用）
 String _hex(Color c) =>
@@ -406,9 +406,9 @@ class DeliveryTest {
       AppTheme.restoreRaw(savedRaw);
 
       // ② 两套 Material 主题的语义色必须不同
-      final darkTheme = buildMaterialTheme(AppTheme.themeFor(Brightness.dark));
+      final darkTheme = buildAppTheme(Brightness.dark);
       final lightTheme =
-          buildLightMaterialTheme(AppTheme.themeFor(Brightness.light));
+          buildAppTheme(Brightness.light);
       final dcs = darkTheme.colorScheme;
       final lcs = lightTheme.colorScheme;
       _say('  深色 onSurface=${_hex(dcs.onSurface)} brightness=${dcs.brightness}');
@@ -1778,7 +1778,7 @@ class DeliveryTest {
     }
 
     final cs = Theme.of(ctx).colorScheme;
-    final foruiColors = FTheme.of(ctx).colors;
+    final semanticColors = AppPalette.of(ctx);
 
     _say('  Theme.of().brightness = ${cs.brightness}');
     _say('  onSurface = ${_hex(cs.onSurface)}  '
@@ -1786,7 +1786,7 @@ class DeliveryTest {
     _say('  surface = ${_hex(cs.surface)}  '
         'surfaceContainerHighest = ${_hex(cs.surfaceContainerHighest)}');
     _say('  outlineVariant = ${_hex(cs.outlineVariant)}');
-    _say('  forui foreground = ${_hex(foruiColors.foreground)}');
+    _say('  forui foreground = ${_hex(semanticColors.foreground)}');
 
     /*
      * ── ① 主题必须与**用户设置**一致 ──
@@ -1822,7 +1822,7 @@ class DeliveryTest {
      */
 
     // ── ② 关键角色对比度达 WCAG AA 4.5:1 ──
-    final bg = foruiColors.background;
+    final bg = semanticColors.background;
     final onSurface = _contrast(cs.onSurface, bg);
     final onVariant = _contrast(cs.onSurfaceVariant, bg);
     final err = _contrast(cs.error, bg);

@@ -32,12 +32,13 @@
 // · 断言**写回的内容** —— 不是看有没有调 saveProgress
 // ```
 import 'package:flutter_test/flutter_test.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 
 import 'package:sourin_spike/core/models.dart';
 import 'package:sourin_spike/core/progress_backfill.dart';
 import 'package:sourin_spike/ui/follow_page.dart';
+import 'package:sourin_spike/ui/app_scaffold.dart';
+import 'package:sourin_spike/ui/app_theme.dart';
 
 // ═══════════════════════════════════════════════════════════════════════
 //  工具
@@ -135,11 +136,11 @@ class FakeSaver {
 /// ⚠️ 缺 `Material` 祖先 ⇒ 页面会被静默换成 `ErrorWidget`，
 ///    而真因只出现在 **stderr**（`Null check operator used on a null value`）。
 Widget host(Widget child, {double width = 1280}) {
-  final theme = FTheme.neutral.light.desktop;
+  final theme = AppTheme.themeFor(Brightness.light);
   return MaterialApp(
     debugShowCheckedModeBanner: false,
-    theme: theme.toApproximateMaterialTheme(),
-    builder: (_, c) => FTheme(data: theme, child: c ?? const SizedBox()),
+    theme: theme,
+    builder: (_, c) => AppThemeHost(data: theme, child: c ?? const SizedBox()),
     home: MediaQuery(
       data: MediaQueryData(size: Size(width, 900)),
       child: Directionality(

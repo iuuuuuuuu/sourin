@@ -30,7 +30,6 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart' show MethodCall, MethodChannel;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart' as mui;
 import 'package:media_kit/media_kit.dart';
 import 'package:sourin_spike/core/clip_download.dart';
@@ -39,6 +38,8 @@ import 'package:sourin_spike/core/ui_prefs.dart';
 import 'package:sourin_spike/ui/cache_page.dart';
 import 'package:sourin_spike/ui/media_page.dart';
 import 'package:sourin_spike/ui/widgets/download_panel.dart';
+import 'package:sourin_spike/ui/app_scaffold.dart';
+import 'package:sourin_spike/ui/app_theme.dart';
 
 Directory _sandbox() {
   final p = '${Directory.systemTemp.absolute.path}${Platform.pathSeparator}t3_12_defA';
@@ -47,11 +48,11 @@ Directory _sandbox() {
 }
 
 Widget _appWith(Widget home) {
-  final theme = FTheme.neutral.dark.desktop;
+  final theme = AppTheme.themeFor(Brightness.dark);
   return mui.MaterialApp(
-    theme: theme.toApproximateMaterialTheme(),
+    theme: theme,
     builder: (c, child) =>
-        FTheme(data: theme, child: child ?? const mui.SizedBox()),
+        AppThemeHost(data: theme, child: child ?? const mui.SizedBox()),
     home: home,
   );
 }

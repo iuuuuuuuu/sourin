@@ -37,14 +37,13 @@
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 
 import 'package:sourin_spike/core/models.dart' show Progress;
 import 'package:sourin_spike/ui/app_theme.dart';
-import 'package:sourin_spike/ui/theme_bridge.dart';
 import 'package:sourin_spike/ui/widgets/my_shelf.dart';
 import 'package:sourin_spike/ui/widgets/poster_card.dart';
+import 'package:sourin_spike/ui/app_scaffold.dart';
 
 /// 读生产源码并**剥掉注释**
 ///
@@ -95,10 +94,8 @@ Widget _host(Widget child, {Brightness brightness = Brightness.light}) {
   final theme = AppTheme.themeFor(brightness);
   return MaterialApp(
     debugShowCheckedModeBanner: false,
-    theme: brightness == Brightness.light
-        ? buildLightMaterialTheme(theme)
-        : buildMaterialTheme(theme),
-    builder: (_, c) => FTheme(data: theme, child: c ?? const SizedBox()),
+    theme: theme,
+    builder: (_, c) => AppThemeHost(data: theme, child: c ?? const SizedBox()),
     home: Scaffold(
       backgroundColor: AppTheme.floorColor(brightness),
       body: Center(child: child),

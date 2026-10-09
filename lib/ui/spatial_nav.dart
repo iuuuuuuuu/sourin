@@ -440,7 +440,7 @@ const Set<String> _focusNoise = {
   // 主题/环境注入
   'MediaQuery', 'Directionality', 'DefaultTextStyle', 'IconTheme',
   'AnimatedDefaultTextStyle', 'AnimatedTheme', 'Theme', '_InheritedTheme',
-  'FTheme', 'FTooltip', 'Localizations', 'Shortcuts', 'DefaultSelectionStyle',
+  'AppThemeHost', 'ToastHost', 'Tooltip', 'Localizations', 'Shortcuts', 'DefaultSelectionStyle',
 };
 
 /// 焦点节点的**结构身份** —— 真机验证"焦点到了哪个控件"的唯一可靠手段
