@@ -503,12 +503,18 @@ class EmptyState extends StatelessWidget {
             height: iconSize * 2,
             decoration: BoxDecoration(
               shape: BoxShape.circle,
-              color: colors.onSurface.withValues(alpha: 0.06),
+              // ★ 0.06 在深色底上几乎看不见（实测：无头截图里这一枚圆
+              //   的边缘密度低到几乎测不出，用户会以为"图标没加载出来"）。
+              //   0.10 是「看得清、又不抢标题」的值。
+              color: colors.onSurface.withValues(alpha: 0.10),
+              border: Border.all(
+                color: colors.onSurface.withValues(alpha: 0.08),
+              ),
             ),
             child: Icon(
               icon,
               size: iconSize,
-              color: colors.onSurfaceVariant.withValues(alpha: 0.75),
+              color: colors.onSurfaceVariant,
             ),
           ),
           const SizedBox(height: Sp.x5),

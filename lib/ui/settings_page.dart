@@ -1877,26 +1877,14 @@ class SettingsPageState extends State<SettingsPage> {
              */
             if (!Device.isTouchOnly) ...[
               const SettingsGroupLabel(text: '远程'),
-              _Block(
-                title: '局域网遥控',
-                trailing: Text(
-                  '手机浏览器遥控，不用装 App',
-                  style: TextStyle(
-                    fontSize: FontSizes.cap,
-                    color: colors.onSurfaceVariant,
-                  ),
-                ),
-                children: [
-                  Text(
-                    'TV 遥控器打字搜索很难用。开启后，手机浏览器打开下面的网址，'
-                    '就能搜索、选集、切线路、下一集 —— 手机输入关键词，电视上直接开播。',
-                    style: TextStyle(
-                      fontSize: FontSizes.sm,
-                      color: colors.onSurfaceVariant,
-                    ),
-                  ),
-                  const SizedBox(height: Sp.x4),
-
+              _RemoteBlock(
+                running: _remote?.running == true,
+                autoStart: _remoteAutoStart,
+                busy: _remoteBusy,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
                   /*
                    * ★ 开机自启放在状态区**之上**
                    *
@@ -1953,7 +1941,8 @@ class SettingsPageState extends State<SettingsPage> {
                       onSetFixedPin: _setFixedPin,
                       onCopy: _copy,
                     ),
-                ],
+                  ],
+                ),
               ),
             ],
             // ── JS 插件（二级页入口，task-43）──
@@ -5325,10 +5314,152 @@ class _FieldLabel extends StatelessWidget {
 ///    Dart 里同名类型不能重复声明（即使内容完全一样）。
 enum _ChipTone { plain, brand, off, danger }
 
-/// 菜单项的一行（图标 + 文案）—— 插件块头 / 卡片 ⋮ 菜单共用
-///
+/// 菜单项的一行（图标 + 文案）—— 插件块头 / 卡片 ⋮ 菜单共用///
 /// 为什么单独抽：两处菜单的项都是同一形态（16px 图标 + 8px 间距 + 文字），
 /// 各写一遍的代价是以后调间距时漏一处，菜单里就出现两种行宽。
+/// 「局域网遥控」区块外壳 —— **默认收起**（2026-10-10）
+///
+/// # 为什么要收起（实测依据）
+///
+/// 改前它是一个常开的 `SettingsBlock`，在手机（412×915）上量得：
+/// ```text
+/// 组「远程」       top = 135
+/// 组「内容源与插件」 top = 835   ← 差 700px
+/// ```
+/// 也就是**首屏 915px 里有 700px 被遥控一个功能占掉**，
+/// 而「内容源与插件」（用户最常用的那一组）要往下滑一整屏才看得到。
+/// 遥控还是**默认关闭**的低频功能（Owner 没开过）。
+///
+/// 根因不只是"说明文字长"—— 开启后的 `_RemotePanel` 里有 PIN 码、
+/// 二维码、复制按钮，那一块天生就高。展开时必须让位，没理由让
+/// **没启用**时也先占着。
+///
+/// # 收起态给出什么
+///
+/// ```text
+/// ┌ ⌁▾ 局域网遥控  没开启 · 手机浏览器遥控，不用装 App ┐
+/// ```
+/// 一行说清「是什么 + 现在什么状态」，想配的人点一下就展开 ——
+/// 与本页其它入口行（`SettingsEntryRow`）同一形态。
+///
+/// # 展开态
+///
+/// 沿用 `SettingsBlock` 的视觉（同样的标题字号、同样的外框），
+/// 末尾多一行「收起」入口 —— 折叠了却没法展开回来是不行的。
+class _RemoteBlock extends StatefulWidget {
+  const _RemoteBlock({
+    required this.running,
+    required this.autoStart,
+    required this.busy,
+    required this.child,
+  });
+
+  /// 遥控当前是否**已在运行**
+  final bool running;
+
+  /// 「开机自动开启」是否勾上
+  final bool autoStart;
+
+  final bool busy;
+
+  /// 展开后的内容（开关 + 启动按钮 / 运行面板）
+  final Widget child;
+
+  @override
+  State<_RemoteBlock> createState() => _RemoteBlockState();
+}
+
+class _RemoteBlockState extends State<_RemoteBlock> {
+  /// ★ 默认收起；一旦**用户自己**展开过就记住（否则每次进设置页
+  ///   都要重新点开，反复配置的用户会觉得这个折叠很烦）。
+  ///
+  /// 「已在运行」时**强制展开** —— 那种情况下用户多半是来改 PIN /
+  /// 停掉它，折叠起来等于把正在用的功能藏了。
+  bool _open = false;
+
+  bool get _shouldOpen => _open || widget.running;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+
+    if (!_shouldOpen) {
+      return Material(
+        type: MaterialType.transparency,
+        child: InkWell(
+          borderRadius: Radii.rLg,
+          onTap: () => setState(() => _open = true),
+          child: Container(
+            padding: const EdgeInsets.symmetric(
+              horizontal: Sp.x4,
+              vertical: Sp.x3,
+            ),
+            decoration: BoxDecoration(
+              color: colors.surfaceContainerHighest.withValues(alpha: 0.3),
+              borderRadius: Radii.rLg,
+              border: Border.all(color: colors.outlineVariant),
+            ),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '局域网遥控',
+                        style: TextStyle(
+                          fontSize: FontSizes.base,
+                          color: colors.onSurface,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        '没开启 · 手机浏览器遥控，不用装 App',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: FontSizes.cap,
+                          color: colors.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: Sp.x2),
+                Icon(
+                  Icons.expand_more,
+                  size: 20,
+                  color: colors.onSurfaceVariant,
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
+    return SettingsBlock(
+      title: '局域网遥控',
+      trailing: TextButton(
+        onPressed: widget.busy ? null : () => setState(() => _open = false),
+        child: const Text('收起'),
+      ),
+      children: [
+        Text(
+          'TV 遥控器打字搜索很难用。开启后，手机浏览器打开下面的网址，'
+          '就能搜索、选集、切线路、下一集 —— 手机输入关键词，电视上直接开播。',
+          style: TextStyle(
+            fontSize: FontSizes.sm,
+            color: colors.onSurfaceVariant,
+          ),
+        ),
+        const SizedBox(height: Sp.x4),
+        widget.child,
+      ],
+    );
+  }
+}
+
 Widget _menuRow(IconData icon, String label, {Color? color}) => Row(
       children: [
         Icon(icon, size: 16, color: color),
