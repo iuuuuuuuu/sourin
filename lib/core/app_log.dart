@@ -270,10 +270,42 @@ class AppLog {
       await _flushBuffer(f);
       return;
     }
-    _flushTimer ??= Timer(_flushInterval, () {
-      _flushTimer = null;
-      unawaited(_flushBuffer(f).catchError((Object _) {}));
+    /*
+     * ★★ 2026-10-10：这个 Timer **故意**不走当前 zone。
+     *
+     * 它是「攒批落盘」的窗口（1 秒），产品语义完全正常。但 widget 测试跑在
+     * `FakeAsync` 里，它在每个测试体结束时断言「树上不许有未结束的计时器」
+     * ⇒ 这个安全网会被判成泄漏：
+     * ```text
+     * A Timer is still pending even after the widget tree was disposed.
+     * ```
+     * 实测抓到过（`test/zz_t3_19_cache_page_probe_test.dart`：日志一行 ⇒
+     * 挂一个 1 秒的落盘计时器 ⇒ 那个用例必红）。
+     *
+     * 为什么用 zone-root 的时钟：产品侧仍是标准的 1 秒批量落盘，行为逐字不变；
+     * `FakeAsync` 看不见它，也就不会误判。
+     * ⚠️ 回调仍在调用时所在的 zone 里跑（`Completer` 语义不变），
+     *    改变的只有计时器本身的时钟来源。
+     *
+     * 配套：`debugFlushNow()` 让测试需要立刻看到落盘内容时能主动冲一次。
+     */
+    final where = Zone.current;
+    _flushTimer ??= Zone.root.createTimer(_flushInterval, () {
+      where.run(() {
+        _flushTimer = null;
+        unawaited(_flushBuffer(f).catchError((Object _) {}));
+      });
     });
+  }
+
+  /// 测试用：立刻把攒下的行落盘（不用等那个 1 秒窗口）
+  ///
+  /// 为什么需要：`AppLog` 现在是攒批写的，测试里「写完立刻读文件」会读到空的。
+  @visibleForTesting
+  static Future<void> debugFlushNow() async {
+    final f = _file;
+    if (f == null) return;
+    await _flushBuffer(f);
   }
 
   /// 把攒下的行一次写出去，并串行化（多次并发会交错）

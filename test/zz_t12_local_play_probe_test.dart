@@ -1,3 +1,14 @@
+@Tags(['native-media'])
+//
+// ★ 本文件必须挂 native-media 标签（2026-10-10 补）：它调用
+//   `MediaKit.ensureInitialized()` 加载真实的 libmpv-2.dll，
+//   而 libmpv 在 flutter_tester 里会**偶发 native 崩溃**（访问违例 c0000005）
+//   ⇒ 不标的话整文件用例一起 `did not complete`。
+//   默认跳过；手动跑：
+//     flutter test <file> --run-skipped --tags native-media --concurrency=1
+//   见 dart_test.yaml 顶部那份实测记录。
+library;
+
 // ═══════════════════════════════════════════════════════════════════════
 //  task-12 ④ 验收探针：本地播放的 (b)(c)(d) 三条真读数
 // ═══════════════════════════════════════════════════════════════════════
