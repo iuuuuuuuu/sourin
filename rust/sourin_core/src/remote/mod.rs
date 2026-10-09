@@ -1683,4 +1683,69 @@ mod tests {
         let e: ProviderEntry = serde_json::from_str(r#"{"id":"a","name":"A"}"#).unwrap();
         assert!(e.enabled, "enabled 缺省必须是 true");
     }
+
+    /// ★ 手机端遥控页重做新增的状态字段，缺省时**不得**让上报失败
+    ///
+    /// # 为什么这条重要
+    ///
+    /// `RemoteState` 是**整体**反序列化的：任何一个新字段没加
+    /// `#[serde(default)]`，老版本客户端的上报就会**整条失败** ——
+    /// 表现为「升级了客户端之后遥控整个没反应」，且现场毫无线索。
+    ///
+    /// 所以每加一批状态字段，就要有一条这样的断言守着。
+    #[test]
+    fn remote_state_new_fields_all_have_defaults() {
+        // 与上面那份老版本上报**逐字相同** —— 只测它
+        let old = r#"{
+            "playing": true, "title": "x",
+            "episode_order": 1, "episode_count": 1,
+            "position": 0, "duration": 0,
+            "volume": 0, "muted": false,
+            "sources": [], "current_source": "",
+            "episodes": [], "has_media": true,
+            "auto_skip": true, "skip_editing": null
+        }"#;
+        let st: RemoteState = serde_json::from_str(old).expect("老版本上报必须能解析");
+        assert!(st.cover.is_none());
+        assert!(!st.is_live, "缺省不能当成直播 —— 那会把选集换成频道列表");
+        assert!(st.live_channel_id.is_empty());
+        assert!(st.live_channels.is_empty());
+        assert!(
+            (st.speed - 1.0).abs() < 1e-6,
+            "倍速缺省必须是 1.0（0.0 会被媒体内核拒绝）"
+        );
+        assert!(!st.danmaku);
+        assert!(!st.fullscreen);
+        assert!(st.qualities.is_empty(), "缺省没有清晰度 → 手机端不画那排芯片");
+    }
+
+    /// 新增的播放设置命令：wire 格式必须是 snake_case 的扁平结构
+    #[test]
+    fn new_playback_commands_roundtrip() {
+        let cases: Vec<(&str, RemoteCommand)> = vec![
+            ("toggle_play", RemoteCommand::TogglePlay),
+            ("toggle_danmaku", RemoteCommand::ToggleDanmaku),
+            ("toggle_fullscreen", RemoteCommand::ToggleFullscreen),
+        ];
+        for (json, want) in cases {
+            let got: RemoteCommand = serde_json::from_str(&format!(r#"{{"kind":"{json}"}}"#))
+                .unwrap_or_else(|e| panic!("{json} 解析失败: {e}"));
+            assert_eq!(got, want, "{json} 反序列化结果不对");
+        }
+
+        // 带参数的也要能原样回环
+        let sp: RemoteCommand = serde_json::from_str(r#"{"kind":"set_speed","value":1.5}"#).unwrap();
+        assert_eq!(sp, RemoteCommand::SetSpeed { value: 1.5 });
+        let q: RemoteCommand =
+            serde_json::from_str(r#"{"kind":"set_quality","index":3}"#).unwrap();
+        assert_eq!(q, RemoteCommand::SetQuality { index: 3 });
+        let ch: RemoteCommand =
+            serde_json::from_str(r#"{"kind":"goto_channel","id":"hunan"}"#).unwrap();
+        assert_eq!(
+            ch,
+            RemoteCommand::GotoChannel {
+                id: "hunan".into()
+            }
+        );
+    }
 }

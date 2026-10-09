@@ -186,9 +186,12 @@ footer{
   padding-bottom:var(--safe-b);
 }
 .tab{flex:1;flex-direction:column;gap:3px;border:0;border-radius:0;background:transparent;
-  min-height:56px;font-size:11px;color:var(--dim2);padding:6px 2px}
+  min-height:56px;font-size:11px;color:var(--dim2);padding:6px 2px;position:relative}
 .tab i{font-style:normal;font-size:19px;line-height:1}
-.tab.on{color:var(--brand);background:transparent}
+/* 选中态：顶上一条短横 + 品牌色 —— 比只换文字颜色更容易在余光里分辨 */
+.tab.on{color:var(--brand)}
+.tab.on::before{content:'';position:absolute;top:0;left:50%;width:22px;height:2px;
+  margin-left:-11px;border-radius:0 0 2px 2px;background:var(--brand)}
 .tab:active{background:transparent;transform:none}
 
 /* ── 配对层 ── */
@@ -244,7 +247,14 @@ footer{
   <!-- ══════════ 遥控 ══════════ -->
   <section class="view on" id="vRemote">
     <div class="card">
-      <div id="idle" class="idle">播放器上还没有打开视频<br>去客户端选一个，或用下面的「搜索」</div>
+      <div id="idle" class="idle">
+        <div style="font-size:15px;color:var(--fg);font-weight:600;margin-bottom:6px">播放器上还没有打开视频</div>
+        在电脑上打开一个，<b>或者</b>用「搜索」「发现」挑一部 —— 点了会在电脑上打开。
+        <div class="row" style="margin-top:16px;max-width:290px;margin-left:auto;margin-right:auto">
+          <button class="flex1" id="bGoSearch">去搜索</button>
+          <button class="flex1" id="bGoDiscover">去发现</button>
+        </div>
+      </div>
       <div id="now" class="hidden">
         <div class="now">
           <img id="nCover" class="now__cover" alt="" hidden>
@@ -915,19 +925,22 @@ $('volRange').addEventListener('input', function(){
 })();
 
 // ── 底部 tab ──
+function showView(v){
+  view = v;
+  Array.prototype.forEach.call(document.querySelectorAll('.tab'), function(x){
+    x.classList.toggle('on', x.dataset.view === v);
+  });
+  Array.prototype.forEach.call(document.querySelectorAll('.view'), function(x){
+    x.classList.toggle('on', x.id === v);
+  });
+  // 切到「发现」时如果还没拉过，先拉一次
+  if (v === 'vDiscover' && !$('homeWrap').childElementCount) loadHome();
+}
 Array.prototype.forEach.call(document.querySelectorAll('.tab'), function(t){
-  t.onclick = function(){
-    view = t.dataset.view;
-    Array.prototype.forEach.call(document.querySelectorAll('.tab'), function(x){
-      x.classList.toggle('on', x === t);
-    });
-    Array.prototype.forEach.call(document.querySelectorAll('.view'), function(v){
-      v.classList.toggle('on', v.id === view);
-    });
-    // 切到「发现」时如果还没拉过，先拉一次
-    if (view === 'vDiscover' && !$('homeWrap').childElementCount) loadHome();
-  };
+  t.onclick = function(){ showView(t.dataset.view); };
 });
+$('bGoSearch').onclick = function(){ showView('vSearch'); };
+$('bGoDiscover').onclick = function(){ showView('vDiscover'); };
 
 // ══════════════════════════════════════════════════════════════
 //  搜索
