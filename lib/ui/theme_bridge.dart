@@ -52,6 +52,7 @@ import 'package:material_ui/material_ui.dart';
 
 import 'app_palette.dart';
 import 'app_typeface.dart';
+import 'tokens.dart';
 import 'theme/theme_pack.dart';
 
 // ★ task-50 候选 C2：二级页转场改为「用户选的风格」
@@ -279,6 +280,142 @@ ThemeData _shared(ThemeData base, AppPalette c, AppTypeface t) {
     navigationBarTheme: NavigationBarThemeData(indicatorShape: _shape()),
     navigationRailTheme: NavigationRailThemeData(indicatorShape: _shape()),
     navigationDrawerTheme: NavigationDrawerThemeData(indicatorShape: _shape()),
+
+    // ══════════════════════════════════════════════════════════════════
+    // ★ 里程碑 3：下面这些组件在里程碑 1/2 时**没有**被覆盖，
+    //   全部落回 Material 3 默认 —— 于是它们是全站唯一「不是一套设计」
+    //   的部分（Owner 第 11 条「别的都一般般」的直接来源之一）。
+    //
+    //   判据统一：**形状**跟卡片/按钮同一档圆角（`_shape()`），
+    //   **配色**跟次级面同一族（`c.secondary` / `c.card`）。
+    //   凡是「浮在内容之上」的（菜单 / 提示条 / 悬浮层）都要**有边界**，
+    //   否则在深色页面上它会跟背景糊在一起。
+    // ══════════════════════════════════════════════════════════════════
+
+    menuTheme: MenuThemeData(
+      // ⚠️ `MenuThemeData.style` 是 `MenuStyle`（**不是** `ButtonStyle`）——
+      //   两者的差别正好在 `textStyle` / `foregroundColor` 这些项上，
+      //   传错类型编译器会直接报出来，但很容易照着按钮那边抄。
+      style: MenuStyle(
+        shape: shape,
+        backgroundColor: WidgetStateProperty.resolveWith((s) =>
+            s.contains(WidgetState.disabled) ? soften(c.foreground, 0.12) : c.card),
+        // ★ 浮层必须有描边：深色下 `card` 与背景只差一档，没有描边时
+        //   菜单会"融"进页面（这是最常见的"看起来不高级"来源）。
+        side: WidgetStateProperty.all(BorderSide(color: c.border)),
+        shadowColor: WidgetStateProperty.all(Colors.transparent),
+        // ⚠️ `MenuStyle` 里这几个都是 `WidgetStateProperty<Color?>`（不是裸 Color）
+        surfaceTintColor: WidgetStateProperty.all(Colors.transparent),
+      ),
+    ),
+
+    popupMenuTheme: PopupMenuThemeData(
+      color: c.card,
+      surfaceTintColor: Colors.transparent,
+      elevation: 8,
+      shape: RoundedSuperellipseBorder(
+        borderRadius: _radius,
+        side: BorderSide(color: c.border),
+      ),
+      textStyle: TextStyle(
+        color: c.foreground,
+        fontFamily: t.fontFamily,
+        fontFamilyFallback: t.fontFamilyFallback,
+        fontSize: t.sm,
+      ),
+    ),
+
+    tooltipTheme: TooltipThemeData(
+      decoration: BoxDecoration(
+        // 反色：提示条是全站唯一的「反过来」的元素（前景当底）。
+        // 这样它在任何底色上都能读，也一眼就与普通卡片区分开。
+        color: c.foreground,
+        borderRadius: Radii.rSm,
+      ),
+      textStyle: TextStyle(
+        color: c.background,
+        fontFamily: t.fontFamily,
+        fontFamilyFallback: t.fontFamilyFallback,
+        fontSize: t.xs,
+        height: 1.3,
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: Sp.x2, vertical: Sp.x1),
+      // 默认 Material 是**立即**弹出 —— 鼠标扫过一排图标会闪一片提示。
+      waitDuration: const Duration(milliseconds: 500),
+    ),
+
+    dropdownMenuTheme: DropdownMenuThemeData(
+      textStyle: TextStyle(
+        color: c.foreground,
+        fontFamily: t.fontFamily,
+        fontFamilyFallback: t.fontFamilyFallback,
+        fontSize: t.sm,
+      ),
+      menuStyle: MenuStyle(
+        shape: shape,
+        backgroundColor: WidgetStateProperty.all(c.card),
+        side: WidgetStateProperty.all(BorderSide(color: c.border)),
+        shadowColor: WidgetStateProperty.all(Colors.transparent),
+        surfaceTintColor: WidgetStateProperty.all(Colors.transparent),
+      ),
+    ),
+
+    scrollbarTheme: ScrollbarThemeData(
+      // ⚠️ 滚动条是**唯一**默认就在屏幕上、且天天都在看的控件 ——
+      //   Material 默认那根 4px 硬边深色条在本项目里非常突兀。
+      thumbColor: WidgetStateProperty.resolveWith((s) => s.contains(WidgetState.dragged)
+          ? c.mutedForeground
+          : soften(c.mutedForeground, 0.55)),
+      trackColor: WidgetStateProperty.all(Colors.transparent),
+      // 静止时收窄、hover/拖动时加粗 —— 平时不抢视线，操作时够得着
+      thickness: WidgetStateProperty.resolveWith((s) =>
+          s.contains(WidgetState.dragged) || s.contains(WidgetState.hovered) ? 6.0 : 4.0),
+      // ⚠️ 这里是 `Radius?` 不是 `BorderRadius`（传 double 会编译失败）
+      radius: const Radius.circular(Radii.full),
+      interactive: true,
+    ),
+
+    tabBarTheme: TabBarThemeData(
+      labelColor: c.primary,
+      unselectedLabelColor: c.mutedForeground,
+      indicatorColor: c.primary,
+      // ★ 分隔线透明而不是默认的硬灰 —— 默认那条在深色下是一条亮线
+      dividerColor: Colors.transparent,
+      labelStyle: TextStyle(
+        fontFamily: t.fontFamily,
+        fontFamilyFallback: t.fontFamilyFallback,
+        fontSize: t.sm,
+        fontWeight: FontWeights.semibold,
+      ),
+      unselectedLabelStyle: TextStyle(
+        fontFamily: t.fontFamily,
+        fontFamilyFallback: t.fontFamilyFallback,
+        fontSize: t.sm,
+        fontWeight: FontWeights.regular,
+      ),
+    ),
+
+    badgeTheme: BadgeThemeData(
+      backgroundColor: c.error,
+      textColor: c.background,
+    ),
+
+    progressIndicatorTheme: ProgressIndicatorThemeData(
+      color: c.primary,
+      linearTrackColor: c.secondary,
+      circularTrackColor: c.secondary,
+    ),
+
+    expansionTileTheme: ExpansionTileThemeData(
+      iconColor: c.mutedForeground,
+      collapsedIconColor: c.mutedForeground,
+      textColor: c.foreground,
+      collapsedTextColor: c.foreground,
+      // ★ 默认形状带一条分割线，深色下那是一条贯穿的亮线。
+      //   改成无描边，由页面自己控制分隔（与 settings_kit 一致）。
+      shape: const Border(),
+      collapsedShape: const Border(),
+    ),
 
     switchTheme: SwitchThemeData(
       thumbColor: WidgetStateProperty.resolveWith((s) =>
