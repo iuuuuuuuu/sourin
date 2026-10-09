@@ -278,9 +278,9 @@ void main() {
        *
        * # 为什么 `colors.foreground` 本来就是对的
        *
-       * `FColors` **自带 `brightness`**（`forui/src/theme/colors.dart:32`
+       * `AppPalette` **自带 `brightness`**（`forui/src/theme/colors.dart:32`
        * 的 `required final Brightness brightness`）——
-       * 即 `FTheme.of(context).colors` 取到的角色**已经跟随主题**了，
+       * 即 `AppPalette.of(context)` 取到的角色**已经跟随主题**了，
        * 不需要再写一次 `isLight ? 白 : 黑`。
        * 真正需要分支的只有**药丸渐变**：它是"白叠加多少"这个与主题
        * 无关的原始 alpha，forui 没有对应角色。
@@ -294,7 +294,7 @@ void main() {
         usesThemeRole,
         isTrue,
         reason: '★ 底栏文字/图标色必须来自主题角色（`colors.*`）—— '
-            '`FColors` 自带 `brightness`，取到的角色天然跟随主题。'
+            '`AppPalette` 自带 `brightness`，取到的角色天然跟随主题。'
             '写死成常量才会出现"深色药丸 + 深色文字"那种反过来的白底白字。',
       );
     });

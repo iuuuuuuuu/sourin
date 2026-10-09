@@ -20,12 +20,12 @@
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 
 import 'package:sourin_spike/core/models.dart';
 import 'package:sourin_spike/ui/widgets/detail_raw_meta.dart';
 import 'package:sourin_spike/ui/widgets/follow_update_notice.dart';
+import 'package:sourin_spike/ui/app_theme.dart';
 
 // ═══════════════════════════════════════════════════════════════════════ //  剥注释（状态机，见文件头说明为什么不能用正则  // ═══════════════════════════════════════════════════════════════════════ 
 /// 剥掉 `//` 行注释与 `/* */` 块注释，**保留字符串字面量**
@@ -1308,7 +1308,7 @@ import 行　          */
       /*
        * ```text
        * Theme.of(context).colorScheme  → onSurface / onSurfaceVariant / outlineVariant
-       * FTheme.of(context).colors      → foreground / mutedForeground / border
+       * AppPalette.of(context)      → foreground / mutedForeground / border
        * ```
        * 把 forui 的名字用在 Material 的 colorScheme 一 *编译不过**         * 所以这条其实是组 复制粘贴"兜底的静态检查　        */
       for (final path in mine) {
@@ -1838,7 +1838,7 @@ String _methodBodyOf(String src, String marker) {
 /// 用 `flutter/material` 的会让 `Theme.of` 找不到祖先、走兜底亮色 —— /// 那正是项目踩过的"两套 Theme 串台"bug。测试里同样要一致
 Widget _shell(Widget child) {
   return MaterialApp(
-    theme: FTheme.neutral.light.desktop.toApproximateMaterialTheme(),
+    theme: AppTheme.themeFor(Brightness.light),
     home: Scaffold(body: SingleChildScrollView(child: child)),
   );
 }

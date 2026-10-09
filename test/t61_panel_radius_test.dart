@@ -81,7 +81,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:media_kit/media_kit.dart';
 
-import 'package:sourin_spike/ui/app_theme.dart';
+import 'package:sourin_spike/ui/theme_bridge.dart';
 import 'package:sourin_spike/ui/media_page.dart';
 import 'package:sourin_spike/ui/remote_bridge.dart';
 import 'package:sourin_spike/ui/tokens.dart';
@@ -103,7 +103,7 @@ Future<void> _pump(WidgetTester t, {required Size size}) async {
 
   await t.pumpWidget(
     MaterialApp(
-      theme: buildLightMaterialTheme(AppTheme.themeFor(Brightness.light)),
+      theme: buildAppTheme(Brightness.light),
       home: const MediaPage(
         provider: 'cycani',
         id: '3862',
@@ -467,7 +467,7 @@ void main() {
       await _pump(t, size: const Size(1280, 800));
 
       final sc = t.widget<Scaffold>(find.byType(Scaffold).first);
-      final surface = buildLightMaterialTheme(AppTheme.themeFor(Brightness.light))
+      final surface = buildAppTheme(Brightness.light)
           .colorScheme
           .surface;
 

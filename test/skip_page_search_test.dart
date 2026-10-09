@@ -34,12 +34,13 @@
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 
 import 'package:sourin_spike/core/models.dart';
 import 'package:sourin_spike/ui/settings/skip_page.dart';
 import 'package:sourin_spike/ui/widgets/settings_sub_page.dart';
+import 'package:sourin_spike/ui/app_scaffold.dart';
+import 'package:sourin_spike/ui/app_theme.dart';
 
 /// 造 N 条片头片尾记录（标题带序号，便于按标题断言）
 List<SkipMarker> markers(int n) => [
@@ -63,10 +64,10 @@ List<SkipMarker> markers(int n) => [
 ///    所以本页必须在真实外壳里测 —— 裸 `pump` 一个 Column 测不出
 ///    "搜索框固定"这个约束（那正是要靠外壳结构来保证的）。
 Widget host(Widget child) {
-  final theme = FTheme.neutral.light.desktop;
+  final theme = AppTheme.themeFor(Brightness.light);
   return MaterialApp(
-    theme: theme.toApproximateMaterialTheme(),
-    builder: (_, c) => FTheme(data: theme, child: c ?? const SizedBox()),
+    theme: theme,
+    builder: (_, c) => AppThemeHost(data: theme, child: c ?? const SizedBox()),
     home: child,
   );
 }

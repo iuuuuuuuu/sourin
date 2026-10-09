@@ -63,7 +63,6 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:window_manager/window_manager.dart';
 
@@ -80,7 +79,7 @@ import 'ui/player_page.dart'
         debugPlayerIsFullscreen,
         debugPlayerMarkFirstFrameForProbe,
         debugPlayerPlaybackFailureState;
-import 'ui/theme_bridge.dart';
+import 'ui/app_scaffold.dart';
 
 const _outDir = r'D:\WishProject\sourin-flutter-spike\.probe';
 
@@ -431,23 +430,20 @@ Future<void> main() async {
   }
 
   final brightness = AppTheme.resolve(systemBrightness: Brightness.light);
-  final theme = AppTheme.themeFor(brightness);
-  final materialTheme = brightness == Brightness.light
-      ? buildLightMaterialTheme(theme)
-      : buildMaterialTheme(theme);
+  final materialTheme = AppTheme.themeFor(brightness);
 
   runApp(
     RepaintBoundary(
       key: _rootKey,
       child: MaterialApp(
         debugShowCheckedModeBanner: false,
-        localizationsDelegates: FLocalizations.localizationsDelegates,
-        supportedLocales: FLocalizations.supportedLocales,
+        localizationsDelegates: GlobalMaterialLocalizations.delegates,
+        supportedLocales: [Locale("zh", "CN"), Locale("en", "US")],
         theme: materialTheme,
         // ★ 生产外壳逐字复刻（shell.dart:2854-2865 / t72p:447-455）
-        builder: (context, child) => FTheme(
-          data: theme,
-          child: FScaffold(
+        builder: (context, child) => AppThemeHost(
+          data: materialTheme,
+          child: AppScaffold(
             child: Material(type: MaterialType.transparency, child: child!),
           ),
         ),

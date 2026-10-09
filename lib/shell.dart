@@ -52,7 +52,6 @@ import 'package:flutter/services.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:liquid_glass_widgets/liquid_glass_widgets.dart';
 import 'package:media_kit/media_kit.dart';
-import 'package:forui/forui.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'package:path_provider/path_provider.dart';
@@ -81,8 +80,8 @@ import 'core/models.dart' show Episode, Favorite, Progress, followRemainingByKey
 import 'ui/browse_page.dart';
 import 'ui/spatial_nav.dart';
 import 'ui/app_theme.dart';
-import 'ui/theme_bridge.dart';
 import 'ui/tokens.dart';
+import 'ui/widgets/app_toast.dart';
 import 'ui/widgets/window_frame.dart';
 // ★ task-17：手机端系统栏（状态栏/导航栏）刷成内容区同色
 import 'ui/system_ui.dart';
@@ -111,6 +110,8 @@ import 'ui/player_page.dart';
 import 'ui/remote_bridge.dart';
 // ★ 真机拖拽自检（默认关，`SOURIN_DRAG_SELFTEST=1` 才跑）
 import 't458_drag_selftest.dart';
+import 'ui/app_palette.dart';
+import 'ui/app_scaffold.dart';
 
 /// ★ 是否桌面平台（Windows / macOS / Linux）
 ///
@@ -1549,10 +1550,7 @@ class _SourinAppState extends State<SourinApp>
     final brightness = AppTheme.resolve(
       systemBrightness: MediaQuery.platformBrightnessOf(context),
     );
-    final theme = AppTheme.themeFor(brightness);
-    final materialTheme = brightness == Brightness.light
-        ? buildLightMaterialTheme(theme)
-        : buildMaterialTheme(theme);
+    final materialTheme = AppTheme.themeFor(brightness);
 
     /*
      * ══════════════════════════════════════════════════════════════════
@@ -1691,14 +1689,14 @@ class _SourinAppState extends State<SourinApp>
        *    所以这里只是消掉产品里那一处，不是通用解。
        */
       scrollBehavior: const _SourinScrollBehavior(),
-      localizationsDelegates: FLocalizations.localizationsDelegates,
-      supportedLocales: FLocalizations.supportedLocales,
+      localizationsDelegates: GlobalMaterialLocalizations.delegates,
+      supportedLocales: [Locale("zh", "CN"), Locale("en", "US")],
       /*
        * ★ 两层 theme 都要给（2026-09-22 实测踩到）
        *
        * ```text
        * theme:          → MaterialApp 的（给 Material 组件兜底背景色）
-       * FTheme(data:)   → forui 的（给 FScaffold / FButton 等）
+       * AppThemeHost(data:)   → forui 的（给 FScaffold / FButton 等）
        * ```
        * 只给 FTheme 而漏掉 MaterialApp.theme 的后果：
        * **整个窗口是一片深蓝色**，什么都没有 ——
@@ -1763,8 +1761,8 @@ class _SourinAppState extends State<SourinApp>
        *    用 `_TitleBarHost`（下面）根据"当前是否在播放页"动态收起。
        */
       builder: (context, child) => _TextScaleHost(
-        child: FTheme(
-          data: theme,
+        child: AppThemeHost(
+          data: materialTheme,
         /*
          * ══════════════════════════════════════════════════════════════
          * ★★★ 2026-10-01：删掉 `FToaster`（原本是 `child: FToaster(`）
@@ -2002,20 +2000,20 @@ class _SourinAppState extends State<SourinApp>
              * ```dart
              * color: brightness == Brightness.light
              *     ? LightTokens.bgBase
-             *     : FTheme.of(context).colors.background,  // ← 就是这一行
+             *     : AppPalette.of(context).background,  // ← 就是这一行
              * ```
              * `brightness` 是自己解析的（对），但深色分支取色走的是
              * `FTheme.of(context)` —— 而**这个 `context` 在 `FTheme` 上面**：
              * ```text
              * MaterialApp
              *  ├ builder(context, child)   ← 这个 context 不是 FTheme 的子孙
-             *  │   └ FTheme(data: theme)   ← 注入在 builder 的**返回值**里
+             *  │   └ AppThemeHost(data: materialTheme)   ← 注入在 builder 的**返回值**里
              *  └ theme: materialTheme
              * ```
              * forui 的 `FTheme.of` 找不到祖先时**不抛异常**，
-             * 而是静默兜底成 `FTheme.neutral.light.touch`
+             * 而是静默兜底成 `AppTheme.themeFor(Brightness.light)`
              * （forui `src/theme/theme.dart:140`：
-             *  `return theme?.data ?? FTheme.neutral.light.touch;`）——
+             *  `return theme?.data ?? AppTheme.themeFor(Brightness.light);`）——
              * 也就是**浅色**，`background = #FFFFFF` 纯白。
              *
              * ⇒ 深色下这层地板画成了**纯白**，标题栏玻璃透出白底
@@ -2110,7 +2108,13 @@ class _SourinAppState extends State<SourinApp>
                *    `setGlobals`，虽然单例桥能容忍（后注册的覆盖），
                *    但两个 `dispose` 会互相干扰。
                */
-              child: _TitleBarHost(child: child ?? const SizedBox()),
+              /*
+               * ★ 统一 toast 宿主 —— 必须在这一层（与自绘标题栏同一层，
+               *   Navigator 之外）⇒ 首页/详情页/播放页都能弹到。
+               */
+              child: ToastHost(
+                child: _TitleBarHost(child: child ?? const SizedBox()),
+              ),
             ),
           ),
         ),
@@ -3573,7 +3577,7 @@ class _ShellPageState extends State<ShellPage>
 
   @override
   Widget build(BuildContext context) {
-    final colors = FTheme.of(context).colors;
+    final colors = AppPalette.of(context);
     /*
      * ★ 自绘标题栏只在桌面显示（2026-09-22）
      *
@@ -3740,7 +3744,7 @@ class _ShellPageState extends State<ShellPage>
      */
     return ShellScope(
         notifier: _activeTab,
-        child: FScaffold(
+        child: AppScaffold(
         /*
          * ══════════════════════════════════════════════════════════════════
          * ★★★ 关掉 forui 的 childPadding（2026-10-03 双端像素实测反解）
@@ -3791,7 +3795,6 @@ class _ShellPageState extends State<ShellPage>
          *   `merge_view_probe.dart` 里的 `FScaffold` 是独立诊断入口
          *   （各自 `-t` 启动），不承载 Owner 的界面契约，本轮不动。
          */
-        childPad: false,
         /*
          * ══════════════════════════════════════════════════════════════════
          * ★★★ 页面底色必须与吸顶条同源（2026-09-25 用户报「搜索这里有一块阴影」）
@@ -3864,9 +3867,7 @@ class _ShellPageState extends State<ShellPage>
          *    `?? original.X`（`scaffold.design.dart:152-159`）⇒ `childPadding` /
          *    `footerDecoration` / `headerDecoration` 全部保持 forui 原值。
          */
-        scaffoldStyle: FScaffoldStyleDelta.delta(
-          backgroundColor: Theme.of(context).colorScheme.surface,
-        ),
+        backgroundColor: Theme.of(context).colorScheme.surface,
         /*
          * ⚠️ 这里**不再**挂标题栏（2026-09-24 改）
          *
@@ -4431,7 +4432,7 @@ class _ShellPageState extends State<ShellPage>
         ],
       ),
       ),   // ← Material(type: transparency) 的收尾（见上方的长注释）
-    ),     // ← FScaffold 的收尾
+    ),     // ← AppScaffold 的收尾
     );     // ← ShellScope 的收尾
   }
 
@@ -5294,7 +5295,7 @@ class _CustomTitleBar extends StatelessWidget implements PreferredSizeWidget {
 
   @override
   Widget build(BuildContext context) {
-    final colors = FTheme.of(context).colors;
+    final colors = AppPalette.of(context);
     /*
      * ══════════════════════════════════════════════════════════════════
      * ★ 播放页：整条标题栏换成**深色**（修用户报的"闪白条"）
@@ -5516,7 +5517,7 @@ class _WinButton extends StatefulWidget {
   /// 图标常态色
   ///
   /// ⚠️ 必须有这个参数：深色态（播放页）下若还用
-  ///    `FTheme.of(context).colors.foreground`（深色主题里是**深色**字），
+  ///    `AppPalette.of(context).foreground`（深色主题里是**深色**字），
   ///    图标会变成"黑底黑图标"看不见。
   final Color? iconColor;
 
@@ -5546,7 +5547,7 @@ class _WinButtonState extends State<_WinButton> {
               size: widget.small ? 12 : 15,
               color: _hover && widget.hoverIcon != null
                   ? widget.hoverIcon
-                  : (widget.iconColor ?? FTheme.of(context).colors.foreground),
+                  : (widget.iconColor ?? AppPalette.of(context).foreground),
             ),
           ),
         ),
@@ -5636,7 +5637,7 @@ class _CoreErrorView extends StatelessWidget {
      * `AppTheme.floorColor`"的坑是两回事 —— 那条约束针对的是
      * builder 自己的 context（它在 FTheme **之外**）。
      */
-    final colors = FTheme.of(context).colors;
+    final colors = AppPalette.of(context);
 
     /*
      * 用 forui 的 `error` 角色而不是硬编码红色 ——
@@ -5778,9 +5779,8 @@ class _CoreErrorView extends StatelessWidget {
                * 「已在运行 → 直接返回」），所以重复调用是安全的。
                * 用户修好存储权限后**不必重启应用**。
                */
-              FButton(
-                variant: FButtonVariant.outline,
-                onPress: _retry,
+              OutlinedButton(
+                onPressed: _retry,
                 child: const Text('重新尝试启动'),
               ),
               const SizedBox(height: Sp.x4),
@@ -5891,7 +5891,7 @@ class _ErrCard extends StatelessWidget {
 
   final String title;
   final String body;
-  final FColors colors;
+  final AppPalette colors;
   final bool mono;
 
   /// 是否提供「复制」（只有真实路径才值得复制）
@@ -5997,7 +5997,7 @@ class _BottomBar extends StatelessWidget {
 
   final AppTab current;
   final int unread;
-  final FColors colors;
+  final AppPalette colors;
   final ValueChanged<AppTab> onSelect;
 
   @override
@@ -6483,7 +6483,7 @@ const double _tabWidthMin = 44;
 ///   原来  forui FScaffold.childPadding  horizontal 12/side = 24
 ///         本文件 _BottomBar 的 Padding                 = 48
 ///                                          合计       = 72
-///   现在  `FScaffold(childPad: false)` 关掉 forui 那 24
+///   现在  `AppScaffold(childPad: false)` 关掉 forui 那 24
 ///         ⇒ 只剩我们自己的 48
 /// ```
 /// 那 12/side 来自 forui 的两个默认值（不是我们的代码）：
@@ -6492,7 +6492,7 @@ const double _tabWidthMin = 44;
 ///      `childPadding = style.pagePadding.copyWith(top: 0, bottom: 0)`
 ///    `forui theme/style.dart:37`
 ///      `pagePadding = .symmetric(vertical: 8, horizontal: 12)`
-/// 修在**真实外壳**的 `FScaffold(childPad: false)`（见本文件上方那段
+/// 修在**真实外壳**的 `AppScaffold(childPad: false)`（见本文件上方那段
 /// 长注释）—— 只改外壳，`Layout` 的数值与语义一个都不动。
 ///
 /// ⚠️ 若这里漏改，窄屏下 `usable` 会**少算 24**：手机 411.43 下
@@ -6599,7 +6599,7 @@ class _BottomItem extends StatefulWidget {
   final AppTab tab;
   final bool active;
   final int badge;
-  final FColors colors;
+  final AppPalette colors;
   final VoidCallback onTap;
 
   @override
@@ -6790,8 +6790,8 @@ class _BottomItemState extends State<_BottomItem> {
 ///
 /// # 判据用 forui 的 `colors.brightness`，不用 Material 的
 ///
-/// `FColors` **自带 `brightness`**（forui `src/theme/colors.dart:32`），
-/// 而 `FTheme.of(context).colors` 是**本文件已经在用**的那一条链路
+/// `AppPalette` **自带 `brightness`**（forui `src/theme/colors.dart:32`），
+/// 而 `AppPalette.of(context)` 是**本文件已经在用**的那一条链路
 /// （`_BottomItem` 的 `widget.colors` 就是从这里传下来的）。
 /// `Theme.of(context).brightness` 在「同一个 shell 里两套 Material 串台」
 /// 那类 bug 下会走兜底值 —— 本项目为这个已经踩过一次 1.16:1 的对比度事故，
@@ -6835,7 +6835,7 @@ class _BottomPalette {
   final Color activeForeground;
 
   static _BottomPalette of(BuildContext context) {
-    final isLight = FTheme.of(context).colors.brightness == Brightness.light;
+    final isLight = AppPalette.of(context).brightness == Brightness.light;
     return isLight ? _light : _dark;
   }
 
