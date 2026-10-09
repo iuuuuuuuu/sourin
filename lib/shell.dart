@@ -80,6 +80,7 @@ import 'core/models.dart' show Episode, Favorite, Progress, followRemainingByKey
 import 'ui/browse_page.dart';
 import 'ui/spatial_nav.dart';
 import 'ui/app_theme.dart';
+import 'ui/theme/theme_pack.dart';
 import 'ui/tokens.dart';
 import 'ui/widgets/app_toast.dart';
 import 'ui/widgets/window_frame.dart';
@@ -709,6 +710,15 @@ Future<void> main() async {
     await runDragSelfTest(sink);
     return; // 自检自己 exit，这里只是让分析器知道流程结束
   }
+
+  /*
+   * ★ 把数据目录告诉主题包存储 —— `ThemePackStore.loadAll()` 是**同步**的
+   *   （主题页是保活的 tab 页，可能在数据目录解析完成前就被打开），
+   *   所以不能在那里 await。启动时注入一次最省事。
+   * ⚠️ 拿不到就让它自己按 `--dart-define` / `%APPDATA%` 兜底，
+   *   最坏结果只是"主题包列表为空"，内置主题照常全在。
+   */
+  ThemePackStore.debugSetDataDir(coreDataDir);
 
   runApp(SourinApp(coreError: coreError, coreDataDir: coreDataDir));
 
