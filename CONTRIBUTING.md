@@ -23,17 +23,29 @@ remote: - 2 of 2 required status checks are expected.
 | 规则 | 值 | 说明 |
 |---|---|---|
 | 必须走 PR | 是 | 任何直推 main 都被拒 |
-| 必需状态检查 | `Windows` / `macOS` | ★ 只列**每次都会跑**的那两个 job |
+| 必需检查 | `Windows` / `macOS` | ★ 只列**真的在验证东西**的那两个 job |
 | 分支必须最新 | 是 | main 前进后，PR 要 rebase 才能合 |
 | 必须 resolve 所有对话 | 是 | CodeRabbit 的每条意见都得处理（修 / 或回帖说明） |
 | 批准人数 | 0 | 单人开发，不需要第二个人批 —— 但 PR + CI + 评审意见仍必须走完 |
 | 对管理员也生效 | 是 | 连仓主也绕不过 |
 | 允许强推 / 删除 main | 否 | |
 
-> ⚠️ **为什么必需状态检查里没有 `Android` 和 `发 Release`**：
-> 这两个 job 在 PR 上会被 `if:` 判成 **skipped**，而 GitHub
-> **不把 skipped 当作通过** —— 把它们列进必需检查，PR 会**永远无法合并**。
-> 这是分支保护最常见的坑。
+> ⚠️ **为什么必需检查里没有 `Android` 和 `发 Release`**：
+> 这两个 job 在 PR 上会被 job 级 `if:` 判成 **skipped**。
+>
+> ★ **实测结论（2026-10-08，PR #1）：skipped 的 job 会被报成 `Success`，
+> 列为必需检查**不会**挡住合并。**
+> 我原来写的是「GitHub 不把 skipped 当作通过 ⇒ PR 永远无法合并」—— **那是错的**。
+>
+> 实测过程：把这两个 job 真的加进 `required_status_checks.contexts`，
+> 等所有 check 完成后 `mergeable_state` 确实显示 `blocked`，但调 merge API
+> 拿到的服务端原文是 `All comments must be resolved.`（来自
+> `required_conversation_resolution`）—— **不是** required check 挡的。
+> 把对话全部 resolve 之后合并**成功**。
+>
+> ⇒ 所以不列它们的原因是：**它们不验证 Android / Release**，
+> 列了也只是个恒过的门禁（本仓明令禁止「恒真的假门禁」）。
+> 不是因为它们会卡住合并。
 
 > ⚠️ **破坏性操作要临时放开保护**（例如紧急回滚 main）。
 > 那需要去 Settings → Branches 临时改规则，**改完记得改回来**。
