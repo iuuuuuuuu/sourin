@@ -692,7 +692,35 @@ class _PosterCardState extends State<PosterCard> {
       onExit: (_) {
         if (_hover) setState(() => _hover = false);
       },
-      child: card,
+      /*
+       * ★★★ 每张卡片一道 RepaintBoundary（Owner「很多地方我感觉都卡卡的」）
+       *
+       * # 为什么首页滑动会"整片一起重画"
+       *
+       * 没有 RepaintBoundary 时，Flutter 只在**能证明**某棵子树在滚动中
+       * 不会改像素时才保留它的绘制结果。`PosterCard` 里恰好有
+       * **AnimatedOpacity**（悬停层与图片首帧淡入）—— 它是**隐式动画**，
+       * 框架无法证明"没有新帧到来"，于是每一帧都把整条轨道重画一��：
+       *
+       * ```text
+       * 横向轨道一屏 ≈ 7~12 张卡 ⇒ 每卡 ~8 层（RoundedClip + Image +
+       * Badge + HoverGlow + Text …）⇒ 一帧要重画近百个 RenderObject
+       * ```
+       *
+       * # 加了之后
+       *
+       * 每张卡的绘制结果被缓存进自己的 layer ⇒ 滚动时只有**新进入视口**
+       * 的那几张需要真的画，其余直接复用 ⇒ 重画面从"整屏"降到"增量"。
+       *
+       * ⚠️ **观感逐字不变**：RepaintBoundary 只影响"什么时候重画"，
+       *   不改变任何几何、颜色或动画时长。
+       * ⚠️ ⚠️ **必须是最外层**：若放在 `MouseRegion` 里面，
+       *   悬停高亮（它自己要变像素）就落在边界之外 —— 边界会失效。
+       *   放在最外层则是**每张卡各自一层**，互不牵连。
+       * ⚠️ 代价：每张卡多一个 layer（约几十字节）。
+       *   换来的是"滚动时绘制量与滚动距离**无关**"—— 值这个钱。
+       */
+      child: RepaintBoundary(child: card),
     );
   }
 }
