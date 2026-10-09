@@ -7173,6 +7173,16 @@ class _PlayerPageState extends State<PlayerPage>
   /// 手机端 `srcCard` 的判据是 `sources.length > 1`，
   /// 所以它会隐藏 —— 后续若要支持换线路，
   /// 需要先把 `detail.sources` 存进 `PlayerPage`（独立一步，本次不做）。
+  /// 手机端「选集」tab 在直播时显示的频道列表（`id, 名称`）
+  ///
+  /// 取自 `onLiveChannels` —— 与电脑端「所有直播」抽屉**同一份**，
+  /// 所以手机上看到的台和电脑上看到的必然一致。
+  List<(String, String)> _remoteLiveChannels() {
+    final v = _liveChannels();
+    if (v == null) return const [];
+    return [for (final c in v.channels) (c.id, c.name)];
+  }
+
   RemoteState _remoteGetState() {
     /*
      * 直播没有集数概念（同 `_openSkipDialog` 的判据）。
@@ -7218,6 +7228,18 @@ class _PlayerPageState extends State<PlayerPage>
       outroSkip: _skipMarker?.outroStart,
       outroEnd: _skipMarker?.outroEnd,
       autoSkip: _autoSkip,
+      // ★ 手机端遥控页新增的几项（见 rust 侧 RemoteState 的同名字段注释）
+      cover: _cover,
+      isLive: _isLive,
+      liveChannelId: _liveChannelId ?? '',
+      // 直播频道列表：与「所有直播」抽屉同一个取值入口（`onLiveChannels`），
+      // 所以手机上看到的台与电脑上看到的**一定是同一份**。
+      liveChannels: _remoteLiveChannels(),
+      speed: _rate,
+      danmaku: _danmakuEnabled,
+      fullscreen: _fullscreen,
+      // 清晰度候选：只给 displayName，地址常带一次性签名，不下发。
+      qualities: _streams.map((x) => x.displayName).toList(),
     );
   }
 
@@ -7235,6 +7257,11 @@ class _PlayerPageState extends State<PlayerPage>
   /// set_volume       音量 0~100
   /// toggle_mute      静音切换
   /// switch_source    切换线路（按 code）
+  /// set_speed        设置播放倍速
+  /// toggle_danmaku   弹幕开关
+  /// toggle_fullscreen 全屏切换
+  /// set_quality      选清晰度 / 线路（按下标）
+  /// goto_channel     跳到指定直播频道（按 id）
   /// skip_config_open 打开片头片尾设置弹窗
   /// skip_preview     预览跳到某秒（手机上微调时）
   /// skip_confirm     锁定为片头/片尾（手机确认）
@@ -7332,6 +7359,49 @@ class _PlayerPageState extends State<PlayerPage>
         final code = c.code;
         if (code == null || code.isEmpty) return;
         await _remoteSwitchSource(code);
+        return;
+
+      case 'set_speed':
+        /*
+         * 与底栏倍速面板同一个落点（`_player.setRate`）。
+         * ⚠️ 过滤非正数：media_kit 会拒绝 0/负倍率，手机上少给一个 0
+         *    就直接把播放搞停 —— 边界在这里挡一次，不去让原生库报错。
+         */
+        final r = c.number('value')?.toDouble();
+        if (r == null || r <= 0) return;
+        _requestRate(r);
+        _flash('倍速 ${r}x');
+        return;
+
+      case 'toggle_danmaku':
+        await _toggleDanmaku();
+        return;
+
+      case 'toggle_fullscreen':
+        await _toggleFullscreen();
+        return;
+
+      case 'set_quality':
+        /*
+         * 手机端只发**下标** —— 地址常带一次性签名，回传既长又不安全；
+         * 客户端用自己的 `_streams` 取真值（与线路面板同一份数据）。
+         */
+        final i = c.number('index')?.toInt();
+        if (i == null || i < 0 || i >= _streams.length) return;
+        if (identical(_streams[i], _current)) return;
+        _startPlayback(_streams[i]);
+        _flash('已切到 ${_streams[i].displayName}');
+        return;
+
+      case 'goto_channel':
+        final chId = c.id;
+        if (chId == null || chId.isEmpty || !_isLive) return;
+        final ch = _liveChannels()?.channels.where((x) => x.id == chId).firstOrNull;
+        if (ch == null) {
+          debugPrint('[REMOTE] goto_channel 找不到频道 $chId');
+          return;
+        }
+        await _pickLiveChannel(ch);
         return;
 
       case 'skip_config_open':

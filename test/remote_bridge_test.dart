@@ -81,6 +81,15 @@ void main() {
         'outro_end',
         'auto_skip',
         'skip_editing',
+        // ★ 手机端遥控页重做新增（Rust 侧同名、全 serde default）
+        'cover',
+        'is_live',
+        'live_channel_id',
+        'live_channels',
+        'speed',
+        'danmaku',
+        'fullscreen',
+        'qualities',
       ];
       for (final k in expected) {
         expect(j.containsKey(k), isTrue,
@@ -351,6 +360,15 @@ void main() {
         's.outroEnd',
         's.autoSkip',
         's.skipEditing',
+        // ★ 手机端遥控页重做新增的字段 —— 与上面同一个坑（漏了就永远不上报）
+        's.cover',
+        's.isLive',
+        's.liveChannelId',
+        's.liveChannels.length',
+        's.speed',
+        's.danmaku',
+        's.fullscreen',
+        's.qualities',
       ]) {
         expect(src.contains(f), isTrue,
             reason: '★ `$f` 必须加进 sig() —— 不加的话该项变化时'
@@ -1092,6 +1110,12 @@ void main() {
         'skip_confirm',
         'skip_clear',
         'skip_toggle_auto',
+        // ★ 手机端遥控页重做新增（页面上真的有对应控件，不是假按钮）
+        'set_speed',
+        'set_quality',
+        'toggle_danmaku',
+        'toggle_fullscreen',
+        'goto_channel',
       ];
       final body = _code(page.substring(
         page.indexOf('Future<void> _remoteExec('),
@@ -1100,6 +1124,46 @@ void main() {
       for (final k in kinds) {
         expect(body.contains("case '$k':"), isTrue,
             reason: '★ 缺少 `case \'$k\':` —— 手机上这条命令会没反应');
+      }
+
+      /*
+       * ★ 反向断言：**控件画出来了就必有命令，命令存在就必有控件**。
+       *
+       * 「页面上有按钮但客户端没有 case」= 点了没反应（最难查的一类 bug）；
+       * 「客户端有 case 但页面不画」= 死代码（这次重做就是来清它们的）。
+       * 两条一起守，页面与协议才不会各走各的。
+       *
+       * ⚠️ 这里必须读**真的 page.html**（`rust/…/remote/page.html`）——
+       *    它通过 `include_str!` 编进二进制，是页面唯一的真源。
+       */
+      final html =
+          File('rust/sourin_core/src/remote/page.html').readAsStringSync();
+      for (final k in const [
+        'set_speed',
+        'set_quality',
+        'toggle_danmaku',
+        'toggle_fullscreen',
+        'goto_channel',
+      ]) {
+        expect(html.contains("kind:'$k'"), isTrue,
+            reason: '★ 客户端支持 `$k` 但页面从不发它 —— 死命令，'
+                '要么接上控件，要么把协议删掉');
+      }
+
+      // 反过来：页面发的每一条命令，客户端都必须有 case（上面 kinds 已逐条断言）
+      const known = {
+        'toggle_play', 'next_episode', 'prev_episode', 'goto_episode',
+        'seek', 'seek_to', 'set_volume', 'toggle_mute', 'switch_source',
+        'skip_config_open', 'skip_preview', 'skip_confirm', 'skip_clear',
+        'skip_toggle_auto',
+        'set_speed', 'set_quality', 'toggle_danmaku', 'toggle_fullscreen',
+        'goto_channel', 'move_provider', 'play_item',
+      };
+      for (final m in RegExp(r"kind:'([a-z_]+)'").allMatches(html)) {
+        final k = m.group(1)!;
+        expect(known.contains(k), isTrue,
+            reason: '★ page.html 发出了客户端**不认识**的命令 `$k` —— '
+                '手机上点下去不会有任何反应（要么补 case，要么删掉这个控件）');
       }
     });
 

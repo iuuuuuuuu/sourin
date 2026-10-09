@@ -935,6 +935,16 @@ class RemoteBridge {
         s.outroEnd ?? '-',
         s.autoSkip ? 1 : 0,
         s.skipEditing ?? '-',
+        // ★ 手机端遥控页重做新增的字段（漏掉任何一项 ⇒ 那一项永远不上报，
+        //   表现为「手机上改了没反应」—— 与片头片尾当年踩的坑同一类）
+        s.cover ?? '-',
+        s.isLive ? 1 : 0,
+        s.liveChannelId,
+        s.liveChannels.length,
+        s.speed,
+        s.danmaku ? 1 : 0,
+        s.fullscreen ? 1 : 0,
+        s.qualities.join(','),
       ].join('|');
 }
 
