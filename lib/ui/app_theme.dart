@@ -13,6 +13,7 @@ import 'package:material_ui/material_ui.dart';
 
 import '../core/ui_prefs.dart';
 import 'app_palette.dart';
+import 'theme/theme_pack.dart';
 import 'theme_bridge.dart';
 
 export 'theme_bridge.dart' show LightTokens;
@@ -92,10 +93,21 @@ class AppTheme {
     }
   }
 
+  /// 当前生效的主题包
+  ///
+  /// ⚠️ 用户选了主题包就用它（它自带明暗），否则退回「跟随系统 / 浅色 / 深色」
+  ///    这套三态。这就是两者的衔接点：主题包是**叠加**在明暗之上的，
+  ///    不是替换 —— 删掉主题包选择就回到原来的三态行为。
+  static ThemePack get pack => ThemePackStore.current();
+
   /// 该明暗下的语义色（供需要「不建整套 ThemeData 也能取色」的地方用）
-  static AppPalette colorsFor(Brightness b) => b == Brightness.light
-      ? (_lightColors ??= _buildLightColors())
-      : AppPalette.dark;
+  static AppPalette colorsFor(Brightness b) {
+    final p = selectedPack;
+    if (p != null && p.brightness == b) return p.palette;
+    return b == Brightness.light
+        ? (_lightColors ??= _buildLightColors())
+        : AppPalette.dark;
+  }
 
   static AppPalette? _lightColors;
 
@@ -113,8 +125,20 @@ class AppTheme {
         error: LightTokens.error,
       );
 
-  /// 该明暗下的完整 Material 主题
-  static ThemeData themeFor(Brightness b) => buildAppTheme(b);
+  /// 该明暗下的完整 Material 主题（按用户当前的选择）
+  static ThemeData themeFor(Brightness b) => themeForPack(b, selectedPack);
+
+  /// 指定一个主题包来建主题（`themeFor` 的可注入版本）
+  ///
+  /// ⚠️ 显式传 `pack` 时**必须**用它，不要再与 `b` 合成 ——
+  ///    一份包自带明暗，调用方传的 `b` 与它冲突时以包为准
+  ///    （否则会出现"卡片是樱粉的、底色是深色的"这种半拼接）。
+  static ThemeData themeForPack(Brightness b, ThemePack? pack) =>
+      buildAppTheme(pack?.brightness ?? b, pack: pack);
+
+  /// 用户当前选中的主题包（没选 = null，即"只用三态明暗"）
+  static ThemePack? get selectedPack =>
+      ThemePackStore.selectedId.isEmpty ? null : pack;
 
   /// 窗口「地板色」—— 自绘标题栏的玻璃**背后**垫的那一层
   ///
