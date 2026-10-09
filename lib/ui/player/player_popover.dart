@@ -35,6 +35,17 @@ import 'package:material_ui/material_ui.dart';
 
 import '../tokens.dart';
 
+/// popover 的 id 常量 —— 开关与按钮用**同一份**字符串
+class PlayerPopoverIds {
+  const PlayerPopoverIds._();
+
+  static const rate = 'rate';
+  static const quality = 'quality';
+  static const tracks = 'tracks';
+  static const danmaku = 'danmaku';
+  static const more = 'more';
+}
+
 /// 一条 popover 选项（值类型由调用点决定）
 class PopoverOption<T> {
   const PopoverOption({
@@ -229,15 +240,12 @@ class PopoverGroupLabel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.fromLTRB(Sp.x3, Sp.x2, Sp.x3, Sp.x1),
-        child: Text(
-          text,
-          style: const TextStyle(
-            color: Color(0xFF8C8C8C),
-            fontSize: FontSizes.cap,
-          ),
-        ),
-      );
+    padding: const EdgeInsets.fromLTRB(Sp.x3, Sp.x2, Sp.x3, Sp.x1),
+    child: Text(
+      text,
+      style: const TextStyle(color: Color(0xFF8C8C8C), fontSize: FontSizes.cap),
+    ),
+  );
 }
 
 /// 面板与按钮之间的分隔线
@@ -246,9 +254,9 @@ class PopoverDivider extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => const Padding(
-        padding: EdgeInsets.symmetric(vertical: Sp.x1, horizontal: Sp.x2),
-        child: Divider(height: 1, color: Color(0x1FFFFFFF)),
-      );
+    padding: EdgeInsets.symmetric(vertical: Sp.x1, horizontal: Sp.x2),
+    child: Divider(height: 1, color: Color(0x1FFFFFFF)),
+  );
 }
 
 /// 淡入 + 6px 位移（≤150ms）
@@ -276,23 +284,22 @@ class PopoverMotion extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // ★ 用框架自带的两条隐式动画，而不是自己驱动一条 Tween：
+    //    的 child 只在 tween **端点变化**时重建，
+    //   加上第一帧 t=0 直接返回 shrink，那条写法在「开关来回切」时会出现
+    //   首帧空档与硬切。AnimatedOpacity / AnimatedSlide 的端点语义清楚。
     return IgnorePointer(
       ignoring: !visible,
-      child: TweenAnimationBuilder<double>(
-        tween: Tween<double>(begin: 0, end: visible ? 1 : 0),
+      child: AnimatedSlide(
         duration: Motion.fast,
         curve: Motion.easeOut,
-        builder: (context, t, c) {
-          if (t <= 0.001) return const SizedBox.shrink();
-          return Opacity(
-            opacity: t.clamp(0.0, 1.0),
-            child: Transform.translate(
-              offset: _offset * (1 - t),
-              child: c,
-            ),
-          );
-        },
-        child: child,
+        offset: visible ? Offset.zero : _offset / 24,
+        child: AnimatedOpacity(
+          duration: Motion.fast,
+          curve: Motion.easeOut,
+          opacity: visible ? 1 : 0,
+          child: child,
+        ),
       ),
     );
   }
@@ -323,10 +330,10 @@ class PopoverKeepAlive extends StatefulWidget {
 class _PopoverKeepAliveState extends State<PopoverKeepAlive> {
   @override
   Widget build(BuildContext context) => MouseRegion(
-        onEnter: (_) => widget.controller.holdOpen(),
-        onExit: (_) => widget.controller.armClose(),
-        child: widget.child,
-      );
+    onEnter: (_) => widget.controller.holdOpen(),
+    onExit: (_) => widget.controller.armClose(),
+    child: widget.child,
+  );
 }
 
 /// 悬停 ~150ms 展开的入口按钮（桌面）
@@ -343,7 +350,7 @@ class _PopoverKeepAliveState extends State<PopoverKeepAlive> {
 ///
 /// # 为什么不用 `MenuAnchor` / `Tooltip`
 /// `MenuAnchor` 会把菜单挂到 overlay 里（层级与命中测试都另起一套），
-/// 而这里要的是��贴在按钮上方、跟着按钮走」的小卡片；自己挂在一个
+/// 而这里要的是「贴在按钮上方、跟着按钮走」的小卡片；自己挂在一个
 /// `Stack` 里位置更可控、也更容易做交叉淡出。
 class PopoverAnchorButton extends StatefulWidget {
   const PopoverAnchorButton({

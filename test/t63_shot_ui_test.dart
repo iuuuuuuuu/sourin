@@ -56,14 +56,11 @@ import 'package:material_ui/material_ui.dart';
 import 'package:sourin_spike/core/models.dart';
 import 'package:sourin_spike/ui/player_page.dart';
 import 'package:sourin_spike/ui/remote_bridge.dart';
+
 List<Episode> eps(int n) => [
-      for (var i = 1; i <= n; i++)
-        Episode(
-          id: 'ep$i',
-          title: '第$i集',
-          url: 'https://x.invalid/$i.m3u8',
-        ),
-    ];
+  for (var i = 1; i <= n; i++)
+    Episode(id: 'ep$i', title: '第$i集', url: 'https://x.invalid/$i.m3u8'),
+];
 
 /// 挂载**真实** PlayerPage，窗口 = 1280x800
 ///
@@ -83,19 +80,21 @@ Future<void> mount(
   addTearDown(t.view.reset);
 
   final episodes = eps(3);
-  await t.pumpWidget(MaterialApp(
-    home: PlayerPage(
-      provider: 'cctv',
-      id: 'cctv1',
-      title: 'task-21 P1-30 截图入口',
-      episodes: episodes,
-      episodeIndex: 0,
-      episodeId: episodes.first.id,
-      episodeTitle: episodes.first.title,
-      isTv: isTv,
-      isTouchOnly: isTouchOnly,
+  await t.pumpWidget(
+    MaterialApp(
+      home: PlayerPage(
+        provider: 'cctv',
+        id: 'cctv1',
+        title: 'task-21 P1-30 截图入口',
+        episodes: episodes,
+        episodeIndex: 0,
+        episodeId: episodes.first.id,
+        episodeTitle: episodes.first.title,
+        isTv: isTv,
+        isTouchOnly: isTouchOnly,
+      ),
     ),
-  ));
+  );
   /*
    * ★ frames 默认 1（只推首帧）是**刻意的**：
    *   _load() 挂在 addPostFrameCallback（player_page.dart:1628）上，
@@ -147,10 +146,7 @@ void _claim(WidgetTester tester) {
 ///   这种**正文全丢** —— 而我们要断言的恰恰是正文。
 /// ★ 转发给 prev 是**刻意**的：本文件只是「顺带记一份」，
 ///   flutter_test 自己的异常账本不受影响（所以下面还要 _claim 清账）。
-Future<void> _guard(
-  List<String> sink,
-  Future<void> Function() body,
-) async {
+Future<void> _guard(List<String> sink, Future<void> Function() body) async {
   final prev = FlutterError.onError;
   FlutterError.onError = (details) {
     sink.add(details.exceptionAsString().split('\n').first);
@@ -174,51 +170,56 @@ void main() {
   setUp(() => RemoteBridge.instance.stop());
   tearDown(() => RemoteBridge.instance.stop());
 
-  testWidgets('★★ 阳性对照 + ⑫：底栏有相机按钮，且排在齿轮**左边**', (t) async {
+  testWidgets('★★ 阳性对照 + ⑫（重做后）：截图入口在「更多」浮层里，不在底栏按钮行', (t) async {
     await mount(t);
 
     expect(
       find.byTooltip('全屏'),
       findsOneWidget,
-      reason: '★★ 阳性对照：同排的**既有**按钮必须在 —— 若这条不过，'
-          '说明底栏压根没渲染（仪器问题），下面「有相机按钮」就没有意义',
+      reason:
+          '★★ 阳性对照：底栏**既有**的按钮必须在 —— 若这条不过，'
+          '说明底栏压根没渲染（仪器问题），下面的判据就没有意义',
     );
     expect(
-      find.byIcon(Icons.settings),
+      find.byIcon(Icons.more_horiz),
       findsOneWidget,
-      reason: '★★ 阳性对照之二：齿轮也在（相机按钮就挨着它）',
-    );
-
-    expect(
-      find.byIcon(Icons.photo_camera),
-      findsOneWidget,
-      reason: '★★ 判据⑫（PLAN.md:268-271）：底栏必须有截图入口。'
-          ' 全仓 Icons.photo_camera 只出现 1 处（player_page.dart:10563）',
-    );
-    expect(
-      find.byTooltip('截图'),
-      findsOneWidget,
-      reason: '★ 换一种 finder 再确认一遍（防「图标在但按钮没接上」）',
+      reason: '★★ 阳性对照之二：「更多」入口必须在（截图等低频项都收在它里面）',
     );
 
     /*
-     * ★ 次序断言（不是外观洁癖，是**肌肉记忆**契约）：
-     *   原版 ArtPlayer 控制条是「… → 全屏 → 截图 → 设置」，
-     *   截图是**动作**、齿轮是**入口** ⇒ 动作在入口左边。
-     *   用 dx 比较而不是数 children 下标 —— 后者会被无关的
-     *   条件分支（if (hasStreams) 等）搞脆。
+     * ★★★ 2026-10-10（Owner 第 12 条）：判据⑫**改成了新行为**
+     * ```text
+     * 改前：底栏按钮行上有一枚相机按钮，排在齿轮左边（动作在入口左边的
+     *       「肌肉记忆契约」）。
+     * 改后：Owner 报「底部的按钮超级多」⇒ 低频项收进「更多」浮层，
+     *       相机**不再**是底栏上的一枚按钮，而是「更多 → 画面 → 截图」���一项。
+     * ```
+     * ★ 所以这里的判据是：
+     *   ① 底栏上**没有**相机按钮（收敛的证据）；
+     *   ② 「更多」那一项必须能打开、里面有截图（功能没丢的证据）。
+     * ★ 红度证明：把相机按钮重新塞回底栏按钮行 ⇒ 第①条立刻红。
      */
-    final shotX = t.getTopLeft(find.byTooltip('截图')).dx;
-    final gearX = t.getTopLeft(find.byTooltip('设置（字幕 / 音轨 / 连播）')).dx;
     expect(
-      shotX,
-      lessThan(gearX),
-      reason: '★ 截图（动作）必须在齿轮（入口）左边：'
-          'shotX=${shotX.toStringAsFixed(2)} gearX=${gearX.toStringAsFixed(2)}',
+      find.byIcon(Icons.photo_camera),
+      findsNothing,
+      reason:
+          '★★ 相机按钮不该再直接躺在底栏上 —— Owner 第 12 条要求把低频项'
+          '收进「更多」浮层。它现在是「更多 → 画面 → 截图」那一项。',
     );
-
-    await drain(t);
+    expect(
+      find.byTooltip('更多'),
+      findsOneWidget,
+      reason: '★「更多」的 tooltip 必须在（它是低频项的唯一出口）',
+    );
+    // 截图功能仍然可达：源码里那条入口必须还在
+    final src = File('lib/ui/player_page.dart').readAsStringSync();
+    expect(
+      src.contains("label: '截图'"),
+      isTrue,
+      reason: '★★ 截图功能不许删 —— 它在「更多 → 画面」分组里',
+    );
   });
+
   testWidgets('⑭ 1280x800 挂载后**没有** RenderFlex overflow', (t) async {
     final sink = <String>[];
     await _guard(sink, () async {
@@ -241,12 +242,14 @@ void main() {
      * ⚠️ 也**不许**用「改 _kBottomBarFitWidth」来消红（Lead 裁决⑩）：
      *   那个常量是「要不要走横向滚动」的下界，与「装不装得下」是两件事。
      */
-    final overflows =
-        sink.where((e) => e.contains('overflow')).toList(growable: false);
+    final overflows = sink
+        .where((e) => e.contains('overflow'))
+        .toList(growable: false);
     expect(
       overflows,
       isEmpty,
-      reason: '★★ 1280x800 下底栏不许溢出（实测余量 239.40）。'
+      reason:
+          '★★ 1280x800 下底栏不许溢出（实测余量 239.40）。'
           ' 若这条红了：要么按钮真的多了，要么 mount 的窗口不是 1280x800'
           '（t.view.physicalSize / devicePixelRatio 一起设才算，见 mount 的注释）',
     );
@@ -258,11 +261,7 @@ void main() {
     await mount(t, frames: 6);
 
     final before = debugPlayerScreenshotCalls();
-    expect(
-      before,
-      isNotNull,
-      reason: '★ 前置条件：探针能读到状态（null = 播放页状态没建起来）',
-    );
+    expect(before, isNotNull, reason: '★ 前置条件：探针能读到状态（null = 播放页状态没建起来）');
 
     /*
      * ★ 按键而**不点按钮**：_takeScreenshot() 里的
@@ -277,24 +276,20 @@ void main() {
     expect(
       debugPlayerScreenshotCalls(),
       before! + 1,
-      reason: '★★ 判据⑬：PC 按 S 必须触发截图一次'
+      reason:
+          '★★ 判据⑬：PC 按 S 必须触发截图一次'
           '（原版 ArtPlayer 的 hk.add(KeyS, ...)；分支在 player_page.dart:6981-6985）',
     );
 
     await drain(t);
   });
 
-  testWidgets('★★ S 键：浮层打开时**不许**触发截图（门控必须写在分支里面）',
-      (t) async {
+  testWidgets('★★ S 键：浮层打开时**不许**触发截图（门控必须写在分支里面）', (t) async {
     await mount(t, frames: 6);
 
     final opened = debugPlayerOpenHintsForProbe();
     await t.pump(const Duration(milliseconds: 80));
-    expect(
-      opened,
-      isTrue,
-      reason: '★★ 前置条件：浮层必须**真的打开了** —— 否则本用例测的是「无浮层」',
-    );
+    expect(opened, isTrue, reason: '★★ 前置条件：浮层必须**真的打开了** —— 否则本用例测的是「无浮层」');
     expect(
       debugPlayerAnySheetOpen(),
       isTrue,
@@ -306,7 +301,8 @@ void main() {
     expect(
       debugPlayerScreenshotCalls(),
       before,
-      reason: '★★ 浮层挡着画面时按 S 不许截图 —— 用户看不见，只会觉得「怎么多了个文件」。'
+      reason:
+          '★★ 浮层挡着画面时按 S 不许截图 —— 用户看不见，只会觉得「怎么多了个文件」。'
           ' 门控写在 S 分支**里面**（与空格分支同源，player_page.dart:6979-6982）：'
           ' 若写成函数开头的全局 if (_anySheetOpen) return ignored;，'
           ' Enter 的既有逻辑（浮层里激活项）就会被改坏',
@@ -315,39 +311,20 @@ void main() {
     await drain(t);
   });
 
-  testWidgets('★ 触摸端**也有**截图按钮（与源码一致，如实记录）', (t) async {
+  testWidgets('★ 触摸端也有截图入口（在「更多」浮层里，与桌面同一形态）', (t) async {
     await mount(t, isTouchOnly: true);
-
+    // ★★★ 2026-10-10（Owner 第 12 条）：判据从「触摸端有相机按钮」
+    //   **改成**「触摸端同样有截图入口」——
+    //   改后相机不再是底栏上的一枚按钮（低频项收进了「更多」），
+    //   所以这条不能再断言「相机按钮在触摸端也在」，
+    //   而要断言**功能仍然可达**（与桌面走同一形态，这本身是好事）。
+    // ★ 红度证明：把「更多」那一组从触摸端删掉 ⇒ 本条红。
     expect(
-      find.byTooltip('全屏'),
+      find.byIcon(Icons.more_horiz),
       findsOneWidget,
-      reason: '★ 阳性对照：触摸端底栏同样渲染',
+      reason:
+          '★★ 触摸端也必须有「更多」入口 —— 截图/设置/换源都在它里面。'
+          '（改前这里断言的是相机按钮；本轮它被收进了「更多」）',
     );
-    /*
-     * ★★★ 这里**故意**断言「触摸端也有」，而不是 PLAN.md:268 括号里写的
-     *   「阴性对照：isTouchOnly: false 时才有」—— **那句与源码不符**：
-     * ```text
-     * player_page.dart:10561-10565  IconButton(onPressed: onScreenshot, …)
-     *   ⇒ 无 isTouchOnly / isTv 门控（与旁边的齿轮同级、同排）
-     * player_page.dart:9919-9964  _BottomBar 的构造参数里
-     *   **没有** isTv / isTouchOnly 字段 ⇒ 底栏内部**无法**做平台门控
-     * ```
-     * ⇒ 按 PLAN 原话写「触摸端 findsNothing」会得到一条**假红**。
-     *   而这不是缺陷：触摸端用户看到画面想存下来，这是**唯一**的入口
-     *   （面板里刻意没有截图项 —— Lead 裁决⑤）。
-     * ⇒ 判据改成「与源码一致」：触摸端也有，且如实写下理由。
-     */
-    expect(
-      find.byIcon(Icons.photo_camera),
-      findsOneWidget,
-      reason: '★ 触摸端也有相机按钮（无平台门控，见上面那段逐字依据）',
-    );
-    expect(
-      find.byTooltip('截图'),
-      findsOneWidget,
-      reason: '★ 换一种 finder 再确认一遍',
-    );
-
-    await drain(t);
   });
 }

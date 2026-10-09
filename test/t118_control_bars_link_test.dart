@@ -1,5 +1,4 @@
 @Tags(['native-media'])
-
 // ═══════════════════════════════════════════════════════════════════════
 //  ★★★ 2026-10-08（Owner 追加）顶栏与底栏的**显隐联动**
 // ═══════════════════════════════════════════════════════════════════════
@@ -47,7 +46,6 @@
 //    `debugPlayerAutoHideControlsForProbe`）而不是 `t.tap`：
 //    flutter_tester 里 PlayerPage 整棵树的指针回调都不被调用
 //    （见 test/t98 文件头），tap 驱动不了这条路径。
-
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -166,9 +164,13 @@ void main() {
       await _mount(t);
       final o = debugPlayerControlBarsOpacity();
       expect(o, isNotNull, reason: '★ 没有播放页 ⇒ 探针拿不到读数');
-      expect(o!.$1, o.$2,
-          reason: '★★ 顶栏与底栏必须是同一个 _controlsFade —— 两个数不等 '
-              '说明有人各开了一条动画（那就不是"联动"了）');
+      expect(
+        o!.$1,
+        o.$2,
+        reason:
+            '★★ 顶栏与底栏必须是同一个 _controlsFade —— 两个数不等 '
+            '说明有人各开了一条动画（那就不是"联动"了）',
+      );
       expect(o.$1, 1.0, reason: '★ 刚挂载时控制条应当是完全显示的');
     });
 
@@ -177,9 +179,13 @@ void main() {
       expect(debugPlayerControlBarsOpacity()!.$1, 1.0, reason: '前提：先完全显示');
 
       final hid = debugPlayerAutoHideControlsForProbe();
-      expect(hid, isTrue,
-          reason: '★ 探针没生效 —— 它要求 _playing==true；'
-              '若这里就是 false，后面的读数全部无意义');
+      expect(
+        hid,
+        isTrue,
+        reason:
+            '★ 探针没生效 —— 它要求 _playing==true；'
+            '若这里就是 false，后面的读数全部无意义',
+      );
       await _settleMotion(t);
 
       final o = debugPlayerControlBarsOpacity()!;
@@ -210,9 +216,13 @@ void main() {
         for (var i = 0; i < 4; i++) {
           await t.pump(const Duration(milliseconds: 20));
           final o = debugPlayerControlBarsOpacity()!;
-          expect(o.$1, o.$2,
-              reason: '★ 第 $round 轮隐藏过程中顶/底不一致（$o）—— '
-                  '说明有人的动画起点或时长不同');
+          expect(
+            o.$1,
+            o.$2,
+            reason:
+                '★ 第 $round 轮隐藏过程中顶/底不一致（$o）—— '
+                '说明有人的动画起点或时长不同',
+          );
         }
         await _settleMotion(t);
         expect(debugPlayerControlBarsOpacity()!.$1, 0.0);
@@ -241,8 +251,11 @@ void main() {
       await t.pump();
       await t.pump(const Duration(milliseconds: 60));
       final mid = debugPlayerControlBarsOpacity()!.$1;
-      expect(mid, greaterThan(0.0),
-          reason: '★ 60ms 就归零 ⇒ 这是**硬切**，不是淡出（用户要求"要有动画"）');
+      expect(
+        mid,
+        greaterThan(0.0),
+        reason: '★ 60ms 就归零 ⇒ 这是**硬切**，不是淡出（用户要求"要有动画"）',
+      );
       expect(mid, lessThan(1.0), reason: '★ 60ms 还没开始动 ⇒ 动画没被驱动');
       await _settleMotion(t);
       expect(debugPlayerControlBarsOpacity()!.$1, 0.0);
@@ -253,7 +266,8 @@ void main() {
       expect(
         src.contains('class _FloatingBackButton'),
         isFalse,
-        reason: '★★ `_FloatingBackButton` 必须**不存在** —— 它就是 Owner 报的'
+        reason:
+            '★★ `_FloatingBackButton` 必须**不存在** —— 它就是 Owner 报的'
             '「全屏左上角这个单独的返回icon,还没消失」那一枚。'
             'lead 定案：控制条收起时它跟着一起淡出；鼠标一动，顶栏连同'
             '**它自己的**返回箭头一起回来。半成品方案 `(1 - f) × 指针在页内` '
@@ -264,14 +278,16 @@ void main() {
       expect(
         _stripComments(src).contains('onFloatingBack'),
         isFalse,
-        reason: '★ `onFloatingBack` 是那枚悬浮键的入口，删了它才真的删干净。'
+        reason:
+            '★ `onFloatingBack` 是那枚悬浮键的入口，删了它才真的删干净。'
             '（剥注释后仍出现 ⇒ 代码里还有引用没删干净）',
       );
       // ★ 阴性对照：顶栏**自己**的返回箭头必须还在（错误态下还要常显可点）
       expect(
         src.contains('_canUseTopBarBack'),
         isTrue,
-        reason: '★★ 错误态下顶栏那枚箭头必须仍可用（Owner 专门报过「不能播放时'
+        reason:
+            '★★ 错误态下顶栏那枚箭头必须仍可用（Owner 专门报过「不能播放时'
             '左上角的返回点不动」）。删悬浮键**不能**连这条一起删掉。',
       );
     });
@@ -281,7 +297,8 @@ void main() {
       expect(
         src.contains('if (_controlsVisible || _canUseFloatingBack)'),
         isFalse,
-        reason: '★★ 这就是「上面的这个一直不消失」的那一行 —— 它回来了。'
+        reason:
+            '★★ 这就是「上面的这个一直不消失」的那一行 —— 它回来了。'
             '`_canUseFloatingBack` 在桌面端恒 true ⇒ 顶栏无条件渲染。'
             '正确做法：顶栏常挂（去掉外层 if），渐变条看 visible。',
       );
@@ -293,7 +310,8 @@ void main() {
       expect(
         before.contains('if ('),
         isFalse,
-        reason: '★★ `_TopBar(` 前面又出现了 if —— 那会让顶栏在隐藏时被'
+        reason:
+            '★★ `_TopBar(` 前面又出现了 if —— 那会让顶栏在隐藏时被'
             '整个卸下（硬切，没有淡出动画），用户要求的是要有动画。',
       );
     });
@@ -318,25 +336,37 @@ void main() {
       expect(
         src.contains('(_controlsVisible && _error == null) ||'),
         isTrue,
-        reason: '★ 顶栏 visible 的主真源必须仍是 `_controlsVisible && _error == null` ——'
+        reason:
+            '★ 顶栏 visible 的主真源必须仍是 `_controlsVisible && _error == null` ——'
             '那是联动的唯一真源；改成别的判据（或写死 true）就不再联动了',
       );
       expect(
         src.contains('_canUseTopBarBack,'),
         isTrue,
-        reason: '★ task-7 追加的错误态分支必须还是 `_canUseTopBarBack`（互斥分支），'
+        reason:
+            '★ task-7 追加的错误态分支必须还是 `_canUseTopBarBack`（互斥分支），'
             '不许换成写死 true 或别的字段',
       );
       final iTop = src.indexOf('bool get _canUseTopBarBack =>');
       expect(iTop, greaterThan(0), reason: '★ `_canUseTopBarBack` 不见了');
       final topDef = src.substring(iTop, iTop + 200);
-      expect(topDef.contains('_error != null'), isTrue,
-          reason: '★★ `_canUseTopBarBack` 必须与前半段**互斥**（含 `_error != null`）——'
-              '否则正常播放时它也会让顶栏常显，顶栏就再也不消失了');
-      expect(topDef.contains('!_anySheetOpen'), isTrue,
-          reason: '★★ 浮层打开时不许抢返回（与 `_canUseFloatingBack` 同一条纪律）');
-      expect(src.contains('if (_controlsVisible &&'), isTrue,
-          reason: '★ 底栏的门控消失了（两条读的必须是同一个字段）');
+      expect(
+        topDef.contains('_error != null'),
+        isTrue,
+        reason:
+            '★★ `_canUseTopBarBack` 必须与前半段**互斥**（含 `_error != null`）——'
+            '否则正常播放时它也会让顶栏常显，顶栏就再也不消失了',
+      );
+      expect(
+        topDef.contains('!_anySheetOpen'),
+        isTrue,
+        reason: '★★ 浮层打开时不许抢返回（与 `_canUseFloatingBack` 同一条纪律）',
+      );
+      expect(
+        src.contains('if (_controlsVisible &&'),
+        isTrue,
+        reason: '★ 底栏的门控消失了（两条读的必须是同一个字段）',
+      );
     });
 
     test('⑨ 隐藏路径真的驱动动画（_autoHideNow 里必须调 _applyControlsMotion）', () {
@@ -352,14 +382,16 @@ void main() {
       expect(
         body.contains('_applyControlsMotion();'),
         isTrue,
-        reason: '★★ 隐藏路径没有驱动动画 —— 这正是本次的根因：'
+        reason:
+            '★★ 隐藏路径没有驱动动画 —— 这正是本次的根因：'
             '`_applyControlsMotion()` 原来只在 `_showControls()` 里调，'
             '⇒ `_controlsFade.value` 恒 1.0 ⇒ 顶栏永远不淡出。',
       );
       expect(
         body.indexOf('_applyControlsMotion();'),
         greaterThan(body.indexOf('setState(() => _controlsVisible = false);')),
-        reason: '★★ `_applyControlsMotion()` 写在了 setState 之前 ——'
+        reason:
+            '★★ `_applyControlsMotion()` 写在了 setState 之前 ——'
             '它读的是 `_controlsVisible` 的当前值，写在前面会读到旧值 ⇒ 反向。',
       );
     });
@@ -395,14 +427,25 @@ void main() {
        * ⚠️ 红度证明：把顶栏那一处换成 `kAlwaysCompleteAnimation`（或删掉）
        *   ⇒ 引用数掉到 1 ⇒ 本条立刻红。
        */
-      expect(refs, greaterThanOrEqualTo(2),
-          reason: '★ 顶栏 + 底栏 至少要引用同一个 `_controlsFade` 2 次，'
-              '实测 $refs 次。只有同一个实例才能保证两条**每一帧**的不透明度都相等。');
-      expect(src.contains('fade: _canUseTopBarBack'), isTrue,
-          reason: '★ task-7 的错误态分支必须仍在（把 fade 钉成常量动画）');
-      expect(src.contains(': _controlsFade,'), isTrue,
-          reason: '★ 正常态必须**回落到** `_controlsFade`（不是写死常量）——'
-              '否则控制条隐藏时顶栏不会淡出，缺陷 2 会回归');
+      expect(
+        refs,
+        greaterThanOrEqualTo(2),
+        reason:
+            '★ 顶栏 + 底栏 至少要引用同一个 `_controlsFade` 2 次，'
+            '实测 $refs 次。只有同一个实例才能保证两条**每一帧**的不透明度都相等。',
+      );
+      expect(
+        src.contains('fade: _canUseTopBarBack'),
+        isTrue,
+        reason: '★ task-7 的错误态分支必须仍在（把 fade 钉成常量动画）',
+      );
+      expect(
+        src.contains(': _controlsFade,'),
+        isTrue,
+        reason:
+            '★ 正常态必须**回落到** `_controlsFade`（不是写死常量）——'
+            '否则控制条隐藏时顶栏不会淡出，缺陷 2 会回归',
+      );
       final decl = RegExp(r'late final Animation<double> _controlsFade =')
           .allMatches(src)
           .length;
@@ -419,8 +462,7 @@ void main() {
         await t.pump(const Duration(milliseconds: 50));
       }
       final after = debugPlayerControlBarsOpacity()!.$1;
-      expect(after, before,
-          reason: '★ 没有任何交互却自己变回来了（$before → $after）');
+      expect(after, before, reason: '★ 没有任何交互却自己变回来了（$before → $after）');
     });
   });
 }

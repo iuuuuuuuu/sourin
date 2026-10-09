@@ -5611,6 +5611,66 @@ class _PlayerPageState extends State<PlayerPage>
   ///
   /// ⚠️ 必须在 State 里（而不是像其它探针那样从外面改私有字段）：
   ///    `setState` 是 protected，外面改会多一条 warning。
+  /// ★ popover 层 —— 由**页面**挂在整屏那个 Stack 里（与底栏是兄弟）
+  ///
+  /// # 为什么不挂在底栏内部（这是实测出来的，不是设计偏好）
+  /// ```text
+  /// 底栏在页面里是 `Positioned(bottom:0)`、高约 106px 的一个盒子。
+  /// 面板若作为它的子件，能长到的上界就被那 106px 卡死。
+  /// 实测（无头截图，1440×900）：popover 展开后的 PNG 与「没展开」的 PNG
+  /// **md5 完全相同** —— 一像素都没画出来，而 widget 树里 `PlayerMoreMenu`
+  /// 确实存在 ⇒ 问题出在**几何/裁剪**，不在逻辑。
+  /// ⇒ 提到同一个 Stack 里当兄弟：面板从底栏上沿往上长，
+  ///   而那个 Stack 是整屏（`SizedBox.expand`）⇒ 不会被任何祖先裁掉。
+  /// ```
+  PlayerBottomBar? _bottomBarWidget;
+
+  Widget buildPopoverLayer() =>
+      _bottomBarWidget?.buildPopoverLayer() ?? const SizedBox.shrink();
+
+  /// ★ 截图/几何用：打开选集面板（走**生产**那条 `_episodeSheetOpen` 真源）
+  ///
+  /// # 为什么要探针而不是 `t.tap`
+  /// ```text
+  /// flutter_tester 里 PlayerPage 整棵树的**指针回调不被调用**（见 test/t98
+  /// 文件头）⇒ `t.tap(find.text('更多'))` 打不动底栏。
+  /// ⇒ 探针直接改**生产**的那个字段 / 控制器，验的就是生产那条路径。
+  /// ```
+  bool debugOpenEpisodesForProbe() {
+    if (!mounted) return false;
+    setState(() => _episodeSheetOpen = true);
+    return _episodeSheetOpen;
+  }
+
+  /// 展开某一个 popover（走**生产**那个 `PopoverController`）
+  bool debugOpenPopoverForProbe(String id) {
+    if (!mounted) return false;
+    _popover.toggle(id);
+    return _popover.openId == id;
+  }
+
+  /// ★ 截图专用：清掉起播错误并把控制条**钉在显示态**
+  ///
+  /// # 为什么需要它
+  /// ```text
+  /// 无头截图环境里没有核心库 ⇒ `_load()` 必然失败 ⇒ `_error != null`
+  /// ⇒ 底栏那条门控（`_error == null`）不成立 ⇒ 截图里**根本没有底栏**，
+  ///   截出来只是一张「播放失败」的全屏图。
+  /// ```
+  /// ⚠️ 它**只**改 UI 状态，不碰播放器、不发任何请求。
+  bool debugForceBarsForShot() {
+    if (!mounted) return false;
+    setState(() {
+      _error = null;
+      _loading = false;
+      _playing = true;
+      _controlsVisible = true;
+      _duration = const Duration(hours: 1, minutes: 42, seconds: 7);
+    });
+    _applyControlsMotion();
+    return true;
+  }
+
   void debugAutoHideControlsForProbe() {
     _autoHideNow();
   }
@@ -11222,7 +11282,28 @@ class _PlayerPageState extends State<PlayerPage>
                         trackGroups: _trackPopoverGroups(),
                         onPickTrack: _pickTrackFromPopover,
                         moreGroups: _moreMenuGroups(context),
+                        onBuilt: (b) => _bottomBarWidget = b,
                       ),
+
+                    /*
+                     * ★ popover 层 —— 与 `_BottomBar` **兄弟**，挂在整屏这个
+                     *   Stack 里。理由见 `buildPopoverLayer` 的长注释。
+                     */
+                    Positioned.fill(
+                      child: Align(
+                        alignment: Alignment.bottomRight,
+                        child: Padding(
+                          padding: const EdgeInsets.only(
+                            right: Sp.x2,
+                            bottom: _kPlayerBottomBarHeight,
+                          ),
+                          child: ListenableBuilder(
+                            listenable: _popover,
+                            builder: (context, _) => buildPopoverLayer(),
+                          ),
+                        ),
+                      ),
+                    ),
 
                     // ── 提示气泡 ──
                     if (_tip != null)
@@ -11321,8 +11402,7 @@ class _PlayerPageState extends State<PlayerPage>
                    *    那正是本条要修的「被夹在小盒子里」的同一种病。
                    */
                       overlayLocation: OverlayChildLocation.rootOverlay,
-                      overlayChildBuilder: (ctx) =>
-                          _buildSettingsPortalChild(ctx),
+                      overlayChildBuilder: (ctx) => _buildSettingsPortalChild(ctx),
                       child: const SizedBox.shrink(),
                     ),
                     // ── 弹幕设置面板（「弹幕」齿轮 → task-13 ⑦）──
@@ -12716,6 +12796,21 @@ bool debugPlayerControlsVisibleForProbe() =>
 /// ★ 缺陷 17 探针用：当前错误态（非 null 时底栏整条被摘掉）
 String? debugPlayerErrorForProbe() => _livePlayerState?._error;
 
+/// 打开选集面板（见 State 里的 `debugOpenEpisodesForProbe`）
+bool debugPlayerOpenEpisodesForProbe() =>
+    _livePlayerState?.debugOpenEpisodesForProbe() ?? false;
+
+/// 展开某个 popover（见 State 里的 `debugOpenPopoverForProbe`）
+bool debugPlayerOpenPopoverForProbe(String id) =>
+    _livePlayerState?.debugOpenPopoverForProbe(id) ?? false;
+
+/// 无头截图用：把底栏从「起播失败」那层里**救出来**（见 State 里的同名方法）
+///
+/// ⚠️ 只改 UI 状态，不碰播放器、不发请求 —— 仅供截图与几何判据使用。
+bool debugPlayerForceBarsForShot() =>
+    _livePlayerState?.debugForceBarsForShot() ?? false;
+
+
 /// ★ task-12 ④ 探针用：当前**起播候选**的 url 列表（只读）。
 ///
 /// # 为什么需要它
@@ -14019,6 +14114,12 @@ const double _kBottomBarRowWidth = 830;
 // ignore: unused_element
 const double _kBottomBarMiniWidth = 528;
 
+/// ★ 底栏那一条的高度 —— popover 层用它把面板顶到条的上沿
+///
+/// ⚠️ 与 `PlayerBottomBar` 内部那个 `_barHeight` 是**同一份数字**：
+///   两个数必须一致，否则面板会盖住条或悬空。
+const double _kPlayerBottomBarHeight = 96;
+
 class _BottomBar extends StatelessWidget {
   const _BottomBar({
     required this.playing,
@@ -14106,7 +14207,11 @@ class _BottomBar extends StatelessWidget {
     this.trackGroups = const <String, List<PopoverOption<String>>>{},
     this.onPickTrack,
     this.moreGroups = const <MoreMenuGroup>[],
+    this.onBuilt,
   });
+
+  /// 页面那层 popover 要用同一个底栏实例（见 `buildPopoverLayer` 的说明）
+  final void Function(PlayerBottomBar bar)? onBuilt;
 
   final bool playing;
 
@@ -14279,7 +14384,7 @@ class _BottomBar extends StatelessWidget {
   /// （`t73` / `t57` 等测试按它定位）都**逐字不变**。
   @override
   Widget build(BuildContext context) {
-    return PlayerBottomBar(
+    final bar = PlayerBottomBar(
       controller: popover,
       playing: playing,
       positionListenable: positionNotifier,
@@ -14321,6 +14426,8 @@ class _BottomBar extends StatelessWidget {
       buffered: _playerBufferedRange(buffered),
       bufferBarKey: bufferBarKey,
     );
+    onBuilt?.call(bar);
+    return bar;
   }
 }
 

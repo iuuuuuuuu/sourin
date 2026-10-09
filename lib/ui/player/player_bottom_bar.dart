@@ -274,6 +274,7 @@ class PlayerBottomBar extends StatelessWidget {
       ),
       _BarAction(
         icon: Icons.more_horiz,
+        label: '更多',
         tooltip: '更多',
         popoverId: PlayerPopoverIds.more,
         active: controller.isOpen(PlayerPopoverIds.more),
@@ -313,64 +314,45 @@ class PlayerBottomBar extends StatelessWidget {
            *   这里用 `clipBehavior: Clip.none` + `Stack`，面板可以自由地
            *   长到条的上方去。
            */
-          child: Stack(
-            clipBehavior: Clip.none,
-            children: [
-              _body(context),
-              Positioned(
-                left: 0,
-                right: 0,
-                bottom: _barHeight,
-                child: _popoverLayer(context),
-              ),
-            ],
-          ),
+          child: _body(context),
         ),
       ),
     );
   }
 
-  /// 底栏自身的高度（含进度行 + 按钮行），用来把面板顶到条的上沿
+  /// ★★ popover 层 —— **由播放页那个 Stack 承载**，不是底栏自己
   ///
-  /// ★ 为什么要**算**而不是量：面板若去读某个按钮的 `GlobalKey` 再定位，
-  ///   那一次 `build` 里 key 的 RenderObject 可能还没布局（第一帧），
-  ///   会出现「面板先落在屏幕中间，下一帧才跳上去」。
-  ///   这里用常量高度，位置**每一帧都对**。
-  static const double _barHeight = 96;
-
-  /// 当前展开的那一个面板（没有就 SizedBox）
-  Widget _popoverLayer(BuildContext context) {
-    return ListenableBuilder(
-      listenable: controller,
-      builder: (context, _) {
-        final id = controller.openId;
-        final body = switch (id) {
-          PlayerPopoverIds.rate => _panelSurface(
-            rateOptions().map(_rateRow).toList(),
-          ),
-          PlayerPopoverIds.quality when qualityOptions.isNotEmpty =>
-            _panelSurface(qualityOptions.map(_row).toList()),
-          PlayerPopoverIds.tracks when trackGroups.isNotEmpty => _panelSurface([
-            for (final entry in trackGroups.entries) ...[
-              PopoverGroupLabel(entry.key),
-              for (final o in entry.value) _row(o),
-            ],
-          ], width: 220),
-          PlayerPopoverIds.danmaku => _danmakuPanel(),
-          PlayerPopoverIds.more => _morePanel(),
-          _ => const SizedBox.shrink(),
-        };
-        return Align(
-          alignment: Alignment.bottomRight,
-          child: Padding(
-            padding: const EdgeInsets.only(right: Sp.x2),
-            child: PopoverKeepAlive(
-              controller: controller,
-              child: PopoverMotion(visible: id != null, child: body),
-            ),
-          ),
-        );
-      },
+  /// # 为什么必须提到那一层（实测出来的，不是猜的）
+  /// ```text
+  /// 底栏在播放页里是 `Positioned(bottom:0)`、高约 106px 的一个盒子。
+  /// 面板若作为它的子件（第一版就是这么写的），它能长到的上界就被那 106px
+  /// 卡死 ⇒ 无头截图里 popover 与「没展开」的截图 **md5 完全相同**，
+  /// 一像素都没画出来（widget 树里 `PlayerMoreMenu` 是有的，就是画不出来）。
+  /// ⇒ 提到同一个 Stack 里当**兄弟**：面板从底栏上沿往上长，
+  ///   而那个 Stack 是整屏（`SizedBox.expand`）⇒ 不会被任何祖先裁掉。
+  /// ```
+  Widget buildPopoverLayer() {
+    final id = controller.openId;
+    final body = switch (id) {
+      PlayerPopoverIds.rate => _panelSurface(
+        rateOptions().map(_rateRow).toList(),
+      ),
+      PlayerPopoverIds.quality when qualityOptions.isNotEmpty => _panelSurface(
+        qualityOptions.map(_row).toList(),
+      ),
+      PlayerPopoverIds.tracks when trackGroups.isNotEmpty => _panelSurface([
+        for (final entry in trackGroups.entries) ...[
+          PopoverGroupLabel(entry.key),
+          for (final o in entry.value) _row(o),
+        ],
+      ], width: 220),
+      PlayerPopoverIds.danmaku => _danmakuPanel(),
+      PlayerPopoverIds.more => _morePanel(),
+      _ => const SizedBox.shrink(),
+    };
+    return PopoverKeepAlive(
+      controller: controller,
+      child: PopoverMotion(visible: id != null, child: body),
     );
   }
 
@@ -426,6 +408,14 @@ class PlayerBottomBar extends StatelessWidget {
 
   Widget _morePanel() =>
       PlayerMoreMenu(groups: more.groups, onDismiss: controller.close);
+
+  /// 底栏自身的高度（含进度行 + 按钮行），用来把面板顶到条的上沿
+  ///
+  /// ★ 为什么要**算**而不是量：面板若去读某个按钮的 `GlobalKey` 再定位，
+  ///   那一次 `build` 里 key 的 RenderObject 可能还没布局（第一帧），
+  ///   会出现「面板先落在屏幕中间，下一帧才跳上去」。
+  ///   这里用常量高度，位置**每一帧都对**。
+  static const double _barHeight = 96;
 
   Widget _body(BuildContext context) {
     final bottomInset = MediaQuery.paddingOf(context).bottom;
