@@ -551,6 +551,110 @@ class EmptyState extends StatelessWidget {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+//  对话框外壳
+// ═══════════════════════════════════════════════════════════════════════
+
+/// 设置区对话框的**统一外壳**
+///
+/// # 为什么要有这个零件（2026-10-10）
+///
+/// 插件编辑、插件导入、声明式源编辑、B 站导入……每个都是各自写的
+/// `AlertDialog`，但标题字号、标题与正文的间距、正文最大宽度、
+/// 底部按钮的排布各不相同：
+/// ```text
+/// 插件编辑    标题 20px，正文宽 560
+/// 插件导入    标题 20px，正文宽 560
+/// 其它         标题 18px，正文宽 480
+/// ```
+/// ⇒ 用户在设置区点开三个不同对话框，会以为进了三个不同的功能。
+///
+/// ⇒ 这里把「标题 / 副标题 / 正文宽 / 底部按钮」四件事定成一处，
+///    调用方只提供内容。
+///
+/// ⚠️ 用 `AlertDialog` 而不是 `Dialog`：后者要自己实现标题栏、
+///    分隔线与按钮区，而且 `MediaQuery` 边距得全手写 ——
+///    `AlertDialog` 已经在做这些，且是 Material 的标准形态
+///    （TV 方向键、Esc 关闭、无障碍语义都是它自带的）。
+class SettingsDialog extends StatelessWidget {
+  const SettingsDialog({
+    super.key,
+    required this.title,
+    required this.child,
+    this.subtitle,
+    this.actions = const [],
+    this.maxContentWidth = 560,
+  });
+
+  final String title;
+
+  /// 标题下的一行说明（一句话说清"这个对话框在干嘛"）
+  final String? subtitle;
+
+  /// 正文
+  final Widget child;
+
+  /// 底部按钮（从右往左排：确认 → 取消 → 其它）
+  final List<Widget> actions;
+
+  /// 正文的**最大**宽度（不是固定宽 —— 窄屏下要能收缩）
+  final double maxContentWidth;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return AlertDialog(
+      // ★ 与本页其它标题同号（`SettingsSubPage` 的 28px 大标题用 `xl`，
+      //   对话框比页面矮一档，用 `lg` = 20px）
+      title: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            title,
+            style: TextStyle(
+              fontSize: FontSizes.lg,
+              fontWeight: FontWeight.w600,
+              color: colors.onSurface,
+            ),
+          ),
+          if (subtitle != null) ...[
+            const SizedBox(height: Sp.x1),
+            Text(
+              subtitle!,
+              style: TextStyle(
+                fontSize: FontSizes.cap,
+                color: colors.onSurfaceVariant,
+              ),
+            ),
+          ],
+        ],
+      ),
+      /*
+       * ★ 内容宽：上限 maxContentWidth，窄屏由 `ConstrainedBox` 收缩
+       *
+       * ⚠️ 两个坑都踩过：
+       * ```text
+       * ① 不能写成固定 `SizedBox(width: 560)`：手机上可用宽可能只有
+       *    ~330，硬写 560 会溢出（旧代码就是这么写的）。
+       * ② 但也不能只给 `ConstrainedBox` ��上限**而不给下限**：
+       *    `AlertDialog` 给 content 的是**松约束**，`ConstrainedBox`
+       *    在松约束下不会自己撑开（它只限制上限）⇒ 正文宽度塌成 0。
+       *    ⇒ 还要 `width: double.infinity` 让它吃满可用宽（上限仍受约束）。
+       * ```
+       */
+      content: ConstrainedBox(
+        constraints: BoxConstraints(maxWidth: maxContentWidth),
+        child: SizedBox(width: double.infinity, child: child),
+      ),
+      // 按钮统一右对齐（Material 默认就是 end，但显式写出来，
+      // 免得将来有人改成 `OverflowBar` 时两处不一致）
+      actionsAlignment: MainAxisAlignment.end,
+      actions: actions,
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 //  信息行 / 入口行
 // ═══════════════════════════════════════════════════════════════════════
 
