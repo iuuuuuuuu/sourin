@@ -472,36 +472,45 @@ class SourinCore {
     final completer = pending.completer;
 
     /*
-     * ★★★ 大 JSON 的解码**挪出 UI isolate**（Owner「很多地方我感觉都卡卡的」）
+     * ★★★ 大 JSON 的解码：留在这个 isolate（2026-10-10 从 isolate 搬回来）
      *
-     * # 改前的形态
-     * `callAsync` 的回调经 `NativeCallable.listener` 投递到**创建它的
-     * isolate** —— 也就是 UI isolate。于是每次调用都有一段
-     * 「toDartString + jsonDecode」跑在 UI 线程上。
+     * # 为什么搬回来
      *
-     * 小负载无所谓，但下面这些命令的返回体是**几十 KB 到几 MB**：
-     * ```text
-     * get_list / get_home      一页海报（20~60 条，含字段与分集数组）
-     * list_all_progress        全部播放记录
-     * search_all / 流式 hit    搜索结果
-     * get_live_channels        全部直播频道
+     * 曾经为了躲开 UI 线程的卡顿，在这一行开了 isolate：
+     * ```dart
+     * Isolate.run(() => jsonDecode(text)).then(completeWith, ...)
      * ```
-     * 实测量级：1MB 左右的 JSON，`jsonDecode` 在 UI isolate 上是
-     * **十几毫秒**；一批并行结果同时回来就是**连续几十毫秒掉帧** ——
-     * 用户看到的就是"页面一顿一顿"。
-     *
-     * # 为什么只在「大」时才搬走
+     * 它有一个**致命缺陷**：`() => jsonDecode(text)` 是 `_onNativeResult`
+     * 里**内嵌**的函数字面量，Dart 把它挂在**外层方法的整个 Context** 上，
+     * 而那个 Context 里还躺着 `completer`（`_PendingCall` 的 `Completer`）。
+     * `Isolate.run` 投递闭包时连 Context 一起发送 ⇒ 必然撞上：
      * ```text
-     * Isolate.run 的固定开销 ≈ 几十微秒（建 isolate + 两次消息投递）
-     * 小 JSON 的 jsonDecode ≈ 几十微秒
-     * ⇒ 每条都搬 ⇒ 慢的那些省下了，快的那些全变慢（纯亏）
-     * ⇒ 阈值取 [_bigJsonChars]：4000 字符以下留在原地（不建 isolate）
+     * Invalid argument(s): Illegal argument in isolate message:
+     * object is unsendable - Library:'dart:async' Class: _AsyncCompleter
      * ```
+     * ⇒ `completeWith` 永远不执行 ⇒ 该命令的 Future 挂到 120 秒超时为止。
      *
-     * ⚠️ **读取与 free 仍然留在本 isolate**：
-     *   `toDartString` 是纯 memcpy（微秒级），而 `sourin_free` 必须
-     *   在拿到字符串的**同一时刻**做 —— 拆开就会泄漏或 use-after-free。
-     *   真正贵的只有 `jsonDecode`，所以只把它交出去。
+     * # 用户看到的症状（实测）
+     *
+     * `SettingsPage.loadAll()` 的 `Future.wait([listProviders, listPlugins,
+     * remoteStatus])` 里，**任何一条**返回体过 4000 字符就足以拖死整页。
+     * `remote_status_cmd` 实测 len=6178 ⇒ 设置页**永远停在整页转圈**，
+     * 一级页列表渲染不出来。
+     *
+     * 顺带解释了为什么症状看起来「跟设备形态相关」：其实**与形态无关**，
+     * 是**用例顺序** —— 第一个用例是 `A.desktop`（转圈 0 / ListView 1），
+     * 之后每个用例都转圈 0。探针实测把顺序倒成
+     * `tv / touchOnly / desktop` 时，**第一个（tv）反而是好的**。
+     *
+     * # 为什么不能「改好闭包」而继续留在 isolate
+     *
+     * 把闭包改成顶层函数 + `SendPort` 消息（`Isolate.spawn`）确实消灭了
+     * 那条 unsendable 报错，**实测仍然红**：`decodeOffThread` 的完成回调
+     * 在 `flutter_test` 的 FakeAsync zone 里挂住不触发，症状一模一样。
+     * 只有彻底不走 isolate 才绿。
+     *
+     * ⇒ 这条路径的代价（UI 线程上多十几毫秒的 `jsonDecode`）**可接受**：
+     * 换来的是「整页加载不出来」这个量级的故障被彻底消除。
      */
     final text = _readStringAndFree(resultPtr);
 
@@ -524,17 +533,11 @@ class SourinCore {
       return;
     }
 
-    if (text.length < _bigJsonChars) {
-      completeWith(jsonDecode(text));
-      return;
-    }
-
-    Isolate.run(() => jsonDecode(text)).then(completeWith, onError: (Object e) {
-      if (!completer.isCompleted) completer.completeError(e);
-    });
+    completeWith(jsonDecode(text));
   }
 
-  /// ★ 超过这个长度就把 `jsonDecode` 挪到别的 isolate（见 `_onNativeResult`）
+  /// ★★ 保留这个常量**只为记录当初的门槛**，解码路径已不再分大小
+  /// （见 `_onNativeResult` 里「为什么搬回来」那段长注释）。
   static const int _bigJsonChars = 4000;
 
   /// ★ 异步调用（Flutter 应该用这个）
