@@ -24,6 +24,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:sourin_spike/core/models.dart';
 import 'package:sourin_spike/ui/app_theme.dart';
+import 'package:sourin_spike/ui/theme/theme_pack.dart';
 import 'package:sourin_spike/ui/widgets/sync_panel.dart';
 
 import 'support/ui_shot.dart';
@@ -203,6 +204,37 @@ void main() {
     expect(tester.takeException(), isNull);
     final f = await saveViewShot(tester, 'sync_panel_tv_unconfigured');
     expect(f.existsSync(), isTrue);
+  });
+
+  testWidgets('⑤b ★ 每一套内置配色下都渲染得出来（多主题是 Owner 第 4 条）',
+      (tester) async {
+    // 同步面板是二级页，用户会在**任何一套**配色下打开它
+    //（主题页能换 6 套内置 + 外部 JSON 包）。
+    // 判据只有两条：不出错、真的画出了东西（截图字节下限）。
+    for (final pack in ThemePackStore.builtins) {
+      await setShotViewport(tester, const Size(1440, 900));
+      await tester.pumpWidget(MaterialApp(
+        debugShowCheckedModeBanner: false,
+        theme: AppTheme.themeForPack(pack.brightness, pack),
+        home: const Scaffold(
+          body: Padding(
+            padding: EdgeInsets.all(24),
+            child: SingleChildScrollView(child: SyncPanel()),
+          ),
+        ),
+      ));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 50));
+
+      expect(tester.takeException(), isNull, reason: '配色「${pack.name}」下不得有异常');
+      expect(find.byType(ErrorWidget), findsNothing, reason: '配色「${pack.name}」下不能是 ErrorWidget');
+      expect(find.text('云盘同步'), findsOneWidget, reason: '配色「${pack.name}」下块头必须渲染出来');
+
+      final f = await saveViewShot(tester, 'sync_panel_pack_${pack.id}');
+      expect(f.existsSync(), isTrue);
+      expect(f.lengthSync(), greaterThan(4000),
+          reason: '配色「${pack.name}」的截图只有 ${f.lengthSync()} 字节，疑似空图');
+    }
   });
 
   testWidgets('⑥ ★ 明暗两套主题下都渲染得出来（面板是二级页，两种都得能用）',
