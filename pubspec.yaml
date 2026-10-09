@@ -3,9 +3,9 @@ name: sourin_spike
 #    的一个 spike（见 `lib/main.dart` 的文件头）。spike 成功了，项目就在它上面长成了
 #    完整客户端。改包名要动 100+ 处 import，收益为零，所以保留。
 description: "源影 —— 跨端视频聚合客户端（Flutter + Rust）"
-repository: https://github.com/iuuuuuuuu/sourin
-homepage: https://github.com/iuuuuuuuu/sourin
-issue_tracker: https://github.com/iuuuuuuuu/sourin/issues
+repository: https://github.com/sourin-app/sourin
+homepage: https://github.com/sourin-app/sourin
+issue_tracker: https://github.com/sourin-app/sourin/issues
 
 # ★ `publish_to: none` —— 这不是一个 pub 包，是**应用**。
 #   留着它防止误跑 `flutter pub publish`。
