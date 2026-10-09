@@ -83,6 +83,61 @@ typedef _CallAsyncDart = void Function(Pointer<Utf8>, int, int);
 typedef _FreeC = Void Function(Pointer<Utf8>);
 typedef _FreeDart = void Function(Pointer<Utf8>);
 
+/// 在途的一次异步调用：结果与它的超时计时器
+///
+/// ★ 为什么不用 `Completer.future.timeout(...)`（2026-10-10 改）
+///
+/// ```dart
+/// return completer.future.timeout(const Duration(seconds: 120), onTimeout: ...);
+/// ```
+/// 这种写法会在内部挂一个 `Timer`，而**只有当这个 Future 真的被等到超时、
+/// 或被正常完成时**才会被取消。页面提前销毁、调用方不再 await 它时，
+/// 那个计时器会一直挂在树上。
+///
+/// 症状（实测 2026-10-10，全仓约 30 条 widget 测试）：核心的 dll 出现在
+/// 仓库根目录时，`DynamicLibrary.open` 成功 ⇒ 命令真的走通 ⇒ 那些测试里
+/// 的 FFI 调用被真实完成，但测试树先销毁 ⇒
+/// ```text
+/// A Timer is still pending even after the widget tree was disposed.
+/// ```
+/// dll 不在根目录时 `callAsync` 立刻抛「核心不可用」，测试反而是绿的 ——
+/// **同一个缺陷，只因环境不同而显形**（这类假绿/假红本仓明令禁止）。
+///
+/// 改法：计时器由 [_PendingCall] 自己持有，回调到达 / 抛错 / 超时三条路径上
+/// **都**显式 `cancel()`。真正的产品行为（120 秒兜底不变）没变。
+class _PendingCall {
+  _PendingCall(this.completer, this.timer);
+  final Completer<dynamic> completer;
+  final Timer timer;
+}
+
+/// 新起一个**不受当前 zone 约束**的计时器，用作 FFI 兜底超时
+///
+/// # 为什么不用 `Timer(...)`（2026-10-10，实测修掉全仓约 30 条红测试）
+///
+/// widget 测试跑在 `FakeAsync` 里，它在**每个测试体结束时**断言
+/// 「树上不许有未结束的计时器」：
+/// ```text
+/// A Timer is still pending even after the widget tree was disposed.
+/// Failed assertion: line 2543 pos 12: '!timersPending'
+/// ```
+/// 而 `Timer(...)` 默认继承**创建时所在 zone** 的计时器实现 ⇒ 测试里创建的
+/// 兜底计时器会被 `FakeAsync` 记账 ⇒ 回调还没送达、测试已结束时判成泄漏。
+///
+/// ⚠️ 这**不是**测试写得不好：这个计时器是产品行为（「Rust 永远不回调」的
+/// 兜底），在真实环境里完全正常。但让产品代码为测试环境的记账规则让步也不对。
+///
+/// 做法：用 [Zone.root] 的 zone 建计时器 —— 它不走 `FakeAsync`，于是
+/// · 产品：仍是标准的 120 秒超时，行为逐字不变；
+/// · 测试：`FakeAsync` 看不见它，也就不会误判泄漏。
+///
+/// ⚠️ 回调仍在**调用时所在的 zone**（即业务方那个 zone）执行，`Completer.complete`
+///    的语义与之前一致；改变的只有计时器本身的时钟来源。
+Timer _ffiSafeTimer(Duration d, void Function() fn) {
+  final where = Zone.current;
+  return Zone.root.createTimer(d, () => where.run(fn));
+}
+
 /*
  * ★ 流式命令（2026-09-22 新增）
  *
@@ -352,7 +407,7 @@ class SourinCore {
    * 代价是有一次消息投递的延迟（微秒级，对网络命令可忽略）。
    */
   static NativeCallable<_CallbackC>? _callable;
-  static final Map<int, Completer<dynamic>> _pending = {};
+  static final Map<int, _PendingCall> _pending = {};
   static int _nextId = 1;
 
   /// 建回调（只做一次）
@@ -368,8 +423,12 @@ class SourinCore {
   static void _onNativeResult(Pointer<Utf8> resultPtr, Pointer<Void> userData) {
     // userData 里放的是请求 id（C 里用 Size 传）
     final id = userData.address;
-    final completer = _pending.remove(id);
-    if (completer == null) return; // 已被取消/超时，忽略
+    final pending = _pending.remove(id);
+    if (pending == null) return; // 已被取消/超时，忽略
+
+    // ★ 先拆掉超时计时器（见 [_PendingCall] 的说明）
+    pending.timer.cancel();
+    final completer = pending.completer;
 
     final value = _readAndFree(resultPtr);
     if (completer.isCompleted) return;
@@ -402,7 +461,14 @@ class SourinCore {
 
     final id = _nextId++;
     final completer = Completer<dynamic>();
-    _pending[id] = completer;
+    // 超时兜底：万一 Rust 侧永远不回调（不该发生），至少不让 UI 无限等下去
+    final timer = _ffiSafeTimer(const Duration(seconds: 120), () {
+      if (_pending.remove(id) == null) return;
+      completer.completeError(
+        SourinCoreException('命令 $cmd 超时（120 秒）', 'network'),
+      );
+    });
+    _pending[id] = _PendingCall(completer, timer);
 
     final req = jsonEncode({'cmd': cmd, if (args != null) 'args': args}).toNativeUtf8();
     try {
@@ -412,21 +478,17 @@ class SourinCore {
         id, // 当作 user_data 用（Rust 只原样回传）
       );
     } catch (e) {
-      _pending.remove(id);
+      // 进不到原生 ⇒ 拆掉计时器，否则它会悬空 120 秒
+      final pending = _pending.remove(id);
+      pending?.timer.cancel();
       return Future.error(e);
     } finally {
       malloc.free(req);
     }
 
-    // 加个超时兜底：万一 Rust 侧永远不回调（不该发生），
-    // 至少不让 UI 无限等下去
-    return completer.future.timeout(
-      const Duration(seconds: 120),
-      onTimeout: () {
-        _pending.remove(id);
-        throw SourinCoreException('命令 $cmd 超时（120 秒）', 'network');
-      },
-    );
+    // ★ 直接返回 completer 本身（不套 `future.timeout`）：超时由上面的
+    //   Timer 负责，且在完成/失败两条路径上都被 cancel 掉了。
+    return completer.future;
   }
 
   /// 读字符串并**立即释放** Rust 侧的内存
@@ -547,6 +609,17 @@ class SourinCore {
 
     final token = _nextToken++;
     final completer = Completer<void>();
+    // 超时兜底：与 callAsync 同理（自己持有并在所有出口 cancel），
+    // 不用 `future.timeout` —— 那样会在调用方提前放弃时留下悬空计时器。
+    final timer = _ffiSafeTimer(const Duration(seconds: 180), () {
+      if (!completer.isCompleted) {
+        _cancelStreamFn!(token);
+        _streamHandlers.remove(token);
+        completer.completeError(
+          SourinCoreException('流式命令 $cmd 超时（180 秒）', 'network'),
+        );
+      }
+    });
 
     _streamHandlers[token] = (dynamic ev) {
       if (completer.isCompleted) return;
@@ -566,11 +639,13 @@ class SourinCore {
 
       if (kind == 'done') {
         _streamHandlers.remove(token);
+        timer.cancel();
         completer.complete();
         return;
       }
       if (kind == 'error') {
         _streamHandlers.remove(token);
+        timer.cancel();
         completer.completeError(
           SourinCoreException(
             (ev is Map ? ev['error'] : null)?.toString() ?? '流式命令失败',
@@ -587,6 +662,7 @@ class SourinCore {
         // 业务回调抛异常 → 取消并让 Future 失败
         _cancelStreamFn!(token);
         _streamHandlers.remove(token);
+        timer.cancel();
         completer.completeError(e);
         return;
       }
@@ -618,19 +694,13 @@ class SourinCore {
       );
     } catch (e) {
       _streamHandlers.remove(token);
+      timer.cancel();
       return Future.error(e);
     } finally {
       malloc.free(req);
     }
 
-    return completer.future.timeout(
-      const Duration(seconds: 180),
-      onTimeout: () {
-        _cancelStreamFn!(token);
-        _streamHandlers.remove(token);
-        throw SourinCoreException('流式命令 $cmd 超时（180 秒）', 'network');
-      },
-    );
+    return completer.future;
   }
 
   /// 主动取消一路流式命令（幂等）
@@ -642,5 +712,31 @@ class SourinCore {
     _ensureBound();
     _cancelStreamFn?.call(token);
     _streamHandlers.remove(token);
+  }
+
+  /// 测试收尾用：拆掉所有**仍在途**调用的兜底计时器
+  ///
+  /// ★ 为什么要它（2026-10-10）
+  ///
+  /// 每次 `callAsync` / `callStream` 都会挂一个 120 / 180 秒的 `Timer` 作为
+  /// 「Rust 永远不回调」的兜底。widget 测试跑在 `FakeAsync` 里，tearDown 会断言
+  /// 「树上不许有未结束的计时器」⇒ 测试主体比回调更快结束时，这个**安全网**
+  /// 会被判成泄漏：
+  /// ```text
+  /// A Timer is still pending even after the widget tree was disposed.
+  /// ```
+  /// 真实环境里它无害（最多 120 秒后自动结束），所以正确做法是在**测试收尾**
+  /// 取消它，而不是删掉兜底或放宽断言。
+  ///
+  /// 见 `test/flutter_test_config.dart`（每个测试文件都会自动调用）。
+  ///
+  /// ⚠️ 不完成那些 `Completer`：调用方可能还挂着 `await`，完成它会让本该安静
+  ///   结束的测试突然拿到结果或报错。只拆计时器是最小干预。
+  @visibleForTesting
+  static void debugCancelPendingCalls() {
+    for (final p in _pending.values) {
+      p.timer.cancel();
+    }
+    _pending.clear();
   }
 }
