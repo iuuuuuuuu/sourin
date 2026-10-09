@@ -9,11 +9,11 @@
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 
 import 'package:sourin_spike/core/models.dart' as models;
 import 'package:sourin_spike/shell.dart';
+import 'package:sourin_spike/ui/app_theme.dart';
 import 'package:sourin_spike/ui/browse_page.dart';
 import 'package:sourin_spike/ui/follow_page.dart';
 import 'package:sourin_spike/ui/home_page.dart';
@@ -37,11 +37,9 @@ List<models.ProviderManifest> _manifests() => [
     ];
 
 Widget host(Widget child, Size size) {
-  final theme = FTheme.neutral.light.desktop;
   return MaterialApp(
     debugShowCheckedModeBanner: false,
-    theme: theme.toApproximateMaterialTheme(),
-    builder: (_, c) => FTheme(data: theme, child: c ?? const SizedBox()),
+    theme: AppTheme.themeFor(Brightness.light),
     home: MediaQuery(
       data: MediaQueryData(size: size),
       child: Directionality(

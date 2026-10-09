@@ -4489,7 +4489,7 @@ class _ShellPageState extends State<ShellPage>
   ///
   /// ⚠️ 底栏的液态玻璃**观感必须逐字不变**（Owner 唯一满意的部分）：
   ///   本改动只改**什么时候重建**，不动 `GlassContainer` 的任何一个参数。
-  Widget _bottomBar(FColors colors) {
+  Widget _bottomBar(AppPalette colors) {
     return ValueListenableBuilder<_BottomBarState>(
       valueListenable: _bottomBarState,
       builder: (context, s, _) => _BottomBar(

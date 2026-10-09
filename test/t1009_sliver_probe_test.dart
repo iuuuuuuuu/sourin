@@ -21,17 +21,14 @@
 
 import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 
 import 'package:sourin_spike/shell.dart';
+import 'package:sourin_spike/ui/app_theme.dart';
 
 Widget _appWith({required Widget home}) {
-  final theme = FTheme.neutral.dark.desktop;
   return MaterialApp(
-    theme: theme.toApproximateMaterialTheme(),
-    builder: (context, child) =>
-        FTheme(data: theme, child: child ?? const SizedBox()),
+    theme: AppTheme.themeFor(Brightness.dark),
     home: home,
   );
 }
@@ -114,5 +111,21 @@ void main() {
         }
       }
     }
+
+    /*
+     * ★ 收尾必须把设置页排的 3s 计时器冲掉
+     *
+     * 上面把**每个 tab 都构起来**了，于是 `SettingsPage.loadAll` 里的
+     * `_flash()`（`settings_page.dart:585`）排了一个 3 秒的定时器。
+     * 不冲掉的话，收尾断言会报
+     * `A Timer is still pending even after the widget tree was disposed`
+     * —— 那是**探针自己**的收尾没做干净，不是产品缺陷。
+     *
+     * ⚠️ 必须写在**用例体内**而不是 `addTearDown`：那条「Timer is still
+     *   pending」不变量是在用例体**返回之后**、teardown **之前**校验的
+     *   ⇒ 放 teardown 里根本来不及。
+     */
+    await t.pump(const Duration(seconds: 5));
+    _claim(t);
   });
 }
