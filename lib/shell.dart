@@ -4717,74 +4717,44 @@ class _ShellPageState extends State<ShellPage>
   //  导航回调（发现页 → 其它页）
   // ═══════════════════════════════════════════════════════════════════
 
-  /// ★ task-3 ⑲ / ★★ task-12 ④：点「已缓存」页的一张卡片 ⇒ 进播放
+  /// ★ Owner 第 1009 批 13：点「已缓存」页的一张卡片 ⇒ 进**本地播放页**
   ///
-  /// # 为什么必须与 `onShelfPlay` 走**同一个** MediaPage（而不是直接开播放器）
+  /// # 为什么这里永远走本地（而不是「有缓存就走本地」）
+  /// ```text
+  /// Owner 原话：「现在哪个已缓存之后,应该**只在已缓存页面**进入那个缓存页面」
   ///
-  /// 与下面 `_openDetail` 那段讲的是同一件事：多集内容要选集、多源要换源，
-  /// 那些能力长在 MediaPage 内部。直接开 PlayerPage 会退回老毛病 ——
-  /// 永远只能看第一集。
+  /// 改前的判据是"目录里有没有旁文件"—— 那条规则的后果是
+  ///   **从任何别的地方进来都可能走成本地文件**。
+  /// 而本方法是**唯一**的本地播放入口：首页 / 追更 / 历史 / 搜索 / 浏览
+  ///   全部走 `_openDetail` ⇒ 正常在线路径，即使本地有缓存也**不变**（Owner 要求）。
+  /// ```
   ///
-  /// # ★★ task-12 ④：会话由 **CachePage 组织好**，这里只转发
-  ///
-  /// `buildLocalPlayRequest(work)` 在 **cache_page.dart** 里把会话（含
-  /// provider=local、规范化后的绝对路径）组织成 `CachedPlayRequest`；
+  /// # 会话由 **CachePage 组织**（`buildLocalPlayRequest`）
   /// 本方法只往 `MediaPage` 喂值，**不猜任何字段**。
-  ///
-  /// # ★★★ 两条路怎么分（lead 裁决）
-  /// ```text
-  /// 旁文件在（provider/id 齐） ⇒ **仍然走在线路径**（与 task-3 行为逐字相同）
-  ///   为什么：旁文件意味着这一集是**从某个站点下载的**，在线路径能拿到
-  ///   选集 / 换源 / 弹幕那些能力（Owner：「弹幕 历史等等功能也还是要有的」）。
-  ///   ⇒ 本地播放是**兜底**，不是替代。
-  ///
-  /// 旁文件不在（老下载 / 用户手拷进来的）⇒ **走本地播放**（localPath）
-  /// ```
-  ///
-  /// # 本地播放为什么能成立（链路，全部实测核过）
-  /// ```text
-  /// ① mpv 原生支持 `file://`；`player_page.dart:3263` 把 url 原样交给 mpv；
-  ///    `models.dart:822` 的 isPlayable 只判 `!drmProtected && url.isNotEmpty`
-  ///    ⇒ file:// 能过闸。
-  /// ② `player_page.dart:2921 _load()` 是唯一生产起播入口，且**无条件**走
-  ///    `SourinApi.resolveStream` → Rust `registry.route`（playback.rs:161-164）
-  ///    ⇒ 本地路径没有 provider 可路由 ⇒ 必须**在它之前**短路。
-  /// ③ 落点（lead 裁决「路 A」）：PlayerPage / MediaPage 各加一个**可选**
-  ///    `localPath`，在 `initState` 里短路、**根本不调 _load()** ——
-  ///    这样 `_load()` 的字节一行不动（不碰 ui-dev 正在改的那个函数）。
-  ///    那两处由 **ui-dev** 落（它 owner 那两个文件）；本文件只负责喂值。
-  /// ```
   void _openCachedWork(CachedPlayRequest req) {
     final w = req.work;
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => MediaPage(
-          // ★ 有旁文件 ⇒ 用站点 provider/id（在线能力全都在），
-          //   没有 ⇒ 用 req 里组织好的 local 会话（provider='local'）。
-          provider: w.provider ?? req.provider,
-          id: w.mediaId ?? req.mediaId,
+          provider: req.provider,
+          id: req.mediaId,
           title: w.displayTitle,
-          cover: w.cover,
+          // ★ 封面优先用**本地那张**（断网也能看见，见 Owner 13）
+          cover: w.localCoverPath ?? w.cover,
           episodeId: req.episode.fileName,
+          localPath: req.episodeAbsolutePath,
           /*
-           * ★★ localPath 的取值规则（与上面那个三元一一对应，不能只改一半）：
-           * ```text
-           * 有旁文件 ⇒ **null** —— 让播放器走原来的网络解析（行为逐字不变）；
-           * 没旁文件 ⇒ 文件的**绝对路径** —— initState 短路成 file:// 起播。
-           * ```
-           * ⚠️ 必须显式写 `null` 而不是省掉：省掉的话，将来若有人把这两个三元
-           *    改歪（比如 provider 有旁文件、localPath 却给了路径），
-           *    症状是「有旁文件的在线剧被当成本地文件播」——很难查。
+           * ★ 作品信息（标题/简介/年份/地区/类型/角标）一并发过去 ——
+           *   它就是在线播放页**同一个**详情区组件，差别只在数据来自哪。
            */
-          localPath: w.provider != null && w.mediaId != null
-              ? null
-              : req.episodeAbsolutePath,
+          localMeta: w,
           isTv: Device.isTv,
           isTouchOnly: Device.isTouchOnly,
         ),
       ),
     );
   }
+
 
   /// 打开**合并页**（task-58：上播放器 + 下详情）
   ///

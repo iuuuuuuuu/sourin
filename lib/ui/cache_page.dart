@@ -95,9 +95,9 @@ import '../core/sourin_api.dart';
 //   绝不在这里写第二份归一化/相似度（两份必然漂移，见那个文件头的说明）。
 import '../core/title_match.dart';
 import 'tokens.dart';
+import 'widgets/motion_prefs.dart';
 import 'widgets/overlay_motion.dart' show showAppDialog;
 import 'widgets/poster_card.dart';
-import 'widgets/press_feedback.dart';
 
 /// 旁文件名（ _ 开头 ⇒ 扫盘时会跳过它，不会被当成一集）
 ///
@@ -162,6 +162,12 @@ class CachedWork {
     this.mediaId,
     this.cover,
     this.title,
+    this.description,
+    this.year,
+    this.area,
+    this.kind,
+    this.badges = const <String>[],
+    this.localCoverPath,
   });
 
   /// 真实目录名（safeName(剧名)，不可逆 ⇒ 就显示它）
@@ -174,6 +180,45 @@ class CachedWork {
   final String? mediaId;
   final String? cover;
   final String? title;
+
+  // ══════════════════════════════════════════════════════════════════
+  //  ★★★ Owner 第 1009 批 13：随下载缓存下来的**作品元数据**
+  // ══════════════════════════════════════════════════════════════════
+  //
+  // # 为什么本地播放页需要它们
+  // ```text
+  // Owner：「封面介绍啥的 在线播放器有的,本地播放器也要有」
+  // 而简介/年份/类型/角标**只有详情接口能给**，离线时核心也路由不到
+  //   （本地会话的 provider 是 'local'）⇒ 只能靠下载那一刻缓存下来的。
+  // ⚠️ 全部可空：老下载 / 手拷进来的目录**没有**旁文件 ⇒ 本地页降级显示
+  //    （有旁文件的老目录也可能是旧格式，只写了前四个字段）。
+  // ```
+  final String? description;
+  final String? year;
+  final String? area;
+  final String? kind;
+
+  /// 后端拼好的角标（「连载中」「9.2 分」…）
+  final List<String> badges;
+
+  /// **本地封面文件**的绝对路径（旁文件记了文件名 + 文件真在盘上时才有）
+  ///
+  /// ★ 与 [cover] 的分工：
+  /// ```text
+  /// cover         = 网络 URL（联网时用它，或在 coverFile 缺失时兜底）
+  /// localCoverPath= 磁盘上的图片文件（**离线也能显示**）
+  /// ```
+  /// ⇒ 本地页优先 [localCoverPath]；「已缓存」页卡片仍是网络图
+  ///   （列表里没法为一堆卡片各读一次文件，而它在联网时显示更好）。
+  final String? localCoverPath;
+
+  /// 有没有任何可显示的元信息（本地页据此决定要不要画"简介"那一段）
+  bool get hasMeta =>
+      (description ?? '').trim().isNotEmpty ||
+      (year ?? '').trim().isNotEmpty ||
+      (area ?? '').trim().isNotEmpty ||
+      (kind ?? '').trim().isNotEmpty ||
+      badges.isNotEmpty;
 
   /// 卡片标题：旁文件里的剧名优先，否则用目录名
   String get displayTitle {
@@ -477,6 +522,46 @@ Future<CachedWork> _scanWork(Directory dir) async {
   var mediaId = meta?['id'] as String?;
   var cover = meta?['cover'] as String?;
   var title = meta?['title'] as String?;
+  /*
+   * ★★★ Owner 第 1009 批 13：读出随下载缓存下来的元数据与**本地封面文件**
+   * ```text
+   * ⚠️ 全部容错：一个字段类型不对（老文件 / 被人手改过）都只丢那一个字段，
+   *    绝不让整部作品退化成"没信息" —— 尤其 jsonDecode 已经在 _readSidecar
+   *    里 try/catch 过了，这里再抛一次就等于把整个缓存页搞崩。
+   * ```
+   */
+  String? pickStr(String key) {
+    final v = meta?[key];
+    if (v is! String) return null;
+    final t = v.trim();
+    return t.isEmpty ? null : t;
+  }
+
+  final description = pickStr('description');
+  final year = pickStr('year');
+  final area = pickStr('area');
+  final kind = pickStr('kind');
+  final badges = <String>[
+    if (meta?['badges'] is List)
+      for (final b in meta!['badges'] as List)
+        if (b is String && b.trim().isNotEmpty) b.trim(),
+  ];
+
+  /*
+   * ★ 本地封面文件：旁文件里记的是**文件名**（不是路径）——
+   *   绝对路径不写进文件，换个盘符/把目录挪走之后旧值就会指向别处。
+   * ⇒ 这里现拼，并用 `File(...).parent.path` 再确认它确实在**本目录**里。
+   */
+  String? localCoverPath;
+  final coverFile = pickStr(DownloadQueue.kSidecarCoverFileKey);
+  if (coverFile != null) {
+    final f = File(
+        '${dir.path}${Platform.pathSeparator}$coverFile');
+    if (await f.exists() && f.parent.absolute.path == dir.absolute.path) {
+      localCoverPath = f.path;
+    }
+  }
+
   if (cover == null || cover.trim().isEmpty) {
     final hit = await resolveCacheMetaByDirName(dirName);
     if (hit != null) {
@@ -494,6 +579,12 @@ Future<CachedWork> _scanWork(Directory dir) async {
     mediaId: mediaId,
     cover: cover,
     title: title,
+    description: description,
+    year: year,
+    area: area,
+    kind: kind,
+    badges: badges,
+    localCoverPath: localCoverPath,
   );
 }
 
@@ -709,9 +800,98 @@ CachedPlayRequest? buildLocalPlayRequest(
   );
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+//  ★★★ Owner 第 1009 批 13：本地缓存的**删文件** —— 唯一的公共实现
+// ═══════════════════════════════════════════════════════════════════════
+//
+// # 为什么必须有**路径穿越**防护（lead 明令）
+// ```text
+// 删缓存是**不可逆**的破坏性操作，而文件名来自扫盘、进而可能来自
+// 旁文件/用户手拷/恶意构造的目录名。
+// 而"文件名字段"是完全不受控的输入：文件名里可以有 `..`，
+// 例如一个叫 `��01集 ....mp4` 的文件，`dirname(dirname(path))` 就跑出去了。
+// ⇒ 规则（一行判据，任何实现都照它）：
+//     **只允许删 <作品目录>/ 里的文件**，且文件名不得含路径分隔符或 '..'。
+// ```
+//
+// # 为什么写在 cache_page 而不是 detail_page
+// ```text
+// 「已缓存」页与「本地播放页」都要删 —— 两处各写一遍必然漂移（本仓反复踩过）。
+// 而扫盘数据（CachedWork / CachedEpisode）本来就出自本文件 ⇒ 它是天然的家。
+// ```
+class CachedDelete {
+  CachedDelete._();
+
+  /// 该文件名**能不能**在 [workDir] 下被删除（纯判据，可单测）
+  ///
+  /// ★ 返回 `File`（已 join 好）而不是 bool：调用方直接删，省一次自己拼路径
+  ///   —— 拼路径的地方越多，越容易在某处忘了判穿越。
+  @visibleForTesting
+  static File? resolveDeletable(String workDir, String fileName) {
+    // ① 文件名里不许出现任何分隔符（`..` 的前提是分隔符，这条直接掐死）
+    if (fileName.isEmpty) return null;
+    if (fileName.contains('/') || fileName.contains('\\')) return null;
+    if (fileName == '.' || fileName == '..') return null;
+    // ② Windows 上 `C:foo.mp4`（带盘符）也是穿越的一种
+    if (fileName.contains(':')) return null;
+
+    final dir = Directory(workDir).absolute.path;
+    final f = File('$dir${Platform.pathSeparator}$fileName').absolute;
+    // ③ 结构性的最后一道：解析后的父目录必须**逐字**等于作品目录
+    //    （absolute 已经消掉了 `..`，所以这一步能挡住任何拼出来的绕路）
+    if (f.parent.path != dir) return null;
+    return f;
+  }
+
+  /// 删一个文件（含同名的 `.part` / `.ts` 半成品），返回"是否真删掉了什么"
+  ///
+  /// ⚠️ 后缀清单与 `DownloadQueue.deleteTaskFiles` **保持一致** ——
+  ///   两处各写一份迟早漂移（一个删 .mp4、一个删 .ts）。
+  static Future<bool> deleteEpisodeFile(String workDir, String fileName) async {
+    final f = resolveDeletable(workDir, fileName);
+    if (f == null) {
+      AppLog.write('CACHE', '拒绝删除越界文件名：$fileName');
+      return false;
+    }
+    final base = fileName.endsWith('.part')
+        ? fileName.substring(0, fileName.length - 5)
+        : fileName;
+    var any = false;
+    for (final name in <String>[base, '$base.part', '$base.ts', '$base.ts.part']) {
+      final target = resolveDeletable(workDir, name);
+      if (target == null) continue;
+      try {
+        if (await target.exists()) {
+          await target.delete();
+          any = true;
+          AppLog.write('CACHE', '已删 $target');
+        }
+      } catch (e) {
+        // ★ 一个删不掉（被别的程序占着）不能连带放弃后面的
+        AppLog.write('CACHE', '删文件失败 $target：$e');
+      }
+    }
+    return any;
+  }
+
+  /// 批量删（先逐个判越界，再删）⇒ 返回（删掉几个文件, 放掉多少字节）
+  static Future<(int files, int bytes)> deleteEpisodes(
+    String workDir,
+    List<CachedEpisode> eps,
+  ) async {
+    var files = 0;
+    var bytes = 0;
+    for (final e in eps) {
+      if (await deleteEpisodeFile(workDir, e.fileName)) {
+        files++;
+        bytes += e.bytes;
+      }
+    }
+    return (files, bytes);
+  }
+}
+
 /// 点卡片进播放（复用现成入口）
-///
-/// ★ task-12 ④：参数从 [CachedWork] 换成 [CachedPlayRequest] ——
 ///   会话在**本文件**组织好（含 provider=local 与文件的绝对路径），
 ///   shell 只负责转发（见 buildLocalPlayRequest 的注释）。
 typedef OnOpenCached = void Function(CachedPlayRequest request);
@@ -1044,52 +1224,33 @@ class CachePageState extends State<CachePage> {
     );
   }
 
-  /// 网格格子**多出来的那一行**（删除按钮）的高度
+  /// 网格格子的宽高比 —— **与首页海报卡完全同源**（本页不再有额外那一行）
   ///
-  /// # ★★★ 2026-10-09 实测：48，不是 28（我第一版就错在这）
-  /// ```text
-  /// `_HoverDeleteButton` 里 `IconButton` 的 `constraints` 我写的是 28×28，
-  /// 但 **IconButton 有自己的最小点击目标**（Material 规范 48×48）——
-  /// `constraints` 只是"最小尺寸的下限提示"，实际仍按 48 布局。
-  ///
-  /// 实测（.probe/zz_delrow_probe_test.dart，真渲染真量）：
-  ///   `_deleteRow` 高 = 48.00
-  ///   `IconButton` 高 = 48.00
-  /// ⇒ 按 28 算格子高度会**少 20px**，整列卡片底部溢出。
-  /// ```
-  ///
-  /// ⚠️ 别为了省这 20px 去硬压 IconButton（`padding: EdgeInsets.zero` 已经压过了，
-  ///    再压就要用 `MaterialTapTargetSize.shrinkWrap`）——
-  ///    48 是**可点性**的下限，压了会让删除按钮变得难点（而且它是破坏性操作，
-  ///    本来就不该太容易误触）。⇒ **把格子撑高**才是对的。
-  static const double _deleteRowH = 48;
-
-  /// 与 follow_page 的 followGridAspect() **同源，但本页多一行**
-  ///
-  /// ⚠️ 那两个函数在 lib/ui/follow_page.dart，本页 import 它会把整页
-  ///    依赖拖进来；算式只有三行 ⇒ 这里重写，但**必须同源**：
-  ///    改一处必须改另一处，否则两页的卡片高矮不一致。
-  ///
-  /// # ★★★ 2026-10-09：本页比 follow 页**多算 `_deleteRowH`**
-  /// ```text
-  /// follow 页的格子只有 PosterCard；本页 `_card` 是
-  ///   `Column[ PosterCard, _deleteRow ]`
-  /// ⇒ 格子高度必须把删除行算进去，否则内容比格子高 ⇒ 底部溢出
-  ///   （实测：旧算式溢出 25.0 / 20.0 px，屏幕上是一条黄黑条纹）。
-  ///
-  /// ⚠️ 这也是"两页 aspect 不再逐值相同"的**有意**差异 ——
-  ///    结构不同就不该强行同值。上面那句"必须同源"指的是
-  ///    **海报那部分**的算式（`posterWidth / (posterWidth/aspect + meta)`）同源。
-  /// ```
+  /// ★ 2026-10-10（Owner：「孤卐卐一个删除按钮真不好看」）：
+  ///   卡片结构变成了 `PosterCard` 本身（删除入口收进封面右上角的「更多」浮层）
+  ///   ⇒ 格子不再需要多留 `_deleteRowH` 那 48px ⇒ 这个算式与
+  ///   `follow_page.followGridAspect()` **逐值相同**了。
   double _posterAspect() =>
       AppMetrics.posterWidth /
       (AppMetrics.posterWidth / AppMetrics.posterAspect +
-          AppMetrics.posterMetaHeight(titleLines: 2) +
-          _deleteRowH);
+          AppMetrics.posterMetaHeight(titleLines: 2));
 
   Widget _header(ColorScheme colors) {
     final n = _works.length;
     final eps = _totalEpisodes;
+    /*
+     * ★ Owner ⑨：「已缓存」页 UI 优化 —— 顶部统计改成三枚**小统计块**
+     * ```text
+     * 改前：一个「已缓存」标题 + 右边一个大号总占用 + 下面一行
+     *       「N 部 · M 集 | <完整磁盘路径>」。
+     * 观感问题：
+     *   ① 三样信息挤在一行里，字号/权重各不相同 ⇒ 读不出主次；
+     *   ② **把完整的下载目录路径放在页面上**——那是调试信息，不是给用户看的
+     *      （而且路径很长，会把那一行顶得右对齐后溢出感很强）。
+     * ⇒ 现在：标题一行，下面三枚统计块（作品 / 集数 / 占用），
+     *   磁盘路径收进 Tooltip（要查时悬停/长按才看得到）。
+     * ```
+     */
     return Padding(
       padding: EdgeInsets.only(
         left: Layout.contentPaddingOf(context),
@@ -1100,110 +1261,85 @@ class CachePageState extends State<CachePage> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
+          Text(
+            '已缓存',
+            style: TextStyle(
+              fontSize: FontSizes.xl,
+              fontWeight: FontWeights.semibold,
+              color: colors.onSurface,
+            ),
+          ),
+          const SizedBox(height: Sp.x3),
           Row(
             children: <Widget>[
-              Text(
-                '已缓存',
-                style: TextStyle(
-                  fontSize: FontSizes.xl,
-                  fontWeight: FontWeights.semibold,
-                  color: colors.onSurface,
-                ),
-              ),
-              const Spacer(),
-              // ★ 总占用：用户扫一眼就知道「吃了多少盘」
-              Text(
-                humanBytes(_totalBytes),
-                style: TextStyle(
-                  fontSize: FontSizes.lg,
-                  fontWeight: FontWeights.semibold,
-                  color: colors.primary,
-                ),
+              _stat(colors, '作品', '$n'),
+              const SizedBox(width: Sp.x8),
+              _stat(colors, '已下好', '$eps'),
+              const SizedBox(width: Sp.x8),
+              // 路径挂在 Tooltip 上：仍然查得到，但不再占版面
+              Tooltip(
+                message: _root.isEmpty ? '' : '存放位置：$_root',
+                child: _stat(colors, '占用', humanBytes(_totalBytes)),
               ),
             ],
-          ),
-          const SizedBox(height: Sp.x1),
-          Text(
-            '$n 部 · $eps 集   |   $_root',
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(
-              fontSize: FontSizes.sm,
-              color: colors.onSurfaceVariant,
-            ),
           ),
         ],
       ),
     );
   }
 
-  Widget _card(ColorScheme colors, CachedWork w) {
-    final sub = StringBuffer(humanBytes(w.bytes));
-    sub.write(' · ');
-    if (w.partialCount > 0) {
-      sub.write('${w.completedCount} 集（${w.partialCount} 个在下）');
-    } else {
-      sub.write('${w.completedCount} 集');
-    }
+  /// 一枚统计块（大数字 + 小标签）
+  ///
+  /// ★ 为什么数字在上、标签在下：扫视时先抓到的是**量**，再确认它是什么；
+  ///   反过来（标签在上）会让人先读一串字才知道该期待多大的数字。
+  Widget _stat(ColorScheme colors, String label, String value) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
       children: <Widget>[
-        PressFeedback(
-          child: PosterCard(
-            title: w.displayTitle,
-            cover: w.cover,
-            subtitle: sub.toString(),
-            titleLines: 2,
-            // ★ 只能播**已经完成**的集：全是 .part 时点它去播放会立刻失败
-            onTap: w.firstPlayable == null || widget.onOpen == null
-                ? null
-                : () => _openWork(w),
+        Text(
+          value,
+          style: TextStyle(
+            fontSize: FontSizes.lg,
+            fontWeight: FontWeights.semibold,
+            color: colors.onSurface,
           ),
         ),
-        // ★★★ task-12 ③：整剧删除入口
-        _deleteRow(colors, w),
+        const SizedBox(height: 2),
+        Text(
+          label,
+          style: TextStyle(
+            fontSize: FontSizes.cap,
+            color: colors.onSurfaceVariant,
+          ),
+        ),
       ],
     );
   }
 
-  /// ★★★ task-12 ③：卡片上的「删除整部」入口
-  ///
-  /// # 为什么放在卡片**下面**而不是封面右上角的浮层
-  /// ```text
-  /// ① 这是**破坏性**操作，不该与「点卡片播放」抢同一块区域
-  ///    （误触的代价是整部剧被删，不可逆）；
-  /// ② 封面右上角已经被 PosterCard 自己的徽标占用（见 poster_card.dart）；
-  /// ③ 放下面还能顺带把「几集 / 多大」写在删除按钮旁边 —— 见 _confirmDelete 的正文。
-  /// ```
-  /// ★★★ 2026-10-09 重做（Owner：「下面一个删除的垃圾桶太难看,需要优化」）
-  ///
-  /// # 改前长什么样（用户截图里那个）
-  /// ```text
-  /// 一整行「🗑 删除整部」红色文字，横在卡片正下方：
-  ///   · 它比卡片还显眼（红色 + 占满一行），用户第一眼看到的是"删除"，
-  ///     而不是"这部剧叫什么"—— 视觉主次反了；
-  ///   · 每张卡片下面都挂一条，整页像一排删除按钮；
-  ///   · 破坏性操作**太容易点到**（就在卡片正下方，误触即删）。
-  /// ```
-  ///
-  /// # 改后：一颗克制的图标按钮
-  /// ```text
-  /// · 靠右对齐、只占一个图标位（不再横贯一行）；
-  /// · 默认是**中性色**（onSurfaceVariant），鼠标悬停才转成错误色 ——
-  ///   这样"危险"是**按需浮现**的，不会一直喊；
-  /// · 保留 tooltip（鼠标用户看得见"删除整部"），
-  ///   点击仍然走同一个二次确认弹窗（**确认那一步才是真正的防线**，
-  ///   这里只是不再用红色大字吓人）。
-  /// ```
-  Widget _deleteRow(ColorScheme colors, CachedWork w) {
-    return Align(
-      alignment: Alignment.centerRight,
-      child: _HoverDeleteButton(
-        color: colors.onSurfaceVariant,
-        hoverColor: colors.error,
-        onTap: () => unawaited(_confirmDelete(w)),
-      ),
+  Widget _card(ColorScheme colors, CachedWork w) {
+    final sub = StringBuffer(humanBytes(w.bytes));
+    sub.write(' \u00b7 ');
+    if (w.partialCount > 0) {
+      sub.write('${w.completedCount} \u96c6\uff08${w.partialCount} \u4e2a\u5728\u4e0b\uff09');
+    } else {
+      sub.write('${w.completedCount} \u96c6');
+    }
+    // \u2605 \u5361\u7247\u672c\u8eab\u5c31\u662f PosterCard\uff08\u4e0e\u9996\u9875\u6d77\u62a5\u5361\u9010\u5b57\u8282\u540c\u6e90\uff09
+    return _CacheWorkCard(
+      work: w,
+      onOpen: w.firstPlayable == null || widget.onOpen == null
+          ? null
+          : () => _openWork(w),
+      onDelete: () => unawaited(_confirmDelete(w)),
+      onOpenFolder: () => unawaited(_openFolder(w)),
     );
+  }
+
+  /// \u5728\u6587\u4ef6\u7ba1\u7406\u5668\u91cc\u6253\u5f00\u90a3\u4e2a\u76ee\u5f55\uff08\u5931\u8d25\u53ea\u8bf4\u4e00\u53e5\u8bdd\uff0c\u4e0d\u5f39\u7a97\uff09
+  Future<void> _openFolder(CachedWork w) async {
+    final ok = await DownloadDir.open(w.path);
+    if (!ok) _say('\u6253\u5f00\u76ee\u5f55\u5931\u8d25\uff08\u5f53\u524d\u7cfb\u7edf\u4e0d\u652f\u6301\uff09');
   }
 
   /// 组织本地会话 → 交宿主转发（★ 会话在**本页**组织好，见 buildLocalPlayRequest）
@@ -1320,51 +1456,166 @@ class CachePageState extends State<CachePage> {
     );
   }
 }
-/// 缓存卡片上的「删除整部」按钮（★ 2026-10-09 新增）
+
+/// ★ Owner 1009（1）：「已缓存」页的一张卡片
 ///
-/// 见 `_CachePageState._deleteRow` 的长注释（为什么要重做）。
-/// 这里只负责"悬停变色"这一件事。
-class _HoverDeleteButton extends StatefulWidget {
-  const _HoverDeleteButton({
-    required this.color,
-    required this.hoverColor,
-    required this.onTap,
+/// # 改了什么（Owner 原话）
+/// ```text
+/// > 这个已缓存,这里孤零零一个删除按钮真不好看,优化优化,样式不好看
+/// ```
+///
+/// 改前：卡片正下方右侧单独挂一枚垃圾桶 ⇒ 整页像「一排删除按钮」。
+/// 改后：删除收进**封面右上角**一枚半透明圆形「更多」按钮，默认**隐藏**，
+///        鼠标悬停 / 右键 / 触摸长按 / TV 菜单键才显形。
+///
+/// # 为什么自己写一张卡而不改 PosterCard
+/// ```text
+/// PosterCard 是 5 个页面共用的底座组件（归 polish agent），而「更多」菜单
+/// 只有「已缓存」页需要 ⇒ 改它会把一个无关能力摊到全部 5 页。
+/// 而本卡的**形状与 PosterCard 逐字节相同**（同一个组件、同一组参数），
+/// 只是外面包了一层浮层。
+/// ```
+class _CacheWorkCard extends StatefulWidget {
+  const _CacheWorkCard({
+    required this.work,
+    required this.onOpen,
+    required this.onDelete,
+    required this.onOpenFolder,
   });
 
-  /// 常态色（中性 —— 不喧宾夺主）
-  final Color color;
-
-  /// 悬停色（错误色 —— 危险按需浮现）
-  final Color hoverColor;
-
-  final VoidCallback onTap;
+  final CachedWork work;
+  final VoidCallback? onOpen;
+  final VoidCallback onDelete;
+  final VoidCallback onOpenFolder;
 
   @override
-  State<_HoverDeleteButton> createState() => _HoverDeleteButtonState();
+  State<_CacheWorkCard> createState() => _CacheWorkCardState();
 }
 
-class _HoverDeleteButtonState extends State<_HoverDeleteButton> {
+class _CacheWorkCardState extends State<_CacheWorkCard> {
   bool _hover = false;
 
   @override
   Widget build(BuildContext context) {
-    final c = _hover ? widget.hoverColor : widget.color;
+    final colors = Theme.of(context).colorScheme;
+
+    final sub = StringBuffer(humanBytes(widget.work.bytes));
+    sub.write(' · ');
+    if (widget.work.partialCount > 0) {
+      sub.write('${widget.work.completedCount} 集'
+          '（${widget.work.partialCount} 个在下）');
+    } else {
+      sub.write('${widget.work.completedCount} 集');
+    }
+
+    /*
+     * ★ 卡片本体就是 PosterCard（与首页海报卡同一组件、同一组参数）
+     *   ⇒ 两页的排版（标题两行 + 「大小 · N 集」）天然一致。
+     */
+    final poster = PosterCard(
+      title: widget.work.displayTitle,
+      cover: widget.work.cover,
+      subtitle: sub.toString(),
+      titleLines: 2,
+      onTap: widget.onOpen,
+    );
+
+    /*
+     * ★ 三种输入方式**共用**下面那一个菜单（右键 / 长按 / 点「更多」）
+     * ```text
+     * 桌面拖鼠标、手机长按、TV 菜单键——三个入口若各写一份实现，
+     * 迟早漂移成「右键能弹、长按不能」这类难以定位的不一致。
+     * ```
+     */
     return MouseRegion(
-      cursor: SystemMouseCursors.click,
-      onEnter: (_) => setState(() => _hover = true),
-      onExit: (_) => setState(() => _hover = false),
-      child: Tooltip(
-        message: '删除整部',
-        child: IconButton(
-          // ★ 图标按钮的默认内边距会把它撑得很大（视觉上又变成"一排按钮"），
-          //   这里压到 28x28 —— 够点，但不抢版面。
-          constraints: const BoxConstraints.tightFor(width: 28, height: 28),
-          padding: EdgeInsets.zero,
-          iconSize: 16,
-          onPressed: widget.onTap,
-          icon: Icon(Icons.delete_outline_rounded, color: c),
+      cursor: widget.onOpen != null
+          ? SystemMouseCursors.click
+          : MouseCursor.defer,
+      onEnter: (_) {
+        if (!_hover) setState(() => _hover = true);
+      },
+      onExit: (_) {
+        if (_hover) setState(() => _hover = false);
+      },
+      child: GestureDetector(
+        behavior: HitTestBehavior.deferToChild,
+        // 桌面：右键
+        onSecondaryTapDown: (d) => unawaited(_openMenu(d.globalPosition)),
+        // 触摸 / TV：长按
+        onLongPress: () => unawaited(_openMenu(_moreButtonCenter())),
+        child: Stack(
+          children: <Widget>[
+            poster,
+            // ── 「更多」：默认透明，悬停显形（危险操作按需浮现）──
+            Positioned(
+              top: Sp.x2,
+              right: Sp.x2,
+              child: IgnorePointer(
+                ignoring: !_hover,
+                child: AnimatedOpacity(
+                  // ★ 给这枚按钮一个**稳定 key**（测试按它定位）
+                  //   —— 几何位置会随布局变，按坐标定位的测试会断起来无故红。
+                  key: ValueKey<String>('cache-card-more:${widget.work.dirName}'),
+                  // ★ 用 AnimatedOpacity（FadeTransition，零 Transform）
+                  //   —— 与 PosterCard 内部那层悬停辉光同一手法，不引入新结构
+                  opacity: _hover ? 1 : 0,
+                  duration: MotionPrefs.duration(context, Motion.fast),
+                  curve: MotionPrefs.curve(context, Motion.easeOut),
+                  child: Material(
+                    color: Colors.black.withValues(alpha: 0.45),
+                    shape: const CircleBorder(),
+                    clipBehavior: Clip.antiAlias,
+                    child: InkWell(
+                      onTap: () => unawaited(_openMenu(_moreButtonCenter())),
+                      child: SizedBox(
+                        width: 28,
+                        height: 28,
+                        child: Icon(Icons.more_horiz,
+                            size: 18, color: colors.onSurface),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
         ),
       ),
+    );
+  }
+
+  /// 「更多」按钮中心的全局坐标（菜单与长按都以它为锚点）
+  Offset _moreButtonCenter() {
+    final box = context.findRenderObject() as RenderBox?;
+    if (box == null) return Offset.zero;
+    // 按钮尺寸 28 + 边距 Sp.x2（与 Stack 里 Positioned 的 top/right 同源）
+    return box.localToGlobal(Offset(box.size.width - Sp.x2 - 14, Sp.x2 + 14));
+  }
+
+  /// 三个入口共用的那一个菜单
+  ///
+  /// ★ 用 `PopupMenuItem.onTap` 而不是 `await showMenu()` 的返回值：
+  ///   后者只在「点了某一项」时给值，而**按 Esc / 点外面关闭**时给 null，
+  ///   无法区分"点了取消"与"点了第一项"—— 那会让键盘用户永远弹不出菜单。
+  Future<void> _openMenu(Offset anchor) async {
+    if (!mounted) return;
+    final mq = MediaQuery.sizeOf(context);
+    await showMenu<void>(
+      context: context,
+      position: RelativeRect.fromRect(
+        Rect.fromLTWH(anchor.dx, anchor.dy, 1, 1),
+        Offset.zero & mq,
+      ),
+      items: <PopupMenuEntry<void>>[
+        PopupMenuItem<void>(
+          onTap: widget.onDelete,
+          child: const Text('删除整部'),
+        ),
+        PopupMenuItem<void>(
+          onTap: widget.onOpenFolder,
+          child: const Text('打开所在文件夹'),
+        ),
+      ],
     );
   }
 }

@@ -67,7 +67,7 @@ import 'package:window_manager/window_manager.dart';
 import '../core/app_log.dart' show AppLog;
 import '../core/download_queue.dart' show DownloadQueue, DownloadTask;
 import '../core/models.dart' show Episode, MediaDetail;
-import '../core/sourin_api.dart' show SourinApi;
+import '../core/sourin_api.dart' show Progress, SourinApi;
 // ★ task-12 缺陷 A：右侧按**磁盘状态**判（扫盘结果 + 本地会话组织）
 import 'cache_page.dart'
     show
@@ -75,6 +75,7 @@ import 'cache_page.dart'
         CachedWork,
         buildLocalPlayRequest,
         canonicalLocalPath,
+        kLocalProvider,
         scanCacheWorksAtRoot;
 import 'detail_page.dart';
 import 'media_session.dart';
@@ -126,6 +127,7 @@ class MediaPage extends StatefulWidget {
      *    这次改动**只是纯新增一个可选参数 + 一行透传**，不碰任何既有字段与逻辑。
      */
     this.localPath,
+    this.localMeta,
   });
 
   final String provider;
@@ -144,6 +146,15 @@ class MediaPage extends StatefulWidget {
   ///
   /// ⚠️ 与 `isTouchOnly` 一样是**可选**的 —— 不传即 null，三处入口行为完全不变。
   final String? localPath;
+
+  /// ★ Owner 1009 ⑬：本地播放页的**作品信息**（简介/年份/地区/类型/角标/本地封面）
+  ///
+  /// ⚠️ 与 [localPath] 配对使用：只传其一等于半条信息 ——
+  ///   有路径没信息 ⇒ 页面上只有标题（就是「半成品」的形态）；
+  ///   有信息没路径 ⇒ 详情区会按在线路径去要详情（拿不到）。
+  /// ⇒ 由 `shell._openCachedWork` 一次性从扫盘结果原样传下来，
+  ///   本页**不自己再扫一次盘**（两份扫描必然出现两处不一致）。
+  final CachedWork? localMeta;
 
   @override
   State<MediaPage> createState() => _MediaPageState();
@@ -236,6 +247,8 @@ class _MediaPageState extends State<MediaPage> with WindowListener {
      * ```
      */
     unawaited(_scanDiskWorks());
+    // ★ Owner ⑬：「已看标记 / 看过多少」需要本地命名空间下的进度
+    unawaited(_loadLocalProgress());
   }
 
   /// 把"全屏变化"回调注册到播放器上（幂等）
@@ -799,6 +812,9 @@ class _MediaPageState extends State<MediaPage> with WindowListener {
    */
   List<CachedWork>? _diskWorks;
 
+  /// 本地会话删完一集后的**新**扫盘结果（覆盖 [MediaPage.localMeta]）
+  CachedWork? _localWorkOverride;
+
   /// 扫一次下载目录（失败就当没有 —— 绝不让扫盘把播放页搞崩）
   Future<void> _scanDiskWorks() async {
     try {
@@ -811,7 +827,20 @@ class _MediaPageState extends State<MediaPage> with WindowListener {
        */
       final works = await scanCacheWorksAtRoot();
       if (!mounted) return;
-      setState(() => _diskWorks = works);
+      setState(() {
+        _diskWorks = works;
+        // ★ 本地会话拿的正是宿主传下来的那一份 ⇒ 删完一集必须同步刷新它，
+        //   否则列表会一直挂着已经被删掉的那一行（假刷新比不刷新更糟）。
+        final meta = widget.localMeta;
+        if (widget.localPath != null && meta != null) {
+          for (final w in works) {
+            if (w.path == meta.path) {
+              _localWorkOverride = w;
+              break;
+            }
+          }
+        }
+      });
     } catch (e) {
       AppLog.write('MEDIA', '扫下载目录失败（右侧退回详情页）：$e');
     }
@@ -827,6 +856,19 @@ class _MediaPageState extends State<MediaPage> with WindowListener {
   /// · 磁盘那侧：用**目录绝对路径**规范化（works[i].path）。
   /// ```
   CachedWork? get _diskWorkForThis {
+    /*
+     * ★★★ Owner 1009 ⑬：本地会话**直接用宿主传下来的那一份**扫盘结果。
+     * ```text
+     * 改前：本地播放时也去 `_scanDiskWorks()` 再匹配一次 ——
+     *   那是**第二次**扫盘，而匹配靠「规范化路径 / 标题」两套启发式
+     *   ⇒ 标题对不上（旁文件里的剧名 ≠ 目录名）就整页右侧空掉，
+     *      正是 Owner 报的「点进去无法观看、右侧崩坏」。
+     * ⇒ `shell._openCachedWork` 已经拿到了确切的 CachedWork，原样传下来即可。
+     *   扫盘仍保留：删完一集后用它做**真刷新**（见 _scanDiskWorks）。
+     */
+    final meta = _localWorkOverride ?? widget.localMeta;
+    if (widget.localPath != null && meta != null) return meta;
+
     final works = _diskWorks;
     if (works == null || works.isEmpty) return null;
 
@@ -977,9 +1019,47 @@ class _MediaPageState extends State<MediaPage> with WindowListener {
         // ★ task-17 ③：把扫盘量到的字节数带过去（批量删除的正文要用它，
         //   避免在弹窗前再 stat 一遍 —— 见 LocalEpisodeRef.bytes 的注释）
         bytes: e.bytes,
+        // ★ Owner ⑬：一集一行的「已看 / 看过多少」——数据在 `local` 命名空间里
+        watchRatio: _watchRatioOf(req.mediaId),
       ));
     }
     return out;
+  }
+
+  /// ★ Owner ⑬：某一集**看过多少**（0 = 没看过）
+  ///
+  /// ★ 键 = (kLocalProvider, canonicalLocalPath(文件绝对路径)) ——
+  ///   与播放器 `_saveProgress` 写的**完全同一对**（见 cache_page 的说明）。
+  ///
+  /// ⚠️ 只查**已完成**的那几集，且查不到就当没看过：
+  ///   进度读不出来绝不能让这一页出错（它只是"好看一点"的信息）。
+  double _watchRatioOf(String mediaId) {
+    final p = _localProgress[mediaId];
+    if (p == null) return 0;
+    if (p.duration <= 0) return 0;
+    final r = p.position / p.duration;
+    return r.clamp(0.0, 1.0);
+  }
+
+  /// 本地命名空间下的**全部观看进度**（懒加载一次）
+  Map<String, Progress> _localProgress = const <String, Progress>{};
+
+  /// ⇒ 只在**本地会话**下查（在线页不需要，那里的进度在章节里就有）
+  Future<void> _loadLocalProgress() async {
+    if (widget.localPath == null) return;
+    try {
+      final all = await SourinApi.listAllProgress();
+      if (!mounted) return;
+      setState(() {
+        _localProgress = <String, Progress>{
+          for (final p in all)
+            if (p.provider == kLocalProvider) p.nativeId: p,
+        };
+      });
+    } catch (e) {
+      // 读不到就当"都没看过"—— 绝不让它把整页搞崩
+      AppLog.write('MEDIA', '读本地观看进度失败（按未观看显示）: $e');
+    }
   }
 
   /// 详情区点「已下载」里的一集 ⇒ 换到**那个文件**
@@ -1247,6 +1327,7 @@ class _MediaPageState extends State<MediaPage> with WindowListener {
       localFile: widget.localPath,
       localTitle: widget.title,
       localCover: widget.cover,
+      localMeta: widget.localMeta,
       localEpisodeCount: widget.localPath == null ? 0 : _localEpisodeRefs.length,
       localEpisodes: widget.localPath == null
           ? const <LocalEpisodeRef>[]
