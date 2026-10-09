@@ -30,10 +30,11 @@ import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 
-import 'package:sourin_spike/ui/theme_bridge.dart';
+import 'package:sourin_spike/ui/app_palette.dart';
+import 'package:sourin_spike/ui/app_scaffold.dart';
+import 'package:sourin_spike/ui/app_theme.dart';
 
 /// WCAG 相对亮度
 double _lum(Color c) {
@@ -51,12 +52,11 @@ double contrast(Color a, Color b) {
 }
 
 void main() {
-  final forui = FTheme.neutral.dark.desktop;
-  final theme = buildMaterialTheme(forui);
+  final theme = AppTheme.themeFor(Brightness.dark);
   final cs = theme.colorScheme;
 
   // 背景就是 forui 的 background（#0A0A0A）
-  final bg = forui.colors.background;
+  final bg = AppPalette.dark.background;
 
   group('① 两套 Material 不能混用', () {
     test('lib/ 下不允许出现 package:flutter/material.dart', () {
@@ -123,12 +123,12 @@ void main() {
 
       await tester.pumpWidget(
         MaterialApp(
-          theme: buildMaterialTheme(forui),
-          builder: (context, child) => FTheme(
-            data: forui,
-            child: FToaster(child: child ?? const SizedBox()),
+          theme: theme,
+          builder: (context, child) => AppThemeHost(
+            data: theme,
+            child: child ?? const SizedBox(),
           ),
-          home: FScaffold(
+          home: AppScaffold(
             child: Builder(
               builder: (ctx) {
                 brightness = Theme.of(ctx).colorScheme.brightness;

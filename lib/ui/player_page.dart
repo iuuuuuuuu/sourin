@@ -97,7 +97,6 @@ import 'package:flutter/foundation.dart';
  *    而 forui 本来就是项目的主题来源（`MaterialApp.builder` 里注入）。
  *    本文件只用到 `FTheme` 这一个 widget，不引入任何 Material 实现。
  */
-import 'package:forui/forui.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:window_manager/window_manager.dart';
@@ -138,6 +137,8 @@ import 'widgets/provider_login_panel.dart';
 import 'widgets/provider_name.dart';
 import 'widgets/skip_marker_dialog.dart';
 import 'widgets/source_switch_dialog.dart';
+import '../ui/app_scaffold.dart';
+import '../ui/app_theme.dart';
 
 /// 把播放页里的**浮层面板**包成深色皮肤（task-28 ①-B）
 ///
@@ -197,7 +198,7 @@ class PlayerPanelTheme extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) =>
-      FTheme(data: AppTheme.themeFor(Brightness.dark), child: child);
+      AppThemeHost(data: AppTheme.themeFor(Brightness.dark), child: child);
 }
 
 /// 快捷键提示项（与 [kDesktopHints] / [kTvHints] 同源）

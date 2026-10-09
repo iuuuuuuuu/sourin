@@ -43,6 +43,7 @@ import '../app_theme.dart';
 import '../tokens.dart';
 import '../widgets/settings_kit.dart';
 import '../widgets/settings_sub_page.dart';
+import '../../ui/app_theme.dart';
 
 class ThemeSettingsPage extends StatelessWidget {
   const ThemeSettingsPage({super.key});

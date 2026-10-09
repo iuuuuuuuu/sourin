@@ -44,21 +44,20 @@
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 
 import 'package:sourin_spike/ui/titlebar_visibility.dart';
+import 'package:sourin_spike/ui/app_scaffold.dart';
+import 'package:sourin_spike/ui/app_theme.dart';
 
 /// 复刻 `SourinApp.build` 的结构：标题栏在 builder 里（Navigator 之外）
 Widget _appWithHost({required Widget home}) {
-  final theme = FTheme.neutral.dark.desktop;
+  final theme = AppTheme.themeFor(Brightness.dark);
   return MaterialApp(
-    theme: theme.toApproximateMaterialTheme(),
-    builder: (context, child) => FTheme(
+    theme: theme,
+    builder: (context, child) => AppThemeHost(
       data: theme,
-      child: FToaster(
-        child: _FakeTitleBarHost(child: child ?? const SizedBox()),
-      ),
+      child: _FakeTitleBarHost(child: child ?? const SizedBox()),
     ),
     home: home,
   );

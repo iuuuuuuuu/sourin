@@ -30,9 +30,10 @@
 // ⚠️ 本文件不挂真 Player、不调 open()、不用 toImage() —— 同 t75_search_pinned_test.dart。
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:sourin_spike/ui/search_page.dart';
+import 'package:sourin_spike/ui/app_scaffold.dart';
+import 'package:sourin_spike/ui/app_theme.dart';
 
 // ══════════════════════════════════════════════════════════════════════════
 // 夹具
@@ -42,11 +43,11 @@ import 'package:sourin_spike/ui/search_page.dart';
 const Size kViewport = Size(1400, 900);
 
 Widget host(Widget child, Size size) {
-  final theme = FTheme.neutral.light.desktop;
+  final theme = AppTheme.themeFor(Brightness.light);
   return MaterialApp(
     debugShowCheckedModeBanner: false,
-    theme: theme.toApproximateMaterialTheme(),
-    builder: (_, c) => FTheme(data: theme, child: c ?? const SizedBox()),
+    theme: theme,
+    builder: (_, c) => AppThemeHost(data: theme, child: c ?? const SizedBox()),
     home: MediaQuery(
       data: MediaQueryData(size: size),
       child: Directionality(

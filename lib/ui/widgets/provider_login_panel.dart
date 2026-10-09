@@ -104,13 +104,13 @@
 
 import 'dart:async';
 
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 
 import '../../core/sourin_api.dart';
 import '../tokens.dart';
 import 'overlay_motion.dart';
 import 'qr_view.dart';
+import '../../ui/app_palette.dart';
 
 /// 会话状态（对应 Rust `SessionState`，`snake_case`）
 enum SessionState {
@@ -855,7 +855,7 @@ class _ProviderLoginPanelState extends State<ProviderLoginPanel> {
     setState(() => _qrMsg = message.isNotEmpty ? message : _qrMsg);
   }
 
-  Widget _buildQrTab(FColors colors) {
+  Widget _buildQrTab(AppPalette colors) {
     // 第一次切到扫码页签时自动申请一次（原版 switchToQr 里的
     // if (!qrData && !qrBusy) startQrLogin();）。
     // 放在 postFrame 里：build 期间不能 setState。
@@ -997,7 +997,7 @@ class _ProviderLoginPanelState extends State<ProviderLoginPanel> {
   }
 
   Widget _tabButton({
-    required FColors colors,
+    required AppPalette colors,
     required String label,
     required bool on,
     required VoidCallback onTap,
@@ -1021,7 +1021,7 @@ class _ProviderLoginPanelState extends State<ProviderLoginPanel> {
 
   @override
   Widget build(BuildContext context) {
-    final colors = FTheme.of(context).colors;
+    final colors = AppPalette.of(context);
 
     // 这个源压根不需要登录 → 不渲染（不是显示一个用不了的按钮）
     if (!_loading && !_caps.showLoginEntry) return const SizedBox.shrink();
@@ -1269,7 +1269,7 @@ class _ProviderLoginPanelState extends State<ProviderLoginPanel> {
 
   Widget _input({
     required TextEditingController controller,
-    required FColors colors,
+    required AppPalette colors,
     required String hint,
     bool obscure = false,
     int maxLines = 1,

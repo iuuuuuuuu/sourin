@@ -326,7 +326,7 @@ void main() {
       expect(
         stripped.contains('colors.foreground'),
         isFalse,
-        reason: '★ 同理，`FColors.foreground` 也不能用（且这个文件用的是'
+        reason: '★ 同理，`AppPalette.foreground` 也不能用（且这个文件用的是'
             'Material 的 ColorScheme，根本没有 `foreground`）',
       );
     });

@@ -80,7 +80,6 @@ import 'dart:ui' as ui;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/scheduler.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:window_manager/window_manager.dart';
@@ -91,8 +90,8 @@ import 'core/models.dart' show MediaItem, SearchEventKind, SearchStreamEvent;
 import 'core/ui_prefs.dart';
 import 'ui/app_theme.dart';
 import 'ui/search_page.dart';
-import 'ui/theme_bridge.dart';
 import 'ui/widgets/poster_card.dart';
+import 'ui/app_scaffold.dart';
 
 /// 截图用的重绘边界（包住整棵 UI）
 final _rootKey = GlobalKey();
@@ -542,18 +541,15 @@ Future<void> main() async {
   }
 
   final brightness = AppTheme.resolve(systemBrightness: Brightness.light);
-  final theme = AppTheme.themeFor(brightness);
-  final materialTheme = brightness == Brightness.light
-      ? buildLightMaterialTheme(theme)
-      : buildMaterialTheme(theme);
+  final materialTheme = AppTheme.themeFor(brightness);
 
   runApp(
     RepaintBoundary(
       key: _rootKey,
       child: MaterialApp(
         debugShowCheckedModeBanner: false,
-        localizationsDelegates: FLocalizations.localizationsDelegates,
-        supportedLocales: FLocalizations.supportedLocales,
+        localizationsDelegates: GlobalMaterialLocalizations.delegates,
+        supportedLocales: [Locale("zh", "CN"), Locale("en", "US")],
         theme: materialTheme,
         /*
          * ★★★ 必须逐字复刻生产外壳（`shell.dart:2854-2865`）
@@ -563,9 +559,9 @@ Future<void> main() async {
          * （`Material.of`）⇒ **整页被换成 ErrorWidget 而不崩给你看**，
          * 断言只会以「找不到 XX」失败，真因只在 stderr。
          */
-        builder: (context, child) => FTheme(
-          data: theme,
-          child: FScaffold(
+        builder: (context, child) => AppThemeHost(
+          data: materialTheme,
+          child: AppScaffold(
             child: Material(
               type: MaterialType.transparency,
               child: child!,
