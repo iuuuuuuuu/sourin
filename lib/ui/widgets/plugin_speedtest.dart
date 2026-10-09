@@ -1136,12 +1136,6 @@ class _PluginSpeedTestPanelState extends State<PluginSpeedTestPanel> {
     }
   }
 
-  Color _tone(ColorScheme colors, double mbps) {
-    if (mbps >= _fastMiBps) return colors.primary;
-    if (mbps < _slowMiBps) return colors.error;
-    return colors.onSurfaceVariant;
-  }
-
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
@@ -1165,20 +1159,33 @@ class _PluginSpeedTestPanelState extends State<PluginSpeedTestPanel> {
         ),
       );
     } else if (last.ok) {
-      detail = Text(
-        <String>[
-          PluginSpeedTest.speedText(last.mbPerSec),
-          PluginSpeedTest.msText(last.ms),
-          '${last.segments} 片',
-          PluginSpeedTest.agoText(last.ts),
-          if ((last.sampleTitle ?? '').isNotEmpty) '《${last.sampleTitle}》',
-        ].join(' · '),
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-        style: TextStyle(
-          fontSize: FontSizes.cap,
-          color: _tone(colors, last.mbPerSec),
-        ),
+      /*
+       * ★ 2026-10-10：读数从**一串挤在一起的字**改成「等级色 chip + 关键读数」
+       *
+       * 改前一行里塞了：速率 / 耗时 / 片数 / 多久前 / 片名，
+       * 窄列（211px）上必然只剩省略号，用户看不到任何东西。
+       * 改后：速率与等级永远可见（一枚 chip），其余细节收进 Tooltip。
+       */
+      detail = Row(
+        children: [
+          _SpeedBadge(run: last),
+          const SizedBox(width: Sp.x2),
+          Expanded(
+            child: Text(
+              [
+                PluginSpeedTest.speedText(last.mbPerSec),
+                PluginSpeedTest.msText(last.ms),
+                PluginSpeedTest.agoText(last.ts),
+              ].join(' · '),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: FontSizes.cap,
+                color: colors.onSurfaceVariant,
+              ),
+            ),
+          ),
+        ],
       );
     } else {
       detail = Text(
@@ -1256,6 +1263,54 @@ class _PluginSpeedTestPanelState extends State<PluginSpeedTestPanel> {
         );
     }
     return b.toString().trimRight();
+  }
+}
+
+/// 测速结果的等级徽章（速率 + 快/中/慢 三档色）
+///
+/// # 为什么单独一个零件
+///
+/// Owner 要的是「看哪个视频网站速度快」—— 用户真正要读的是
+/// **一个可以横向比较的等级**，而不是一串精确到小数点的数字。
+///
+/// ```text
+/// 改前  「12.34 MB/s · 842 ms · 3 片 · 5 分钟前 · 《某剧名》」 ← 窄列只剩「…」
+/// 改后  [快 12.34 MB/s]  842 ms · 5 分钟前                    ← 等级永远可见
+/// ```
+///
+/// 三档阈值与 [_PluginSpeedTestPanelState._tone] 同源（快 / 中 / 慢），
+/// 徽章色与正文色一致，不会出现"徽章说快、正文说慢"。
+class _SpeedBadge extends StatelessWidget {
+  const _SpeedBadge({required this.run});
+
+  final PluginSpeedRun run;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final fast = run.mbPerSec >= _fastMiBps;
+    final slow = run.mbPerSec < _slowMiBps;
+    final tone =
+        fast ? colors.primary : (slow ? colors.error : colors.onSurfaceVariant);
+    // ★ 三档，不做小数分级 —— 用户比的是「哪个快」，不是「快多少」
+    final label = fast ? '快' : (slow ? '慢' : '中');
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: Sp.x2, vertical: 2),
+      decoration: BoxDecoration(
+        color: tone.withValues(alpha: 0.14),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: tone.withValues(alpha: 0.45)),
+      ),
+      child: Text(
+        '$label ${PluginSpeedTest.speedText(run.mbPerSec)}',
+        style: TextStyle(
+          fontSize: FontSizes.cap,
+          fontWeight: FontWeight.w600,
+          color: tone,
+        ),
+      ),
+    );
   }
 }
 

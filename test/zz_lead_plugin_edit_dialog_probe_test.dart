@@ -71,16 +71,33 @@ void main() {
        *   `find.byType(AlertDialog)` 取的是**外层包装**（它本来就铺满），
        *   所以恒等于视口、永远判红 —— 那是**判据自己的问题**，不是缺陷。
        *   真正决定「看得见看不见」的是**卡片内部内容**的渲染尺寸。
+       *
+       * ★★ 2026-10-10：原来取的是「第一个 `SizedBox` 后代」——
+       *   那是**碰巧**能测到内容（插件编辑对话框的正文恰好是第一个
+       *   SizedBox）。外壳改成共用零件 `SettingsDialog`（内含
+       *   `ConstrainedBox` + `SizedBox(width: infinity)`）之后，
+       *   「第一个」变成了那层包装 ⇒ 读数 0.0 x 4.0，**探针自己失明了**。
+       *
+       *   ⇒ 改成量**真正的内容子树**（`SingleChildScrollView` /
+       *     `Column` 这些承载正文的节点），并且在工具栏那一处直接判
+       *     「内容区不是 0 宽」—— 不再靠某个具体控件的位置。
        */
       final content = find.descendant(
         of: find.byType(AlertDialog),
-        matching: find.byType(SizedBox),
+        matching: find.byType(Column),
       );
-      final csz = t.getSize(content.first);
-      print('PROBE| ① 内容区尺寸 = ${csz.width} x ${csz.height}');
-      expect(csz.width, lessThan(900),
+      expect(content, findsWidgets, reason: '★ 对话框正文应当存在（Column 子树）');
+      // 取**面积最大**的那个 Column —— 那才是正文容器，不是标题栏
+      Rect? widest;
+      for (final e in content.evaluate()) {
+        final r = t.getRect(find.byElementPredicate((x) => x == e));
+        if (widest == null || r.width > widest.width) widest = r;
+      }
+      // ignore: avoid_print
+      print('PROBE| ① 正文容器宽度 = ${widest?.width}');
+      expect(widest!.width, lessThan(900),
           reason: '内容区跟着视口撑满 ⇒ 真机上会表现为「只有一层灰」');
-      expect(csz.width, greaterThan(200), reason: '内容区退化 ⇒ 也看不见');
+      expect(widest.width, greaterThan(200), reason: '内容区退化 ⇒ 也看不见');
     }
     expect(dlg.evaluate().isNotEmpty, isTrue, reason: '对话框根本没进树');
     await t.pump(const Duration(milliseconds: 400));

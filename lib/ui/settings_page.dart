@@ -193,6 +193,7 @@ import 'settings/emby_page.dart';
  * 本文件有并发写入者（task-6 在改插件更新 UI），改动面越小冲突越小。
  */
 import 'widgets/overlay_motion.dart';
+import 'widgets/app_toast.dart';
 import 'widgets/plugin_edit_dialog.dart';
 import 'widgets/plugin_speedtest.dart';
 import 'widgets/settings_kit.dart';
@@ -274,25 +275,29 @@ class SettingsPageState extends State<SettingsPage> {
   ///    （空态 UI）的语义原样保留。
   bool _firstLoadDone = false;
 
-  String? _toast;
-
   /// ★★★ 数据版本号 + toast 通知（task-43，「JS 插件」二级页要用）
   ///
-  /// # 为什么需要这两个
-  /// ```text
-  /// 二级页是 `Navigator.push` 上来的**另一条路由** —— 不在本 State
-  /// 的子树里，所以：
-  ///   ① host 的 `setState` **不会**重建它 ⇒
-  ///      操作后（loadAll 已刷新数据）界面看着不变，像「点了没反应」。
-  ///   ② host 的 toast 画在**宿主自己的 Stack** 里 ⇒
-  ///      被整屏的路由盖住 ⇒ `_flash()` 的 59 处反馈**全部看不见**。
-  /// ```
-  /// ⇒ 两个 `ValueNotifier`，二级页自己订阅、自己画。
+  /// # `_dataRev`：二级页是 `Navigator.push` 上来的**另一条路由**
+  ///
+  /// 不在本 State 的子树里 ⇒ host 的 `setState` **不会**重建它 ⇒
+  /// 操作后（`loadAll` 已刷新数据）界面看着不变，像「点了没反应」。
+  /// 二级页订阅它、自己重建。
+  ///
+  /// # `_toastRev`：★ 2026-10-10 起**已不再被写**（死通道）
+  ///
+  /// 它当初存在的唯一理由是「host 的 toast 画在宿主自己的 Stack 里，
+  /// 被整屏的 push 路由盖住 ⇒ `_flash()` 的反馈全部看不见」。
+  /// 现在 `_flash` 走 `showAppToast`，而宿主 `ToastHost` 挂在
+  /// `lib/shell.dart` 的 `MaterialApp.builder` 里、**Navigator 之外**
+  /// ⇒ 二级页天然能弹，这条同步链路不再需要。
+  ///
+  /// ⚠️ **故意保留**（连同二级页里读它的 `ValueListenableBuilder`）：
+  ///   它现在是恒 `null` 的一路通道 ⇒ 只画不出东西（死代码，不是坏行为）。
+  ///   等二级页也切到 `showAppToast` 时可以连同读取点一起清掉；
+  ///   现在删，一旦某个读取点漏改就是「二级页没反馈」的新回归。
   ///
   /// ⚠️ 用 `ValueNotifier` 而不是让二级页 `addListener(host)`：
   ///    `State` **不是** `Listenable`（只有 `ChangeNotifier` 是）。
-  /// ⚠️ host 自己的 toast 渲染**原样保留** —— 这两个只是**追加**通道，
-  ///    不替换既有行为（一级页的 toast 仍由 `_toast` 字段驱动）。
   final _dataRev = ValueNotifier<int>(0);
   final _toastRev = ValueNotifier<String?>(null);
 
@@ -577,16 +582,44 @@ class SettingsPageState extends State<SettingsPage> {
     }
   }
 
+  /// 弹一条操作反馈
+  ///
+  /// ★ 2026-10-10：`_flash(msg)` → `showAppToast(context, msg)`
+  ///
+  /// 改前是「自绘黑底胶囊」：自己 `setState` + 一个 3 秒的
+  /// `Future.delayed` 清屏。
+  ///
+  /// # 为什么不自己画了（三个理由）
+  ///
+  /// ```text
+  /// ① 宿主已经挂好了 —— `lib/shell.dart` 的 `MaterialApp.builder` 里
+  ///    `ToastHost(child: _TitleBarHost(child: …))`，位置与自绘标题栏
+  ///    **同一层**（Navigator 之外）⇒ 首页/详情页/播放页/本页的
+  ///    **所有**二级路由都收得到。
+  ///    （`test/toast_host_mounted_test.dart` 有守卫：删掉挂载立刻红。）
+  /// ② 自己画的版本有个**结构缺陷**：`_flash` 写在宿主 State 里，
+  ///    而 JS 插件二级页是 `Navigator.push` 上去的**另一条路由** ——
+  ///    所以必须额外维护一个 `_toastRev` + 二级页里自己再画一份
+  ///    （`lib/ui/settings_page.dart:3591` 那个 `ValueListenableBuilder`）。
+  ///    统一组件在 shell 层，二级页**天然**能弹 ⇒ 这条同步链路不必存在。
+  /// ③ 观感更好且**可关闭**：常驻 ✕ + Esc 可关 + 2.6s 后 1.2s 渐隐。
+  /// ```
+  ///
+  /// # ⚠️ `_toastRev` / `_toast` 字段与二级页的读取点**故意保留**
+  ///
+  /// 它们还被 `_PluginsPageState`（二级页自己那份 toast 绘制）读着，
+  /// 删字段会连带删掉二级页的显示逻辑 —— 那是超出本轮范围的改动。
+  ///
+  /// ⇒ 只换**发射端**（`_flash` 的实现），接收端原样留着。
+  ///    注意 `_flash` 现在**不再写**这两个字段，所以旧通道不会触发
+  ///    ⇒ 同一条消息**不会**弹两次。代价是二级页那个
+  ///    `ValueListenableBuilder` 目前恒为 `null`（不画任何东西）——
+  ///    这是"死代码"而不是"坏行为"，等二级页也切到 `showAppToast`
+  ///    时可以连同 `_toastRev` 一起清掉。留一条不触发的新通道，
+  ///    比删掉之后发现某个读取点漏了要安全。
   void _flash(String msg) {
     if (!mounted) return;
-    setState(() => _toast = msg);
-    // ★ task-43：二级页在另一条路由上，看不到宿主 Stack 里的 toast
-    _toastRev.value = msg;
-    Future.delayed(const Duration(seconds: 3), () {
-      if (!mounted) return;
-      if (_toast == msg) setState(() => _toast = null);
-      if (_toastRev.value == msg) _toastRev.value = null;
-    });
+    showAppToast(context, msg);
   }
 
   // ═══════════════════════════════════════════════════════════════════
@@ -1815,6 +1848,10 @@ class SettingsPageState extends State<SettingsPage> {
                   // ★ 4px → 8px（28px 大标题与 14px 副标题需要更宽的呼吸）
                   const SizedBox(height: Sp.x2),
                   Text(
+                    // ⚠️ 这句副标题被 4 处间距测试当作**锚点字符串**
+                    //   （task44_header_spacing / task44_spacing_pixels /
+                    //   t88_cloudsync_move），改它会连带让那些像素级守卫失效，
+                    //   而它本身并不误导用户 ⇒ 保持原样。
                     '内容源、网络与同步',
                     style: TextStyle(
                       fontSize: FontSizes.sm,
@@ -1855,27 +1892,33 @@ class SettingsPageState extends State<SettingsPage> {
              * ⚠️ 只藏 UI 不够：lib/shell.dart 里 RemoteBridgeHost 的挂载点
              *    也必须按设备门控（见该处注释），否则手机照样在监听遥控端口。
              */
-            if (!Device.isTouchOnly)
-              _Block(
-                title: '局域网遥控',
-                trailing: Text(
-                  '手机浏览器遥控，不用装 App',
-                  style: TextStyle(
-                    fontSize: FontSizes.cap,
-                    color: colors.onSurfaceVariant,
-                  ),
-                ),
-                children: [
-                  Text(
-                    'TV 遥控器打字搜索很难用。开启后，手机浏览器打开下面的网址，'
-                    '就能搜索、选集、切线路、下一集 —— 手机输入关键词，电视上直接开播。',
-                    style: TextStyle(
-                      fontSize: FontSizes.sm,
-                      color: colors.onSurfaceVariant,
-                    ),
-                  ),
-                  const SizedBox(height: Sp.x4),
-
+            /*
+             * ★★★ 2026-10-10：分组标签提到**首块之前**
+             *
+             * 改前这一页的结构是：
+             * ```text
+             * 设置 / 内容源、网络与同步
+             * ┌ 局域网遥控 ─────────────┐   ← 没有组，孤零零顶在最上面
+             * ┌ JS 插件              ›  ┐
+             *   内容源                     ← 组标签跑到第二个块**下面**
+             * ┌ Emby                  ›  ┐
+             *   播放与观看
+             * ```
+             * ⇒ 「局域网遥控」没有任何组，「JS 插件」上无组下有组 ⇒ 读不出结构。
+             *
+             * ⇒ 每一块之前都先给它自己的组标签：组标签的 `top` 间距
+             *   会自然把上一组推开，第一组由下面那个 Sp.x8 兜住。
+             */
+            if (!Device.isTouchOnly) ...[
+              const SettingsGroupLabel(text: '远程'),
+              _RemoteBlock(
+                running: _remote?.running == true,
+                autoStart: _remoteAutoStart,
+                busy: _remoteBusy,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
                   /*
                    * ★ 开机自启放在状态区**之上**
                    *
@@ -1932,8 +1975,10 @@ class SettingsPageState extends State<SettingsPage> {
                       onSetFixedPin: _setFixedPin,
                       onCopy: _copy,
                     ),
-                ],
+                  ],
+                ),
               ),
+            ],
             // ── JS 插件（二级页入口，task-43）──
             /*
              * ★★★ 用户原话：
@@ -1980,8 +2025,9 @@ class SettingsPageState extends State<SettingsPage> {
              * ⚠️ 组标签必须放在 `SettingsEntryRow` **之前**，
              *   且**不能**插进 `SettingsBlock` 内部（它自带 padding）。
              */
-            const SettingsGroupLabel(text: '内容源'),
+            const SettingsGroupLabel(text: '内容源与插件'),
             SettingsEntryRow(
+              icon: Icons.extension_outlined,
               title: 'JS 插件',
               subtitle: '${_providers.length} 个内容源 · 安装 / 编辑 / 更新 / 排序 / 代理',
               onTap: _openPluginsPage,
@@ -2011,6 +2057,7 @@ class SettingsPageState extends State<SettingsPage> {
              *    这里再算一次等于两份真相。
              */
             SettingsEntryRow(
+              icon: Icons.album_outlined,
               title: 'Emby',
               subtitle: '媒体服务器 · 安装插件 / 服务器地址 / 连接自检',
               onTap: () => _openSubPage(const EmbySettingsPage()),
@@ -2065,6 +2112,7 @@ class SettingsPageState extends State<SettingsPage> {
             // ── 二级页入口（2026-09-25 任务 ㉙ 方案 A）──
             SettingsGroupLabel(text: '播放与观看'),
             SettingsEntryRow(
+              icon: Icons.content_cut_outlined,
               title: '片头片尾',
               subtitle: _skipMarkers.isEmpty
                   ? '还没有设置过 · 在播放器底栏可以设置'
@@ -2073,6 +2121,7 @@ class SettingsPageState extends State<SettingsPage> {
             ),
             if (Device.isDesktop)
               SettingsEntryRow(
+                icon: Icons.keyboard_outlined,
                 title: 'PC 播放手势',
                 subtitle: '方向键单击/长按 · 鼠标左右半屏',
                 onTap: () => _openSubPage(const PcGesturesSettingsPage()),
@@ -2081,6 +2130,7 @@ class SettingsPageState extends State<SettingsPage> {
             //   标题「播放与下载」是**刻意**与播放器里那个「播放设置」面板
             //   区分的 —— 面板管字幕/音轨/倍速，这一页管下载与缓存。
             SettingsEntryRow(
+              icon: Icons.download_outlined,
               title: '播放与下载',
               /*
                * ★ 2026-10-09：副标题跟着 log-dev 的改名走
@@ -2109,6 +2159,7 @@ class SettingsPageState extends State<SettingsPage> {
             //   `lib/ui/settings/touch_gestures_page.dart:72-92`），
             //   比把入口整个藏掉更容易让用户明白为什么没有档位可选。
             SettingsEntryRow(
+              icon: Icons.touch_app_outlined,
               title: '触摸手势',
               subtitle: '双击左右侧 · 长按左右侧（触摸端生效）',
               onTap: () => _openSubPage(const TouchGesturesSettingsPage()),
@@ -2239,6 +2290,7 @@ class SettingsPageState extends State<SettingsPage> {
              * ⚠️ 我只**新增**这一个区块 —— 不碰本页任何既有区块
              *    （片头片尾 / 直播源配置 / JS 插件 / 云存储 / 主题 / 关于）
              */
+            const SettingsGroupLabel(text: '外观'),
             _Block(
               title: '动画效果',
               children: [
@@ -2267,16 +2319,19 @@ class SettingsPageState extends State<SettingsPage> {
 
             SettingsGroupLabel(text: '数据与外观'),
             SettingsEntryRow(
+              icon: Icons.cloud_sync_outlined,
               title: '备份与恢复',
               subtitle: '导出 / 导入本机数据（合并，不覆盖）',
               onTap: () => _openSubPage(const BackupSettingsPage()),
             ),
             SettingsEntryRow(
+              icon: Icons.palette_outlined,
               title: '主题',
               subtitle: '当前：${AppTheme.mode.label} · 跟随系统 / 浅色 / 深色',
               onTap: () => _openSubPage(const ThemeSettingsPage()),
             ),
             SettingsEntryRow(
+              icon: Icons.info_outline,
               title: '关于',
               subtitle: '${SourinApi.version} · 架构与设备信息',
               onTap: () => _openSubPage(const AboutSettingsPage()),
@@ -2284,62 +2339,6 @@ class SettingsPageState extends State<SettingsPage> {
           ],
         ),
 
-        // ── Toast ──
-        if (_toast != null)
-          Positioned(
-            left: 0,
-            right: 0,
-            /*
-             * ★★ 2026-09-24 实测修复：`Sp.x10`(40) → `Sp.bottomBarInset`(90)
-             *
-             * # 原来的问题（真机截图取证，不是我猜的）
-             *
-             * 底栏改成了**悬浮玻璃**（`shell.dart` 的 Stack，不占布局空间），
-             * 而 toast 只让了 40px —— 于是它**正好落在玻璃底栏底下**：
-             * ```text
-             * 截图（PrintWindow）：toast 被底栏的模糊层糊住，
-             * 文字完全不可辨认，只看得见一团黑色圆角矩形
-             * ```
-             * 后果：**所有 `_flash()` 的反馈都读不到** ——
-             * 包括这次任务 R 刚加的「N 个源不可用」「全部正常」
-             *「已重新加载 N 个插件」「已导入「X」」。
-             * 提示发出来了、用户看不见 = 等于没发。
-             *
-             * # 为什么用 `Sp.bottomBarInset` 而不是把数字调大
-             *
-             * 那个 token 的注释写着它的**存在理由**就是这件事：
-             * > 页面内容底部留白 —— **给悬浮底栏让位**
-             * > 桌面 底栏 58 + 间隙 12 + 余量 20 = 90
-             * 它已经被 ListView 的 padding 用了（见 `build()` 开头），
-             * 这里用同一个值，toast 与"内容最底边"对齐 ——
-             * 视觉上一致，且**桌面/TV 自动分别取 90 / 110**
-             *（TV 底栏更高，写死 90 在 TV 上仍会被盖）。
-             *
-             * ⚠️ 我自己定的教训：**新增"贴在底部"的浮动元素时，
-             *    先看有没有现成的 inset token** —— 这个坑的代价是
-             *    一个功能（健康检测）看起来"点了没反应"。
-             */
-            bottom: Sp.bottomBarInset,
-            child: Center(
-              child: Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: Sp.x5,
-                  vertical: Sp.x3,
-                ),
-                decoration: BoxDecoration(
-                  color: Colors.black.withValues(alpha: 0.85),
-                  borderRadius: Radii.rFull,
-                ),
-                child: Text(
-                  _toast!,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: FontSizes.sm,
-                  ),
-                ),
-              ),
-            ),
-          ),
       ],
     );
   }
@@ -2847,63 +2846,91 @@ class SettingsPageState extends State<SettingsPage> {
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
+          /*
+           * ★★ 2026-10-10：8 个按钮 → 2 个常驻 + 一个 ⋮ 菜单
+           *
+           * 改前（Owner：「3.js插件的ui不好看」）：
+           * ```text
+           * [调整顺序][健康检测][测速][导入源] │ [重新加载][从网址安装][粘贴源码安装]
+           * ```
+           * 8 个描边按钮排成两行、还夹一条竖线，在 26 张卡片**上面**压着
+           * —— 一眼扫过去最抢眼的是一排按钮，而不是「有哪些源」。
+           *
+           * ⇒ 按频率分层：
+           * ```text
+           * 常驻  [从网址安装]  [⋮]   安装是这一页的主要入口
+           * 菜单  调整顺序 / 健康检测 / 测速 / 导入源 / 重新加载 / 粘贴源码安装
+           * ```
+           *   —— 全部**一个没删**，只是收进菜单（菜单项带图标 + 文案，
+           *      比 6 个同款描边按钮好认得多）。
+           *
+           * ⚠️ `PopupMenuButton` 可被方向键聚焦、Enter 打开、
+           *    菜单项在菜单路由里可方向键上下选 ⇒ TV 上不失可达。
+           */
           Wrap(
             spacing: Sp.x2,
             runSpacing: Sp.x2,
             crossAxisAlignment: WrapCrossAlignment.center,
             children: [
-              // ── 左组：作用于**全部源** ──
-              OutlinedButton.icon(
-                onPressed: _openOrderDialog,
-                icon: const Icon(Icons.reorder, size: 16),
-                label: const Text('调整顺序'),
+              FilledButton.icon(
+                onPressed: _installPlugin,
+                icon: const Icon(Icons.download, size: 16),
+                label: const Text('从网址安装'),
               ),
-              OutlinedButton.icon(
-                onPressed: _sweeping ? null : _healthSweep,
-                icon: const Icon(Icons.monitor_heart_outlined, size: 16),
-                label: Text(_sweeping ? '检测中…' : '健康检测'),
+              PopupMenuButton<String>(
+                tooltip: '更多操作',
+                icon: const Icon(Icons.more_vert, size: 18),
+                onSelected: (v) {
+                  switch (v) {
+                    case 'order':
+                      _openOrderDialog();
+                    case 'health':
+                      if (!_sweeping) _healthSweep();
+                    case 'import':
+                      _openImportDialog();
+                    case 'reload':
+                      if (!_pluginBusy) _reloadPlugins();
+                    case 'source':
+                      _installPluginSource();
+                  }
+                },
+                itemBuilder: (_) => [
+                  PopupMenuItem(
+                    value: 'order',
+                    child: _menuRow(Icons.reorder, '调整顺序'),
+                  ),
+                  PopupMenuItem(
+                    value: 'health',
+                    enabled: !_sweeping,
+                    child: _menuRow(
+                      Icons.monitor_heart_outlined,
+                      _sweeping ? '处理中…' : '健康检测',
+                    ),
+                  ),
+                  PopupMenuItem(
+                    value: 'import',
+                    child: _menuRow(Icons.add, '导入源'),
+                  ),
+                  PopupMenuItem(
+                    value: 'reload',
+                    enabled: !_pluginBusy,
+                    child: _menuRow(
+                      Icons.refresh,
+                      _pluginBusy ? '处理中…' : '重新加载',
+                    ),
+                  ),
+                  PopupMenuItem(
+                    value: 'source',
+                    child: _menuRow(Icons.code, '粘贴源码安装'),
+                  ),
+                ],
               ),
-              /*
-               * ★★★ 2026-10-09：插件**实测速率**入口（Owner：「js插件那里做一个探测功能,
-               *     强制的啊,就是看哪个视频网站速度快,然后这个测速的记录要持久化」）
-               *
-               * ⚠️ 这里的「速度」是**真实下载速率（MB/s）**，不是 ping 延迟 ——
-               *    Owner 专门澄清过（「随机挑一部影片实测速率有多少」）。
-               *    实现见 `widgets/plugin_speedtest.dart`（随机抽片 → 真下载 → 计时）。
-               */
+              // 测速自带自己的按钮态（进度/结果），仍常驻在块头右侧。
               PluginSpeedTestAllButton(
                 pluginIds: list
                     .where((p) => p.enabled)
                     .map((p) => p.id)
                     .toList(growable: false),
-              ),
-              OutlinedButton.icon(
-                onPressed: _openImportDialog,
-                icon: const Icon(Icons.add, size: 16),
-                label: const Text('导入源'),
-              ),
-              // ── 两组之间的竖线（原版 `.head__sep`）──
-              Container(
-                width: 1,
-                height: 18,
-                margin: const EdgeInsets.symmetric(horizontal: Sp.x1),
-                color: colors.outlineVariant,
-              ),
-              // ── 右组：只作用于 JS 插件 ──
-              OutlinedButton.icon(
-                onPressed: _pluginBusy ? null : _reloadPlugins,
-                icon: const Icon(Icons.refresh, size: 16),
-                label: Text(_pluginBusy ? '处理中…' : '重新加载'),
-              ),
-              FilledButton.tonalIcon(
-                onPressed: _installPlugin,
-                icon: const Icon(Icons.download, size: 16),
-                label: const Text('从网址安装'),
-              ),
-              OutlinedButton.icon(
-                onPressed: _installPluginSource,
-                icon: const Icon(Icons.code, size: 16),
-                label: const Text('粘贴源码安装'),
               ),
             ],
           ),
@@ -3684,11 +3711,17 @@ const double _dragSlotW = 22;
 /// 图标与正文间距 ………………………………………… 12
 /// 正文（名称行硬需求）……………………………… 156
 /// 正文与按钮间距 …………………………………………  8
-/// 操作按钮区（5 个按钮，flex:none）……………… 264
+/// 操作按钮区（7 个按钮，flex:none）…………… 232
 /// ────────────────────────────────────────────────
-/// 合计 ………………………………………………… 516
+/// 合计 ………………………………………………… 484
 /// ```
-/// 向上取整到 10 的倍数 → **520**。
+/// 向上取整到 10 的倍数 → **520**（当时按钮区是 264，本轮收进 ⋮ 菜单后
+/// 降到 232，卡片总需求 484；520 留 36 余量给 chip 与窄列，见下）。
+///
+/// ⚠️ 这些数字会变：加一个按钮（约 +32~48）、换把手宽度、
+///    改图标尺寸，都要**重新量一遍**再改这个常量 ——
+///    否则卡片会在某个宽度区间悄悄溢出（`RenderFlex overflowed`）。
+///    量法：把窗口扫一遍，看哪里开始出现 overflow（`.probe/` 里有探针）。
 ///
 /// ⚠️ 这些数字会变：加一个按钮（约 +40~48）、换把手宽度、
 ///    改图标尺寸，都要**重新量一遍**再改这个常量 ——
@@ -4733,37 +4766,39 @@ class _ProviderCard extends StatelessWidget {
          *    > JS 插件当然该能编辑 —— 它就是磁盘上的一个 .js 文件。
          *    所以 `_canEdit` 里必须有 `'js'`。
          */
-        if (_canEdit)
-          TextButton(
-            onPressed: onEdit,
-            style: TextButton.styleFrom(
-              padding: const EdgeInsets.symmetric(horizontal: Sp.x3),
-              minimumSize: const Size(0, 32),
-              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        if (_canEdit || _isThirdParty)
+          PopupMenuButton<String>(
+            tooltip: '更多操作',
+            padding: EdgeInsets.zero,
+            icon: Icon(
+              Icons.more_vert,
+              size: 17,
+              color: colors.onSurfaceVariant,
             ),
-            child: const Text('编辑', style: TextStyle(fontSize: FontSizes.cap)),
-          ),
-        // 「启用 / 停用」—— 文案随状态变（原版也是）
-        TextButton(
-          onPressed: onToggle,
-          style: TextButton.styleFrom(
-            padding: const EdgeInsets.symmetric(horizontal: Sp.x3),
-            minimumSize: const Size(0, 32),
-            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-          ),
-          child: Text(
-            provider.enabled ? '停用' : '启用',
-            style: const TextStyle(fontSize: FontSizes.cap),
-          ),
-        ),
-        // 「移除」只对第三方显示（内置源删了会复活）
-        if (_isThirdParty)
-          IconButton(
-            onPressed: onRemove,
-            icon: const Icon(Icons.delete_outline, size: 17),
-            tooltip: '移除',
-            visualDensity: VisualDensity.compact,
-            color: colors.onSurfaceVariant,
+            onSelected: (v) {
+              if (v == 'edit') onEdit();
+              if (v == 'remove') onRemove();
+            },
+            itemBuilder: (_) => [
+              if (_canEdit)
+                const PopupMenuItem(
+                  value: 'edit',
+                  child: Row(children: [
+                    Icon(Icons.edit_outlined, size: 16),
+                    SizedBox(width: Sp.x3),
+                    Text('编辑'),
+                  ]),
+                ),
+              if (_isThirdParty)
+                PopupMenuItem(
+                  value: 'remove',
+                  child: Row(children: [
+                    Icon(Icons.delete_outline, size: 16, color: colors.error),
+                    SizedBox(width: Sp.x3),
+                    Text('移除这个源', style: TextStyle(color: colors.error)),
+                  ]),
+                ),
+            ],
           ),
       ],
     );
@@ -5256,6 +5291,160 @@ class _FieldLabel extends StatelessWidget {
 ///    忘了删旧的那份，编译报 `The name '_ChipTone' is already defined`。
 ///    Dart 里同名类型不能重复声明（即使内容完全一样）。
 enum _ChipTone { plain, brand, off, danger }
+
+/// 菜单项的一行（图标 + 文案）—— 插件块头 / 卡片 ⋮ 菜单共用///
+/// 为什么单独抽：两处菜单的项都是同一形态（16px 图标 + 8px 间距 + 文字），
+/// 各写一遍的代价是以后调间距时漏一处，菜单里就出现两种行宽。
+/// 「局域网遥控」区块外壳 —— **默认收起**（2026-10-10）
+///
+/// # 为什么要收起（实测依据）
+///
+/// 改前它是一个常开的 `SettingsBlock`，在手机（412×915）上量得：
+/// ```text
+/// 组「远程」       top = 135
+/// 组「内容源与插件」 top = 835   ← 差 700px
+/// ```
+/// 也就是**首屏 915px 里有 700px 被遥控一个功能占掉**，
+/// 而「内容源与插件」（用户最常用的那一组）要往下滑一整屏才看得到。
+/// 遥控还是**默认关闭**的低频功能（Owner 没开过）。
+///
+/// 根因不只是"说明文字长"—— 开启后的 `_RemotePanel` 里有 PIN 码、
+/// 二维码、复制按钮，那一块天生就高。展开时必须让位，没理由让
+/// **没启用**时也先占着。
+///
+/// # 收起态给出什么
+///
+/// ```text
+/// ┌ ⌁▾ 局域网遥控  没开启 · 手机浏览器遥控，不用装 App ┐
+/// ```
+/// 一行说清「是什么 + 现在什么状态」，想配的人点一下就展开 ——
+/// 与本页其它入口行（`SettingsEntryRow`）同一形态。
+///
+/// # 展开态
+///
+/// 沿用 `SettingsBlock` 的视觉（同样的标题字号、同样的外框），
+/// 末尾多一行「收起」入口 —— 折叠了却没法展开回来是不行的。
+class _RemoteBlock extends StatefulWidget {
+  const _RemoteBlock({
+    required this.running,
+    required this.autoStart,
+    required this.busy,
+    required this.child,
+  });
+
+  /// 遥控当前是否**已在运行**
+  final bool running;
+
+  /// 「开机自动开启」是否勾上
+  final bool autoStart;
+
+  final bool busy;
+
+  /// 展开后的内容（开关 + 启动按钮 / 运行面板）
+  final Widget child;
+
+  @override
+  State<_RemoteBlock> createState() => _RemoteBlockState();
+}
+
+class _RemoteBlockState extends State<_RemoteBlock> {
+  /// ★ 默认收起；一旦**用户自己**展开过就记住（否则每次进设置页
+  ///   都要重新点开，反复配置的用户会觉得这个折叠很烦）。
+  ///
+  /// 「已在运行」时**强制展开** —— 那种情况下用户多半是来改 PIN /
+  /// 停掉它，折叠起来等于把正在用的功能藏了。
+  bool _open = false;
+
+  bool get _shouldOpen => _open || widget.running;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+
+    if (!_shouldOpen) {
+      return Material(
+        type: MaterialType.transparency,
+        child: InkWell(
+          borderRadius: Radii.rLg,
+          onTap: () => setState(() => _open = true),
+          child: Container(
+            padding: const EdgeInsets.symmetric(
+              horizontal: Sp.x4,
+              vertical: Sp.x3,
+            ),
+            decoration: BoxDecoration(
+              color: colors.surfaceContainerHighest.withValues(alpha: 0.3),
+              borderRadius: Radii.rLg,
+              border: Border.all(color: colors.outlineVariant),
+            ),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '局域网遥控',
+                        style: TextStyle(
+                          fontSize: FontSizes.base,
+                          color: colors.onSurface,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        '没开启 · 手机浏览器遥控，不用装 App',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: FontSizes.cap,
+                          color: colors.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: Sp.x2),
+                Icon(
+                  Icons.expand_more,
+                  size: 20,
+                  color: colors.onSurfaceVariant,
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
+    return SettingsBlock(
+      title: '局域网遥控',
+      trailing: TextButton(
+        onPressed: widget.busy ? null : () => setState(() => _open = false),
+        child: const Text('收起'),
+      ),
+      children: [
+        Text(
+          'TV 遥控器打字搜索很难用。开启后，手机浏览器打开下面的网址，'
+          '就能搜索、选集、切线路、下一集 —— 手机输入关键词，电视上直接开播。',
+          style: TextStyle(
+            fontSize: FontSizes.sm,
+            color: colors.onSurfaceVariant,
+          ),
+        ),
+        const SizedBox(height: Sp.x4),
+        widget.child,
+      ],
+    );
+  }
+}
+
+Widget _menuRow(IconData icon, String label, {Color? color}) => Row(
+      children: [
+        Icon(icon, size: 16, color: color),
+        const SizedBox(width: Sp.x3),
+        Text(label, style: color == null ? null : TextStyle(color: color)),
+      ],
+    );
 
 class _MiniChip extends StatelessWidget {
   const _MiniChip({required this.text, this.tone = _ChipTone.plain});

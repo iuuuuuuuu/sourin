@@ -83,8 +83,13 @@ void main() {
         reason: '★ 名称必须包在 `Flexible` 里 —— 原版 `flex: 0 1 auto`，'
             '允许**收缩**而不是撑开。不收缩的话内容会溢出卡片盖住右侧按钮',
       );
+      // ★ 2026-10-10：这条原来找的是**带缩进**的字面量
+      //   `'maxLines: 1,\n            overflow: …'`（12 空格），
+      //   只要编辑器/格式化动一下缩进就假红 —— 它守的是
+      //   「名称限一行 + 省略号」，不是那个空格数。改成正则。
       expect(
-        src.contains('maxLines: 1,\n            overflow: TextOverflow.ellipsis,'),
+        RegExp(r'maxLines:\s*1,\s*\n\s*overflow:\s*TextOverflow\.ellipsis,')
+            .hasMatch(src),
         isTrue,
         reason: '★ 名称必须 `maxLines: 1` + ellipsis —— 这是"不换行"的实现',
       );
@@ -199,11 +204,26 @@ void main() {
         isTrue,
         reason: '要有"是否第三方"的判断',
       );
-      expect(
-        src.contains("if (_isThirdParty)\n          IconButton("),
-        isTrue,
-        reason: '★ 「移除」只在第三方源上显示',
-      );
+      /*
+       * ★ 2026-10-10：判据从**字面形状**改成**行为不变式**
+       *
+       * 改前断言找的是 `"if (_isThirdParty)\n          IconButton("`
+       * —— 它把「移除是第三方专属」和「移除画成 IconButton」两件事
+       * 焊死在一个字符串上。卡片操作收进 ⋮ 菜单后，移除从 IconButton
+       * 变成 `PopupMenuItem`，这条断言就红了 —— 但**行为没变**。
+       *
+       * ⇒ 改判「移除那一项确实仍被 `_isThirdParty` 把守」，
+       *    这才是这条测试从一开始要守的东西（内置源删了会复活）。
+       */
+      // ★ 同上：原来找的是带缩进的字面量，改成正则（只认"移除这一项
+      //   确实仍被 `_isThirdParty` 把守"，不认空格数）。
+      final i = RegExp(r'if \(_isThirdParty\)\s*\n\s*PopupMenuItem\(')
+          .firstMatch(src);
+      expect(i != null, isTrue,
+          reason: '★ 「移除」只在第三方源上显示（现在收在 ⋮ 菜单里）');
+      final item = src.substring(i!.start, i.start + 400);
+      expect(item.contains("value: 'remove'"), isTrue,
+          reason: '★ 菜单项就是「移除」那个动作');
     });
 
     test('★ 能力标签必须来自**同一份**数据源（避免空行）', () {
@@ -236,8 +256,14 @@ void main() {
     });
 
     test('★ 有"调整顺序"入口（原有功能不回归）', () {
-      expect(src.contains("label: const Text('调整顺序')"), isTrue,
-          reason: '排序面板入口必须保留');
+      /*
+       * ★ 2026-10-10：入口从「块头的一枚描边按钮」搬进了 ⋮ 菜单，
+       *   断言从"存在 `label: const Text('调整顺序')`"改成
+       *   「菜单里有这一项，且它调的仍是 `_openOrderDialog`」。
+       *   —— 行为不变（用户仍然点得到排序面板），只是位置换了。
+       */
+      expect(src.contains("_menuRow(Icons.reorder, '调整顺序')"), isTrue,
+          reason: '排序面板入口必须保留（现在在 ⋮ 菜单里）');
       expect(src.contains('_openOrderDialog'), isTrue,
           reason: '_openOrderDialog 还在用');
     });

@@ -54,6 +54,7 @@ import '../core/title_match.dart';
 import 'tokens.dart';
 import 'widgets/fade_in_sliver.dart';
 import 'widgets/poster_card.dart';
+import 'widgets/settings_kit.dart';
 
 /// 一个命中源的结果组：(provider 标识, 源显示名, 该源返回的条目)
 ///
@@ -540,31 +541,11 @@ class SearchPageState extends State<SearchPage> {
 
         // ── 无可搜索源 ──
         if (_totalProviders == 0)
-          SliverToBoxAdapter(
-            child: Padding(
-              padding: Layout.contentInsetOf(context),
-              child: Container(
-                padding: const EdgeInsets.all(Sp.x4),
-                decoration: BoxDecoration(
-                  color: colors.surfaceContainerHighest.withValues(alpha: 0.3),
-                  borderRadius: Radii.rLg,
-                ),
-                child: Row(
-                  children: [
-                    Icon(Icons.info_outline, size: 17, color: colors.onSurfaceVariant),
-                    const SizedBox(width: Sp.x3),
-                    Expanded(
-                      child: Text(
-                        '当前没有支持搜索的内容源（央视官方无公开搜索接口）',
-                        style: TextStyle(
-                          fontSize: FontSizes.sm,
-                          color: colors.onSurfaceVariant,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
+          const SliverToBoxAdapter(
+            child: EmptyState(
+              icon: Icons.travel_explore_outlined,
+              title: '当前没有支持搜索的内容源',
+              hint: '央视官方无公开搜索接口。启用其它内容源后即可在这里一起搜索。',
             ),
           )
 
@@ -608,34 +589,18 @@ class SearchPageState extends State<SearchPage> {
                  */
                 if (_totalResults == 0 && !_searching)
                   const _NoResult()
-                else if (_totalResults > 0) ...[
+                else if (_totalResults > 0)
                   for (final h in _hits) _ResultGroup(group: h, onOpen: _open),
 
-                  // ★ 还在搜：底部显示进度
-                  if (_searching)
-                    Padding(
-                      padding: const EdgeInsets.symmetric(vertical: Sp.x8),
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          const SizedBox(
-                            width: 16,
-                            height: 16,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          ),
-                          const SizedBox(width: Sp.x3),
-                          Text(
-                            '还在搜索…（已搜 $_settled'
-                            '${_totalProviders > 0 ? "/$_totalProviders" : ""} 个源）',
-                            style: TextStyle(
-                              fontSize: FontSizes.sm,
-                              color: colors.onSurfaceVariant,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                ],
+                /*
+                 * ★ 还在搜：进度行**与「有没有结果」无关**，一律显示
+                 *
+                 * 原来它被关在 `else if (_totalResults > 0)` 里面 ⇒
+                 * 「一个源都还没命中、但后面还有源在搜」的那两三秒里，
+                 * 结果区**整块是空的** —— 用户看到的是"搜了但什么都没发生"。
+                 * 现在连「暂无结果，先给你个进度」这一段也一起给。
+                 */
+                if (_searching) _SearchProgress(settled: _settled, total: _totalProviders),
 
                 // ★ 被跳过的源：明确告知，不静默失败
                 if (_skipped.isNotEmpty) _SkippedList(skipped: _skipped),
@@ -648,38 +613,7 @@ class SearchPageState extends State<SearchPage> {
         // ⚠：`slivers:` 里只能放 Sliver。这里用
         //    `SliverToBoxAdapter` 包一个普通 Box widget（同 `_NoResult`）。
         else
-          SliverToBoxAdapter(
-            child: Padding(
-              padding: const EdgeInsets.symmetric(vertical: Sp.x16),
-              child: Column(
-                children: [
-                  Icon(
-                    Icons.search,
-                    size: 56,
-                    color: colors.onSurfaceVariant.withValues(alpha: 0.4),
-                  ),
-                  const SizedBox(height: Sp.x4),
-                  Text(
-                    '搜索全部内容源',
-                    style: TextStyle(
-                      fontSize: FontSizes.base,
-                      fontWeight: FontWeight.w600,
-                      color: colors.onSurface,
-                    ),
-                  ),
-                  const SizedBox(height: Sp.x2),
-                  Text(
-                    '输入关键词后回车即可同时搜索',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      fontSize: FontSizes.sm,
-                      color: colors.onSurfaceVariant,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
+          const SliverToBoxAdapter(child: _IdleHint()),
         // ── 底部让位（悬浮底栏盖在所有路由之上）──
         //
         // ⚠️ 这里**不能**加 `const`：`Sp.bottomBarInset` 是 getter
@@ -827,20 +761,28 @@ class _ResultGroup extends StatelessWidget {
     final cols = Layout.columnsForBand(band);
 
     return Padding(
-      padding: EdgeInsets.only(bottom: Sp.bottomBarInset),
+      // ★ 组间距用 Sp.x8；底部让位由 CustomScrollView 末尾那个
+      //   SliverToBoxAdapter 统一给（见 build 的最后一条 sliver）。
+      //   原来每一组都带 Sp.bottomBarInset(90) ⇒ 组间凭空多出 90px 空白，
+      //   结果一多就变成"结果之间裂开"，与"不闪不跳"的要求正好相反。
+      padding: const EdgeInsets.only(bottom: Sp.x8),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Padding(
-            padding: Layout.contentInsetOf(context),
+            padding: EdgeInsets.only(
+              bottom: Sp.x2,
+              left: Layout.contentPaddingOf(context),
+              right: Layout.contentPaddingOf(context),
+            ),
             child: Row(
               children: [
                 Container(
-                  width: 6,
-                  height: 6,
+                  width: 4,
+                  height: 18,
                   decoration: BoxDecoration(
                     color: colors.primary,
-                    shape: BoxShape.circle,
+                    borderRadius: BorderRadius.circular(2),
                   ),
                 ),
                 const SizedBox(width: Sp.x2),
@@ -907,6 +849,55 @@ class _ResultGroup extends StatelessWidget {
                 titleLines: 2,
                 onTap: () => onOpen(group.items[i]),
               ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 搜索进行中的进度行
+///
+/// # 为什么单独一个零件
+///
+/// 它现在**与「有没有结果」无关**地显示（见 build 里那处改动），
+/// 两种情形下文案不一样：
+/// ```text
+/// 命中过 → 「还在搜索…（已搜 3/12 个源）」
+/// 一条没中 → 「正在搜索 12 个内容源…」（不能写"已搜"，还没结果）
+/// ```
+class _SearchProgress extends StatelessWidget {
+  const _SearchProgress({required this.settled, required this.total});
+
+  final int settled;
+  final int total;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final label = settled > 0
+        ? '还在搜索…（已搜 $settled${total > 0 ? "/$total" : ""} 个源）'
+        : '正在搜索 ${total > 0 ? "$total " : ""}个内容源…';
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: Sp.x8),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          SizedBox(
+            width: 15,
+            height: 15,
+            child: CircularProgressIndicator(
+              strokeWidth: 2,
+              color: colors.primary,
+            ),
+          ),
+          const SizedBox(width: Sp.x3),
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: FontSizes.sm,
+              color: colors.onSurfaceVariant,
             ),
           ),
         ],
@@ -988,39 +979,27 @@ class _NoResult extends StatelessWidget {
   const _NoResult();
 
   @override
-  Widget build(BuildContext context) {
-    final colors = Theme.of(context).colorScheme;
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: Sp.x16),
-      child: Column(
-        children: [
-          Icon(
-            Icons.search_off,
-            size: 56,
-            color: colors.onSurfaceVariant.withValues(alpha: 0.4),
-          ),
-          const SizedBox(height: Sp.x4),
-          Text(
-            '没有找到相关内容',
-            style: TextStyle(
-              fontSize: FontSizes.base,
-              fontWeight: FontWeight.w600,
-              color: colors.onSurface,
-            ),
-          ),
-          const SizedBox(height: Sp.x2),
-          Text(
-            '换个关键词试试，或检查是否已启用对应内容源',
-            textAlign: TextAlign.center,
-            style: TextStyle(
-              fontSize: FontSizes.sm,
-              color: colors.onSurfaceVariant,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
+  Widget build(BuildContext context) => const EmptyState(
+        icon: Icons.search_off,
+        title: '没有找到相关内容',
+        hint: '换个关键词试试，或检查是否已启用对应内容源',
+      );
+}
+
+/// 搜索页的「还没搜」引导
+///
+/// ★ 与 [_NoResult] 走**同一个** [EmptyState] 零件 —— 两个空态的
+///   图标 / 标题 / 说明三层节奏必须一致，否则用户会以为
+///   「换了页面」（其实只是没搜 vs 搜了没找到）。
+class _IdleHint extends StatelessWidget {
+  const _IdleHint();
+
+  @override
+  Widget build(BuildContext context) => const EmptyState(
+        icon: Icons.search,
+        title: '搜索全部内容源',
+        hint: '输入关键词后回车即可同时搜索',
+      );
 }
 
 class _SearchSkeleton extends StatelessWidget {
@@ -1029,40 +1008,77 @@ class _SearchSkeleton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
+    /*
+     * ★★ 骨架必须与真实结果**逐值同形**，否则骨架→内容那一帧会跳高
+     *
+     * 原实现画的是**横向** `ListView`（一排 6 张，`posterWidth` 宽），
+     * 真实结果却是**网格**（`cols` 列、每行 `cols` 张）：
+     * ```text
+     * 骨架行高 = railHeight(2)        = 148/0.667 + meta(2)
+     * 网格行高 = posterWidth/aspect + meta(2) —— 同一个值 ✓
+     * ```
+     * 行高对得上，但**列数与每行张数**对不上（6 vs cols），
+     * 换成内容时整块宽度重排 ⇒ 肉眼可见的"一跳"。
+     *
+     * ⇒ 这里也按 `Layout.columnsForBand` 铺成同样的网格，
+     *    并且条数取 `cols × 2`（两整行），落位与内容逐格一致。
+     */
+    final band = Layout.bandFor(MediaQuery.sizeOf(context).width);
+    final cols = Layout.columnsForBand(band);
+    final inset = Layout.contentInsetOf(context);
+    final gap = Layout.gapFor(band);
+
+    Widget bar(double w, double h) => Container(
+          width: w,
+          height: h,
+          decoration: BoxDecoration(
+            color: colors.onSurface.withValues(alpha: 0.07),
+            borderRadius: BorderRadius.circular(4),
+          ),
+        );
+
     return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        for (var i = 0; i < 2; i++)
+        for (var g = 0; g < 2; g++)
           Padding(
-            padding: EdgeInsets.only(bottom: Sp.bottomBarInset),
+            padding: const EdgeInsets.only(bottom: Sp.x8),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Padding(
-                  padding: Layout.contentInsetOf(context),
-                  child: Container(
-                    width: 110,
-                    height: 18,
-                    decoration: BoxDecoration(
-                      color: colors.onSurface.withValues(alpha: 0.05),
-                      borderRadius: BorderRadius.circular(6),
-                    ),
+                  padding: EdgeInsets.only(
+                    left: inset.left,
+                    right: inset.right,
+                    bottom: Sp.x2,
+                  ),
+                  child: Row(
+                    children: [
+                      bar(4, 18),
+                      const SizedBox(width: Sp.x2),
+                      bar(110, 18),
+                    ],
                   ),
                 ),
-                const SizedBox(height: Sp.x4),
-                SizedBox(
-                  // 与结果网格逐值相同（否则骨架→内容跳高）
-                  height: AppMetrics.railHeight(titleLines: 2),
-                  child: ListView.separated(
+                Padding(
+                  padding: inset,
+                  child: GridView.builder(
                     clipBehavior: Clip.antiAlias,
-                    scrollDirection: Axis.horizontal,
+                    shrinkWrap: true,
                     physics: const NeverScrollableScrollPhysics(),
-                    padding: Layout.contentInsetOf(context),
-                    itemCount: 6,
-                    separatorBuilder: (_, __) => const SizedBox(width: Sp.x3),
-                    itemBuilder: (_, __) => Container(
-                      width: AppMetrics.posterWidth,
+                    gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                      crossAxisCount: cols,
+                      crossAxisSpacing: gap,
+                      mainAxisSpacing: Sp.x5,
+                      childAspectRatio: AppMetrics.posterWidth /
+                          (AppMetrics.posterWidth /
+                              AppMetrics.posterAspect +
+                              AppMetrics.posterMetaHeight(titleLines: 2)),
+                    ),
+                    itemCount: cols * 2,
+                    itemBuilder: (_, __) => DecoratedBox(
                       decoration: BoxDecoration(
-                        color: colors.onSurface.withValues(alpha: 0.05),
+                        color: colors.onSurface.withValues(alpha: 0.07),
                         borderRadius: Radii.rMd,
                       ),
                     ),

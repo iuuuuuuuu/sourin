@@ -75,6 +75,7 @@ import 'package:material_ui/material_ui.dart';
 
 import '../../core/sourin_api.dart';
 import 'overlay_motion.dart';
+import 'settings_kit.dart';
 
 /// 表单的两种安装方式
 enum PluginInputKind {
@@ -357,8 +358,12 @@ class _PluginEditDialogState extends State<PluginEditDialogBody> {
      * ③ `insetPadding` 给足四周留白（框架默认 40 横向，这里显式给 24/48 更好看也更稳）。
      * ```
      */
-    return AlertDialog(
-      title: Text(_isEdit ? '编辑「${widget.existing!.name}」' : '添加插件'),
+    return SettingsDialog(
+      title: _isEdit ? '编辑「${widget.existing!.name}」' : '添加插件',
+      // ★ 2026-10-10：一句话说清这个对话框在干嘛（原来只有标题）
+      subtitle: isLink
+          ? '填一个插件链接，或直接粘贴 JS 源码 —— 会自动识别'
+          : '粘贴 JS 源码（文件开头要有 @id 注释）',
       /*
        * ★★ 2026-10-09：这里**不需要** `constraints` / `insetPadding`（我撤掉了）。
        *
@@ -375,9 +380,7 @@ class _PluginEditDialogState extends State<PluginEditDialogBody> {
        *   我据此判「卡片撑满」⇒ 假红。真正该测的是**内容区**（见探针里的注释）。
        * ⇒ 教训：判据测错节点时，会同时产生**假红**和**假绿**两种误判。
        */
-      content: SizedBox(
-        width: 560,
-        child: Column(
+      child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -452,7 +455,6 @@ class _PluginEditDialogState extends State<PluginEditDialogBody> {
               ],
             ),
           ],
-        ),
       ),
       actions: [
         TextButton(

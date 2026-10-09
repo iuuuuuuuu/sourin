@@ -260,7 +260,28 @@ class SettingsBlock extends StatelessWidget {
                 borderRadius: Radii.rLg,
                 border: Border.all(color: colors.outlineVariant),
               ),
-              child: inner,
+              /*
+               * ★★ 2026-10-10：内框自带 `Material`（**不**改变视觉）
+               *
+               * 区块里不少控件是 `ListTile` 家族（`SwitchListTile` /
+               * `CheckboxListTile` …），它们把底色与**涟漪画在最近的
+               * `Material` 祖先**上。改动前这个 `Container`（一个
+               * `DecoratedBox`）就是那个祖先之外更近的一层有底色的盒子
+               * ⇒ Flutter 直接在 debug 下断言：
+               * ```text
+               * ListTile background color or ink splashes may be invisible.
+               * ```
+               * 在 release 下不报，但**点开关时看不到任何涟漪反馈** ——
+               * 用户以为没点到。
+               *
+               * ⇒ 这里补一层 `Material`（透明，不画任何底色）作为
+               *    `ListTile` 的绘制面。外层 `Container` 的底色与边框
+               *    一像素不变，只是涟漪终于有地方画了。
+               */
+              child: Material(
+                type: MaterialType.transparency,
+                child: inner,
+              ),
             ),
         ],
       ),
@@ -435,6 +456,205 @@ class SettingsGesturePill extends StatelessWidget {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+//  空态
+// ═══════════════════════════════════════════════════════════════════════
+
+/// 空态引导（图标 + 标题 + 一句说明）
+///
+/// # 为什么要共用一个零件
+///
+/// 「搜索页没搜过」「搜索页搜了没找到」「插件列表空」「备份页空」
+/// 以前各写各的：图标尺寸 40/48/56 混用、说明文字有的有有的没有、
+/// 垂直留白从 24 到 96 不等 —— 同一件事在不同页面长得不一样，
+/// 用户会以为那是不同的功能，而不是同一件事的不同结果。
+///
+/// ⇒ 三层节奏（图标 → 标题 → 说明）由**这一处**定，
+///    调用方只给内容，视觉自然一致。
+class EmptyState extends StatelessWidget {
+  const EmptyState({
+    super.key,
+    required this.icon,
+    required this.title,
+    this.hint,
+    this.iconSize = 52,
+    this.padding = const EdgeInsets.symmetric(vertical: Sp.x16),
+  });
+
+  final IconData icon;
+  final String title;
+
+  /// 一句可选的引导文案（不说清楚"下一步做什么"的空态等于没有）
+  final String? hint;
+
+  final double iconSize;
+  final EdgeInsets padding;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    // ★ 图标衬在一个圆底上：空态大片留白里，孤零零一个线性图标
+    //   很容易被当成"图片没加载出来"。
+    return Padding(
+      padding: padding,
+      child: Column(
+        children: [
+          Container(
+            width: iconSize * 2,
+            height: iconSize * 2,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              // ★ 0.06 在深色底上几乎看不见（实测：无头截图里这一枚圆
+              //   的边缘密度低到几乎测不出，用户会以为"图标没加载出来"）。
+              //   0.10 是「看得清、又不抢标题」的值。
+              color: colors.onSurface.withValues(alpha: 0.10),
+              border: Border.all(
+                color: colors.onSurface.withValues(alpha: 0.08),
+              ),
+            ),
+            child: Icon(
+              icon,
+              size: iconSize,
+              color: colors.onSurfaceVariant,
+            ),
+          ),
+          const SizedBox(height: Sp.x5),
+          Text(
+            title,
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: FontSizes.base,
+              fontWeight: FontWeight.w600,
+              color: colors.onSurface,
+            ),
+          ),
+          if (hint != null) ...[
+            const SizedBox(height: Sp.x2),
+            ConstrainedBox(
+              // ★ 空态说明不该铺满超宽屏（桌面 1440+ 时一行拉到 1200px
+              //   读起来很费力）；限宽 + 居中让两行就收住。
+              constraints: const BoxConstraints(maxWidth: 420),
+              child: Text(
+                hint!,
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: FontSizes.sm,
+                  height: 1.5,
+                  color: colors.onSurfaceVariant,
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  对话框外壳
+// ═══════════════════════════════════════════════════════════════════════
+
+/// 设置区对话框的**统一外壳**
+///
+/// # 为什么要有这个零件（2026-10-10）
+///
+/// 插件编辑、插件导入、声明式源编辑、B 站导入……每个都是各自写的
+/// `AlertDialog`，但标题字号、标题与正文的间距、正文最大宽度、
+/// 底部按钮的排布各不相同：
+/// ```text
+/// 插件编辑    标题 20px，正文宽 560
+/// 插件导入    标题 20px，正文宽 560
+/// 其它         标题 18px，正文宽 480
+/// ```
+/// ⇒ 用户在设置区点开三个不同对话框，会以为进了三个不同的功能。
+///
+/// ⇒ 这里把「标题 / 副标题 / 正文宽 / 底部按钮」四件事定成一处，
+///    调用方只提供内容。
+///
+/// ⚠️ 用 `AlertDialog` 而不是 `Dialog`：后者要自己实现标题栏、
+///    分隔线与按钮区，而且 `MediaQuery` 边距得全手写 ——
+///    `AlertDialog` 已经在做这些，且是 Material 的标准形态
+///    （TV 方向键、Esc 关闭、无障碍语义都是它自带的）。
+class SettingsDialog extends StatelessWidget {
+  const SettingsDialog({
+    super.key,
+    required this.title,
+    required this.child,
+    this.subtitle,
+    this.actions = const [],
+    this.maxContentWidth = 560,
+  });
+
+  final String title;
+
+  /// 标题下的一行说明（一句话说清"这个对话框在干嘛"）
+  final String? subtitle;
+
+  /// 正文
+  final Widget child;
+
+  /// 底部按钮（从右往左排：确认 → 取消 → 其它）
+  final List<Widget> actions;
+
+  /// 正文的**最大**宽度（不是固定宽 —— 窄屏下要能收缩）
+  final double maxContentWidth;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return AlertDialog(
+      // ★ 与本页其它标题同号（`SettingsSubPage` 的 28px 大标题用 `xl`，
+      //   对话框比页面矮一档，用 `lg` = 20px）
+      title: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            title,
+            style: TextStyle(
+              fontSize: FontSizes.lg,
+              fontWeight: FontWeight.w600,
+              color: colors.onSurface,
+            ),
+          ),
+          if (subtitle != null) ...[
+            const SizedBox(height: Sp.x1),
+            Text(
+              subtitle!,
+              style: TextStyle(
+                fontSize: FontSizes.cap,
+                color: colors.onSurfaceVariant,
+              ),
+            ),
+          ],
+        ],
+      ),
+      /*
+       * ★ 内容宽：上限 maxContentWidth，窄屏由 `ConstrainedBox` 收缩
+       *
+       * ⚠️ 两个坑都踩过：
+       * ```text
+       * ① 不能写成固定 `SizedBox(width: 560)`：手机上可用宽可能只有
+       *    ~330，硬写 560 会溢出（旧代码就是这么写的）。
+       * ② 但也不能只给 `ConstrainedBox` ��上限**而不给下限**：
+       *    `AlertDialog` 给 content 的是**松约束**，`ConstrainedBox`
+       *    在松约束下不会自己撑开（它只限制上限）⇒ 正文宽度塌成 0。
+       *    ⇒ 还要 `width: double.infinity` 让它吃满可用宽（上限仍受约束）。
+       * ```
+       */
+      content: ConstrainedBox(
+        constraints: BoxConstraints(maxWidth: maxContentWidth),
+        child: SizedBox(width: double.infinity, child: child),
+      ),
+      // 按钮统一右对齐（Material 默认就是 end，但显式写出来，
+      // 免得将来有人改成 `OverflowBar` 时两处不一致）
+      actionsAlignment: MainAxisAlignment.end,
+      actions: actions,
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 //  信息行 / 入口行
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -511,24 +731,39 @@ class SettingsInfoRow extends StatelessWidget {
 ///    `Material` 才能画出涟漪。设置页外层是 `Scaffold`（自带 `Material`），
 ///    但二级页可能不是，所以这里**自带一层 `Material`** 保底
 ///    （`type: MaterialType.transparency` 不改变视觉）。
+///
+/// # ★★ 2026-10-10：左侧图标
+///
+/// 改前所有入口行长一个样：只有标题+副标题，十几行排下来
+/// 用户只能**逐行读**才知道哪行是哪行。
+/// ⇒ 加一枚**单色描边图标**：一眼扫过去按"形状"分组，不用读字。
+/// 图标用 `onSurfaceVariant`（不是 `primary`）—— 它只是定位点，
+/// 一屏十几枚彩色图标会抢掉标题的注意力。
 class SettingsEntryRow extends StatelessWidget {
   const SettingsEntryRow({
     super.key,
     required this.title,
     required this.subtitle,
     required this.onTap,
+    this.icon,
   });
 
   final String title;
   final String subtitle;
   final VoidCallback onTap;
 
+  /// 左侧图标（不给 = 不画，保持既有调用点零影响）
+  final IconData? icon;
+
+  /// 图标衬底圆片的尺寸（与 `icon` 成对出现）
+  static const double _iconPlate = 34;
+
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
     // ★ 内容带（t509）：左右那两层已去掉（理由同 `SettingsBlock`）。
     return Padding(
-      padding: const EdgeInsets.only(bottom: Sp.x3),
+      padding: const EdgeInsets.only(bottom: Sp.x2),
       child: Material(
         type: MaterialType.transparency,
         child: InkWell(
@@ -546,6 +781,22 @@ class SettingsEntryRow extends StatelessWidget {
             ),
             child: Row(
               children: [
+                if (icon != null) ...[
+                  Container(
+                    width: _iconPlate,
+                    height: _iconPlate,
+                    decoration: BoxDecoration(
+                      color: colors.onSurface.withValues(alpha: 0.06),
+                      borderRadius: BorderRadius.circular(_iconPlate / 3),
+                    ),
+                    child: Icon(
+                      icon,
+                      size: 18,
+                      color: colors.onSurfaceVariant,
+                    ),
+                  ),
+                  const SizedBox(width: Sp.x3),
+                ],
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -586,9 +837,22 @@ class SettingsEntryRow extends StatelessWidget {
   }
 }
 
-/// 一级页上的**分组小标题**（"播放与观看" / "数据与外观"）
+/// 一级页上的**分组小标题**（"内容源与插件" / "播放与观看" / "外观" …）
 ///
-/// 5 个入口行平铺会显得散，分两组让用户扫起来有结构。
+/// # 为什么要重做这个零件（2026-10-10）
+///
+/// 改前它是一行 12px 的灰字。问题不是小，是**认不出它是分组**：
+/// ```text
+/// ┌ 局域网遥控 ────────────────────┐   ← 20px 大标题（区块）
+/// ┌ JS 插件                   ›   ┐   ← 16px 标题（入口行）
+///   内容源与插件                     ← 12px 灰字
+/// ```
+/// 三种字号、三种角色排在一起，用户读到「JS 插件」根本不知道
+/// 自己在一个组里、上一个组叫什么。
+///
+/// ⇒ 现在：左侧一枚 3px 竖条 + 组名 + 一条延伸到右边的细分割线。
+///   竖条与「区块标题」那枚 4px 竖条是**同一个零件**（见 `SearchPage`），
+///   一页之内两处标题共用一个视觉信号 ⇒ 读起来是同一套系统。
 class SettingsGroupLabel extends StatelessWidget {
   const SettingsGroupLabel({super.key, required this.text});
 
@@ -599,15 +863,36 @@ class SettingsGroupLabel extends StatelessWidget {
     final colors = Theme.of(context).colorScheme;
     // ★ 内容带（t509）：左右那两层已去掉（理由同 `SettingsBlock`）。
     return Padding(
-      padding: const EdgeInsets.only(top: Sp.x3, bottom: Sp.x2),
-      child: Text(
-        text,
-        style: TextStyle(
-          fontSize: FontSizes.cap,
-          fontWeight: FontWeight.w600,
-          letterSpacing: 0.6,
-          color: colors.onSurfaceVariant,
-        ),
+      // ★ top 给足：分组标签的职责就是把上一组"关"在外面，
+      //   Sp.x3(12) 太贴，读起来像上一块的第三行。
+      padding: const EdgeInsets.only(top: Sp.x5, bottom: Sp.x3),
+      child: Row(
+        children: [
+          Container(
+            width: 3,
+            height: 14,
+            decoration: BoxDecoration(
+              color: colors.primary,
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+          const SizedBox(width: Sp.x2),
+          Text(
+            text,
+            style: TextStyle(
+              fontSize: FontSizes.cap,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 0.8,
+              color: colors.onSurface.withValues(alpha: 0.85),
+            ),
+          ),
+          const SizedBox(width: Sp.x3),
+          // ★ 余下的空间画一条细线：把"到这一行为止是同一组"说成视觉事实，
+          //   而不是靠留白暗示。
+          Expanded(
+            child: Container(height: 1, color: colors.outlineVariant),
+          ),
+        ],
       ),
     );
   }
