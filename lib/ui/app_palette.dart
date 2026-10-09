@@ -123,13 +123,27 @@ class AppPalette extends ThemeExtension<AppPalette> {
 
   /// 当前主题的语义色
   ///
-  /// ⚠️ 找不到祖先时**不静默兜底成浅色**（forui 与 Material 都这么干，
-  ///    并且都不报错 —— 本项目已经为这个坑付过一次代价，见
-  ///    `test/titlebar_theme_test.dart`）：这里直接抛，让问题在开发期暴露。
+  /// # 找不到扩展时怎么办（这里踩过一次，update agent 撞出来的）
+  ///
+  /// 原本写的是 `assert(ext != null)`，理由是「找不到祖先就静默兜底成浅色
+  /// 是本项目为这个坑付过代价的那一类」。但那个类比**只对了一半**：
+  /// forui / Material 的兜底是**写死浅色**（哪怕用户选的是深色），
+  /// 而这里的兜底是**按 `Theme.brightness` 选** —— 后者本来就是对的。
+  ///
+  /// 实测代价：`update_dialog.dart` 这类可能被挂到 `MaterialApp` 之外的
+  /// widget（探针、独立路由）会**直接 assert 崩掉**，而它要的只是一个颜色。
+  /// ⇒ 改为：debug 下打一行日志（看得见），release 下按 brightness 兜底
+  ///    （不会崩，且大概率是对的）。
   static AppPalette of(BuildContext context) {
     final ext = Theme.of(context).extension<AppPalette>();
-    assert(ext != null, 'AppPalette 未注入：这一层在 MaterialApp 之外。');
     if (ext != null) return ext;
+    assert(() {
+      final b = Theme.of(context).brightness;
+      debugPrint('[AppPalette] 这里没有注入 AppPalette，已按 '
+          'Theme.brightness=$b 兜底。若出现"深色下画出浅色"，'
+          '查这一层是不是在 MaterialApp 之外。');
+      return true;
+    }());
     return Theme.of(context).brightness == Brightness.dark ? dark : light;
   }
 
