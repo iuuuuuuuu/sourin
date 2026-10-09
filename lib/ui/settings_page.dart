@@ -2926,7 +2926,7 @@ class SettingsPageState extends State<SettingsPage> {
                     enabled: !_sweeping,
                     child: _menuRow(
                       Icons.monitor_heart_outlined,
-                      _sweeping ? '健康检测中…' : '健康检测',
+                      _sweeping ? '处理中…' : '健康检测',
                     ),
                   ),
                   PopupMenuItem(
@@ -2938,7 +2938,7 @@ class SettingsPageState extends State<SettingsPage> {
                     enabled: !_pluginBusy,
                     child: _menuRow(
                       Icons.refresh,
-                      _pluginBusy ? '重新加载中…' : '重新加载',
+                      _pluginBusy ? '处理中…' : '重新加载',
                     ),
                   ),
                   PopupMenuItem(

@@ -172,71 +172,53 @@ void main() {
 
     test('★★ 5 个按钮必须用 Wrap（原版明确要求的折行语义）', () {
       /*
-       * 原版 `SettingsView.vue:1708` 的注释（照抄）：
-       * > ⚠️ 用 `flex-wrap: wrap` + `gap` 而不是写死宽度 ——
-       * >    手机上五个按钮一行放不下，要能自然折行。
+       * ★ 2026-10-10：这条断言跟着结构改动一起改了判据，**没删功能**
        *
-       * Flutter 的 `Wrap` 就是这个语义。写成 `Row` 会在窄屏
-       * 直接**溢出报错**（黄黑条纹），不是折行。
-       */
-      /*
-       * ⚠️ 锚点用 `检测中…` 而不是 `健康检测` —— `健康检测` 四个字
-       *    在 `_healthSweep()` 的报错文案里也出现过
-       *    （`_flash('健康检测失败：$e')`），而那个方法定义在
-       *    `build()` **之前**，拿它当锚点会定位到错误的位置。
-       */
-      final anchor = code.indexOf('检测中…');
-      expect(anchor, greaterThanOrEqualTo(0), reason: '缺「检测中…」文案');
-
-      final start = code.lastIndexOf('Wrap(', anchor);
-      expect(start, greaterThanOrEqualTo(0), reason: '「健康检测」前面必须有 Wrap(');
-
-      /*
-       * ⚠️⚠️ 这里踩过一个 **off-by-one**，记下来（本项目第三次
-       *      "断言在错误的文本范围上跑"）。
-       *
-       * `substring(start, end)` 取的是**半开区间** `[start, end)` ——
-       * `end` 处的文本**不在**结果里。而 `end` 正是
-       * `'粘贴源码安装'` 的起始位置，于是最后那个标签被切掉了：
+       * 改前：块头是 `Wrap` 里 8 个描边按钮
        * ```text
-       * group.contains('健康检测')     → true  ✓
-       * group.contains('导入源')       → true  ✓
-       * group.contains('重新加载')     → true  ✓
-       * group.contains('从网址安装')   → true  ✓
-       * group.contains('粘贴源码安装') → false ✗ ← 假红
+       * [调整顺序][健康检测][测速][导入源] │ [重新加载][从网址安装][粘贴源码安装]
        * ```
-       * 报错信息是"插件区块缺按钮「粘贴源码安装」"—— **误导**：
-       * 按钮明明在，是切片边界把它排除了。
+       * 改后（Owner：「js插件的ui不好看」）：
+       * ```text
+       * Wrap { [从网址安装]  [⋮ PopupMenuButton]  [测速按钮] }
+       * ```
+       * 菜单项里：`调整顺序 / 健康检测 / 导入源 / 重新加载 / 粘贴源码安装`
        *
-       * 修法：把 end 推到标签**之后**（`+ endLabel.length`）。
+       * ⇒ 判据从「都在同一个 Wrap 里」改成**逐个断言入口仍在**
+       *   （菜单项也算入口 —— 用户点得到，就是入口）。
        */
-      const endLabel = '粘贴源码安装';
-      final end = code.indexOf(endLabel, anchor);
-      expect(end, greaterThan(start), reason: '两个安装按钮必须跟在健康检测之后');
-
-      // ★ 先证明**切片本身**是对的，再看里面的按钮
-      //
-      // 为什么要这两条：如果哪天切片范围又算错，报的会是
-      // "切片错了"而不是"按钮缺了" —— 定位快得多。
-      // （教训来自本轮 P3 发现的「假红/恒真断言」三例：
-      //   共同点都是断言跑在错误的文本范围上。）
-      final group = code.substring(start, end + endLabel.length);
-      expect(group.contains('Wrap('), isTrue,
-          reason: '切片必须包含 Wrap 开头（切片范围算错了）');
-      expect(group.contains(endLabel), isTrue,
-          reason: '切片必须包含最后一个按钮（切片范围算错了）');
-
-      // 五个按钮必须在**同一个** Wrap 里（不是分散成好几个 Row）
+      // ── 入口仍可点：常驻按钮 or ⋮ 菜单项（菜单项同样是入口）──
       for (final label in [
         '健康检测',
         '导入源',
         '重新加载',
         '从网址安装',
         '粘贴源码安装',
+        '调整顺序',
       ]) {
-        expect(group.contains(label), isTrue,
-            reason: '插件区块缺按钮「$label」');
+        expect(code.contains(label), isTrue,
+            reason: '插件区块缺入口「$label」（常驻按钮或菜单项都没有）');
       }
+
+      // ★ 反向对照：菜单确实被用上了（否则上面那些字符串可能只是注释）
+      expect(code.contains('PopupMenuButton<String>'), isTrue,
+          reason: '★ 低频入口必须收进 PopupMenuButton（否则又变回一排描边按钮）');
+      expect(code.contains("_menuRow("), isTrue,
+          reason: '★ 菜单项要用共用的 _menuRow（图标+文案），不是裸 Text');
+
+      // ★ 常驻区只留 2 个：主操作 + 测速（它自带进度/结果态）
+      //   —— 判据是「从网址安装」走的是 FilledButton（主操作），
+      //   而不是又变回 OutlinedButton.icon 挤在 Wrap 里。
+      expect(
+        RegExp(r'FilledButton\.icon\(\s*onPressed: _installPlugin')
+            .hasMatch(code),
+        isTrue,
+        reason: '★「从网址安装」应是实心主按钮（这一页的主要入口）',
+      );
+
+      // ★ 折叠语义仍在（否则窄屏上 6 个入口会重新撑破卡片）
+      expect(code.contains('Wrap('), isTrue,
+          reason: '★ 按钮行仍要用 Wrap（窄屏要能折行，Row 会溢出）');
     });
   });
 
