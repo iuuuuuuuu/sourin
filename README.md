@@ -4,7 +4,7 @@
 
 **跨端视频聚合客户端 —— Flutter 重写版**
 
-[![构建](https://github.com/iuuuuuuuu/sourin/actions/workflows/build.yml/badge.svg)](https://github.com/iuuuuuuuu/sourin/actions/workflows/build.yml)
+[![构建](https://github.com/sourin-app/sourin/actions/workflows/build.yml/badge.svg)](https://github.com/sourin-app/sourin/actions/workflows/build.yml)
 [![许可证](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Flutter](https://img.shields.io/badge/Flutter-3.47.5-02569B.svg)](https://flutter.dev)
 [![Rust](https://img.shields.io/badge/Rust-1.85-000000.svg)](https://www.rust-lang.org)
@@ -180,7 +180,7 @@ sourin_free(ptr)          释放返回的字符串
 ### 1. 拉代码 + 装依赖
 
 ```bash
-git clone https://github.com/iuuuuuuuu/sourin.git
+git clone https://github.com/sourin-app/sourin.git
 cd sourin
 flutter pub get
 ```
@@ -673,6 +673,10 @@ flutter build macos --release -t lib/shell.dart
 ## 插件开发
 
 插件是**一个 JS 文件**，跑在 Rust 侧的 QuickJS 沙箱里。
+
+> **配套仓库**：[sourin-app/sourin-plugins](https://github.com/sourin-app/sourin-plugins) ——
+> 作者自用的源、完整的插件 API 契约（`docs/API.md`）与可运行示例（`examples/demo.js`）。
+> 本节的契约以**那个仓库的 `docs/API.md`** 为最新准；它是私有仓库，需要访问权限。
 
 ### 最小插件
 
