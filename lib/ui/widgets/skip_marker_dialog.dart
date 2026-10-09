@@ -143,7 +143,6 @@
 import 'dart:async';
 import 'dart:math' as math;
 
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
@@ -151,6 +150,7 @@ import 'package:media_kit_video/media_kit_video.dart';
 import '../../core/sourin_api.dart';
 import '../tokens.dart';
 import 'skip_timeline.dart';
+import '../../ui/app_palette.dart';
 
 /*
  * ═══════════════════════════════════════════════════════════════════════
@@ -1868,7 +1868,7 @@ class _SkipMarkerDialogState extends State<SkipMarkerDialog> {
 
   @override
   Widget build(BuildContext context) {
-    final colors = FTheme.of(context).colors;
+    final colors = AppPalette.of(context);
 
     /*
      * ══════════════════════════════════════════════════════════════════
@@ -2233,7 +2233,7 @@ class _SkipMarkerDialogState extends State<SkipMarkerDialog> {
     );
   }
 
-  Widget _header(FColors colors) {
+  Widget _header(AppPalette colors) {
     /*
      * ══════════════════════════════════════════════════════════════════
      * ★★★ 2026-10-02 重做（Owner：「布局和ui再优化优化」「有点丑,要美观」）
@@ -2360,7 +2360,7 @@ class _SkipMarkerDialogState extends State<SkipMarkerDialog> {
     );
   }
 
-  Widget _previewBox(FColors colors, double maxH) {
+  Widget _previewBox(AppPalette colors, double maxH) {
     return ClipRRect(
       borderRadius: BorderRadius.circular(Radii.sm),
       child: ConstrainedBox(
@@ -2548,7 +2548,7 @@ class _SkipMarkerDialogState extends State<SkipMarkerDialog> {
         ),
       );
 
-  Widget _rows(FColors colors) {
+  Widget _rows(AppPalette colors) {
     /*
      * ══════════════════════════════════════════════════════════════════
      * ★★★ 四行必须**一屏可见**（2026-09-24 用户截图：只看得到两行）
@@ -2695,7 +2695,7 @@ class _SkipMarkerDialogState extends State<SkipMarkerDialog> {
   /// ⚠️ 但它**确实**占了一行 36px。所以 `kMidRestH` 必须 +36，
   ///    否则预览会算高 36px 而把最后一行挤出视口
   ///    （那正是用户 2026-09-24 报的「只看到片头两行」）。
-  Widget _rangePreviewRow(FColors colors) {
+  Widget _rangePreviewRow(AppPalette colors) {
     /// 一个「整段」按钮 —— **播放 / 暂停 切换**
     ///
     /// ══════════════════════════════════════════════════════════════════
@@ -2834,7 +2834,7 @@ class _SkipMarkerDialogState extends State<SkipMarkerDialog> {
     );
   }
 
-  Widget _autoSkipRow(FColors colors) {
+  Widget _autoSkipRow(AppPalette colors) {
     return Row(
       children: [
         Switch(
@@ -2855,7 +2855,7 @@ class _SkipMarkerDialogState extends State<SkipMarkerDialog> {
     );
   }
 
-  Widget _footer(FColors colors) {
+  Widget _footer(AppPalette colors) {
     return Row(
       mainAxisAlignment: MainAxisAlignment.end,
       children: [
@@ -2943,7 +2943,7 @@ class _EdgeRow extends StatelessWidget {
   final String label;
   final int? value;
   final double total;
-  final FColors colors;
+  final AppPalette colors;
   final ValueChanged<int?> onChanged;
   final ValueChanged<int> onPreview;
 
@@ -3503,7 +3503,7 @@ class _StepBtn extends StatelessWidget {
   });
 
   final IconData icon;
-  final FColors colors;
+  final AppPalette colors;
   final VoidCallback onTap;
 
   /// 按钮的**命中区**边长（默认 32 —— 见 `_EdgeRow` 里为什么必须收紧）

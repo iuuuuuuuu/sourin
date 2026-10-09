@@ -12,7 +12,6 @@
 import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:material_ui/material_ui.dart';
-import 'package:sourin_spike/ui/app_theme.dart';
 import 'package:sourin_spike/ui/theme_bridge.dart';
 import 'package:sourin_spike/ui/tokens.dart';
 
@@ -34,7 +33,7 @@ void main() {
         // ★ 用**生产**的 Material 主题构造链，不手搓 ThemeData：
         //   AppTheme.themeFor -> FThemeData; buildMaterialTheme -> ThemeData
         //   （theme_bridge.dart:224），这样拿到的 onSurface 与真机一致。
-        theme: buildMaterialTheme(AppTheme.themeFor(Brightness.dark)),
+        theme: buildAppTheme(Brightness.dark),
         home: Material(
           child: Builder(
             builder: (context) {

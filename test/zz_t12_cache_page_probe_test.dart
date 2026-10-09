@@ -20,13 +20,14 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart' show Widget;
 import 'package:flutter_test/flutter_test.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart' as mui;
 import 'package:sourin_spike/core/download_dir.dart';
 import 'package:sourin_spike/core/models.dart' show StreamCandidate;
 import 'package:sourin_spike/core/download_queue.dart';
 import 'package:sourin_spike/core/ui_prefs.dart';
 import 'package:sourin_spike/ui/cache_page.dart';
+import 'package:sourin_spike/ui/app_scaffold.dart';
+import 'package:sourin_spike/ui/app_theme.dart';
 
 /// ★ 探针沙盒根 —— 必须是绝对路径，且落在系统临时目录下
 Directory _sandboxRoot() {
@@ -78,10 +79,10 @@ void _seedSidecar(
 
 /// 与生产外壳一致的包装（照抄 test/bottom_bar_fit_test.dart:55-65）
 Widget _appWith({required Widget home}) {
-  final theme = FTheme.neutral.dark.desktop;
+  final theme = AppTheme.themeFor(Brightness.dark);
   return mui.MaterialApp(
-    theme: theme.toApproximateMaterialTheme(),
-    builder: (context, child) => FTheme(
+    theme: theme,
+    builder: (context, child) => AppThemeHost(
       data: theme,
       child: child ?? const mui.SizedBox(),
     ),

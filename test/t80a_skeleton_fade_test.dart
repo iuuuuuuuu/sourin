@@ -59,13 +59,14 @@
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 
 import 'package:sourin_spike/core/models.dart';
 import 'package:sourin_spike/ui/browse_page.dart';
 import 'package:sourin_spike/ui/search_page.dart';
 import 'package:sourin_spike/ui/widgets/fade_in_sliver.dart';
+import 'package:sourin_spike/ui/app_scaffold.dart';
+import 'package:sourin_spike/ui/app_theme.dart';
 
 // ══════════════════════════════════════════════════════════════════════════
 // 脚手架
@@ -77,11 +78,11 @@ import 'package:sourin_spike/ui/widgets/fade_in_sliver.dart';
 /// ⚠️ 这里的 `MediaQuery` 位于 `MaterialApp.home` **之内** ⇒ 比 `MaterialApp`
 ///    自己插的那个更深 ⇒ 对被测页面**生效**。
 Widget host(Widget child, Size size, {bool reduceMotion = false}) {
-  final theme = FTheme.neutral.light.desktop;
+  final theme = AppTheme.themeFor(Brightness.light);
   return MaterialApp(
     debugShowCheckedModeBanner: false,
-    theme: theme.toApproximateMaterialTheme(),
-    builder: (_, c) => FTheme(data: theme, child: c ?? const SizedBox()),
+    theme: theme,
+    builder: (_, c) => AppThemeHost(data: theme, child: c ?? const SizedBox()),
     home: MediaQuery(
       data: MediaQueryData(size: size, disableAnimations: reduceMotion),
       child: Directionality(

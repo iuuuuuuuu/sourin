@@ -47,7 +47,6 @@
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 
 import 'package:sourin_spike/shell.dart';
@@ -55,6 +54,8 @@ import 'package:sourin_spike/ui/live_page.dart';
 import 'package:sourin_spike/ui/theme_bridge.dart';
 import 'package:sourin_spike/ui/tokens.dart';
 import 'package:sourin_spike/ui/widgets/page_transition.dart';
+import 'package:sourin_spike/ui/app_scaffold.dart';
+import 'package:sourin_spike/ui/app_theme.dart';
 
 /// 采样画布（与 keepalive_anim_test / t50c 同一尺寸，读数才可比）
 const double kW = 1280.0;
@@ -132,11 +133,11 @@ String stripComments(String src) {
 
 /// 底栏链的宿主 —— 与 test/keepalive_anim_test.dart 的 _appWith 同构
 Widget _shellApp() {
-  final theme = FTheme.neutral.dark.desktop;
+  final theme = AppTheme.themeFor(Brightness.dark);
   return MaterialApp(
     debugShowCheckedModeBanner: false,
-    theme: theme.toApproximateMaterialTheme(),
-    builder: (context, child) => FTheme(
+    theme: theme,
+    builder: (context, child) => AppThemeHost(
       data: theme,
       child: child ?? const SizedBox(),
     ),

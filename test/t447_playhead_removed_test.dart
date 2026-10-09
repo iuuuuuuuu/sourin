@@ -30,19 +30,20 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 
 import 'package:sourin_spike/ui/widgets/skip_timeline.dart';
+import 'package:sourin_spike/ui/app_scaffold.dart';
+import 'package:sourin_spike/ui/app_theme.dart';
 // `SkipEdge` 定义在弹窗文件里（`skip_timeline.dart` 只 `show SkipEdge` 转发）
 import 'package:sourin_spike/ui/widgets/skip_marker_dialog.dart' show SkipEdge;
 
 /// 与生产一致的包装（照抄 `test/t66_skip_preview_test.dart` 的做法）
 Widget _host(Widget child) {
-  final theme = FTheme.neutral.light.desktop;
+  final theme = AppTheme.themeFor(Brightness.light);
   return MaterialApp(
-    theme: theme.toApproximateMaterialTheme(),
-    builder: (context, c) => FTheme(data: theme, child: c ?? const SizedBox()),
+    theme: theme,
+    builder: (context, c) => AppThemeHost(data: theme, child: c ?? const SizedBox()),
     home: Scaffold(body: Center(child: child)),
   );
 }

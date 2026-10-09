@@ -19,11 +19,11 @@
 
 import 'package:liquid_glass_widgets/liquid_glass_widgets.dart';
 import 'package:flutter/gestures.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 
 import '../tokens.dart';
 import '../../core/sourin_api.dart';
+import '../../ui/app_palette.dart';
 
 /// ★★★ 源条的**可见性判据** —— 照抄原版 `stores/app.ts` 的 `enabledProviders`
 ///
@@ -386,13 +386,13 @@ class _SourcePill extends StatelessWidget {
     /*
      * ★ 主题判据（`--srcbar-pill-bg` 的两套值）
      *
-     * 用 **forui** 的 `colors.brightness`（`FColors` 自带 `brightness`，
+     * 用 **forui** 的 `colors.brightness`（`AppPalette` 自带 `brightness`，
      * forui `src/theme/colors.dart:32`），与 `_SourceBarState.build` 里
      * `Theme.of(context).colorScheme` 的 `colors` 参数**不是同一个来源** ——
      * 刻意如此：`FTheme` 那层才是本文件渲染真正依赖的主题，
      * 而 Material 侧在本项目里出过一次"两套 Theme 串台"的兜底事故。
      */
-    final isLight = FTheme.of(context).colors.brightness == Brightness.light;
+    final isLight = AppPalette.of(context).brightness == Brightness.light;
 
     /// 原版 `--srcbar-pill-bg: var(--surface-4)`
     ///
@@ -598,7 +598,7 @@ class _SourcePill extends StatelessWidget {
                  * # 现在怎么取
                  *
                  * 直接用 `--text-primary`（`theme-light.css:39` /
-                 * `tokens.css:50`）对应的主题角色 —— 也就是 `FColors`
+                 * `tokens.css:50`）对应的主题角色 —— 也就是 `AppPalette`
                  * 在这套主题下给"背景上的文字"的那一个：
                  * ```text
                  * 浅色  #0A0A0A 近黑  ← 压在纯白药丸（1.0）上 ✓
@@ -607,14 +607,14 @@ class _SourcePill extends StatelessWidget {
                  * 这与原版 `.srcbar__btn.is-on { color: var(--text-primary) }`
                  * （`SourceBar.vue:592`）逐字对应。
                  *
-                 * ★ 关键：`FColors` **自带 `brightness`**，所以取到的角色
+                 * ★ 关键：`AppPalette` **自带 `brightness`**，所以取到的角色
                  *   天然跟随主题 —— 这里不需要自己写 `isLight ? 黑 : 白`，
                  *   写了反而会与 forui 的主题解析链路产生第二个真值来源。
                  *   **真正需要显式分支的只有药丸本身**（那是"白色叠多少"
                  *   这个与主题无关的原始 alpha，forui 没有对应角色）。
                  */
                 color: active
-                    ? FTheme.of(context).colors.foreground
+                    ? AppPalette.of(context).foreground
                     : colors.onSurfaceVariant,
               ),
             ),

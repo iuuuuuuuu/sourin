@@ -266,7 +266,7 @@ void main() {
 
     test('★ forui 与 Material 的角色名不能混用', () {
       /*
-       * `FTheme.of(context).colors`（forui）与
+       * `AppPalette.of(context)`（forui）与
        * `Theme.of(context).colorScheme`（Material）的**角色名不同**：
        * ```text
        * forui:     foreground / mutedForeground / border

@@ -77,11 +77,12 @@
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 
 import 'package:sourin_spike/core/models.dart';
 import 'package:sourin_spike/ui/widgets/epg_panel.dart';
+import 'package:sourin_spike/ui/app_scaffold.dart';
+import 'package:sourin_spike/ui/app_theme.dart';
 
 // ═══════════════════════════════════════════════════════════════════════
 //  工具
@@ -170,10 +171,10 @@ String stripComments(String src) {
 ///    `Material(type: transparency)`。这里断言的是 EpgPanel 自身的
 ///    行为，不重复测那一层。
 Widget _host(Widget child) {
-  final theme = FTheme.neutral.dark.desktop;
+  final theme = AppTheme.themeFor(Brightness.dark);
   return MaterialApp(
-    theme: theme.toApproximateMaterialTheme(),
-    builder: (_, c) => FTheme(data: theme, child: c ?? const SizedBox()),
+    theme: theme,
+    builder: (_, c) => AppThemeHost(data: theme, child: c ?? const SizedBox()),
     home: Scaffold(body: child),
   );
 }

@@ -59,7 +59,6 @@ import 'dart:ui' as ui;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/scheduler.dart';
-import 'package:forui/forui.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:window_manager/window_manager.dart';
@@ -70,6 +69,8 @@ import 'package:sourin_spike/ui/app_theme.dart';
 import 'package:sourin_spike/ui/widgets/overlay_motion.dart';
 import 'package:sourin_spike/ui/widgets/skip_marker_dialog.dart';
 import 'package:sourin_spike/ui/widgets/skip_timeline.dart';
+import 'ui/app_scaffold.dart';
+import 'ui/app_theme.dart';
 
 /// 被预览的媒体（640x480 4:3、40 秒彩条式测试画面）
 ///
@@ -727,14 +728,14 @@ class _ProbeApp extends StatelessWidget {
      * 生产走的是 lib/shell.dart:1184-1186 的 buildLightMaterialTheme。
      */
     final theme = AppTheme.themeFor(Brightness.light);
-    final materialTheme = buildLightMaterialTheme(theme);
+    final materialTheme = AppTheme.themeFor(Brightness.light);
     return RepaintBoundary(
       key: _rootKey,
       child: MaterialApp(
         theme: materialTheme,
-        builder: (context, c) => FTheme(
-          data: theme,
-          child: FScaffold(
+        builder: (context, c) => AppThemeHost(
+          data: materialTheme,
+          child: AppScaffold(
             child: Material(
               type: MaterialType.transparency,
               child: c ?? const SizedBox(),

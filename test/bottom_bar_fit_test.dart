@@ -39,12 +39,13 @@
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:forui/forui.dart';
 import 'package:liquid_glass_widgets/liquid_glass_widgets.dart';
 import 'package:material_ui/material_ui.dart';
 
 import 'package:sourin_spike/core/device.dart';
 import 'package:sourin_spike/shell.dart';
+import 'package:sourin_spike/ui/app_scaffold.dart';
+import 'package:sourin_spike/ui/app_theme.dart';
 import 'package:sourin_spike/ui/spatial_nav.dart' show BottomBarMarker;
 
 /// 与生产外壳一致的包装（照抄 `test/keepalive_test.dart:81-91`）
@@ -53,10 +54,10 @@ import 'package:sourin_spike/ui/spatial_nav.dart' show BottomBarMarker;
 ///    `Null check operator used on a null value`，整页被换成 ErrorWidget
 ///    —— 而断言只会以"找不到 XX"失败，真因只在 stderr。
 Widget _appWith({required Widget home}) {
-  final theme = FTheme.neutral.dark.desktop;
+  final theme = AppTheme.themeFor(Brightness.dark);
   return MaterialApp(
-    theme: theme.toApproximateMaterialTheme(),
-    builder: (context, child) => FTheme(
+    theme: theme,
+    builder: (context, child) => AppThemeHost(
       data: theme,
       child: child ?? const SizedBox(),
     ),
