@@ -104,7 +104,7 @@ pub async fn fetch_config_text(
 /// 来源：tvbox-convert.mjs 里收集 15 个 type=1 接口实测后只剩这一个活着。
 ///
 /// ★ 2026-10-10（review agent 查出安全问题，lead 处理）：这里原来还有第二个
-///   `api.huaqi.pro/api/?key=<32 位十六进制>` —— **那是一个真实的付费服务凭据，
+///   `huaqi 那个域名 + 一个 32 位的 key 参数` —— **那是一个真实的付费服务凭据，
 ///   却被硬编码进了公开仓库**。而且本文件上方原有的注释自己就写着
 ///   「2026-10-02 复测：huaqi 已失效（返回 {"code":"404",...,"msg":"解析失败"}，
 ///   没有 url 字段 → 自动 continue）」
@@ -114,7 +114,11 @@ pub async fn fetch_config_text(
 ///
 /// ⚠️ 因此：如果你在别处见过 `api.huaqi.pro` 的 key，**请去该服务后台吊销它**
 ///   （凭据已随公开仓库泄露过）。
-pub const PARSE_SERVICES: [&str; 1] = [
+/// ⚠️ 类型刻意写成**切片** `[&str]` 而不是 `[&str; 1]`：
+///   固定长度的数组会让「加一个解析服务」变成**编译错误**，而加服务是正常需求；
+///   更重要的是，它会让下面那条「凭据不许回来」的守卫在改代码时先炸在编译期，
+///   根本走不到断言（实测踩过：把凭据放回去时先报 E0308，守卫形同虚设）。
+pub const PARSE_SERVICES: &[&str] = &[
     "https://player.gimy.bot/u/parse.php?url=",
 ];
 
@@ -3520,14 +3524,61 @@ mod task5_ab_restart {
         let src = include_str!("tvbox.rs");
         let head = src.split("mod task5_ab_restart").next().expect("split 失败");
         let count = |n: &str| head.matches(n).count();
-        assert_eq!(count("pub const PARSE_SERVICES: [&str; 2] = ["), 1, "PARSE_SERVICES 应为硬编码的 2 个解析服务");
+        /*
+         * ⚠️ 这里**不再**写死「2 个解析服务」。2026-10-10 删掉了 `api.huaqi.pro`
+         *    那条 —— 它是一个被硬编码进公开仓库的**真实付费凭据**，而且
+         *    本文件上方注释自己就写着它自 2026-10-02 起已失效（返回 404）。
+         *    真正的判据是**形状**：这个数组还在、且非空。
+         *    （写成 `count("PARSE_SERVICES: [&str; 2]")` 的话，以后每加删一个
+         *    服务都要改这里 —— 而「加服务」本是正常需求，不该被门禁挡住。）
+         */
+        assert_eq!(
+            count("pub const PARSE_SERVICES: &[&str] = &["),
+            1,
+            "PARSE_SERVICES 应仍声明在生产代码里"
+        );
+        assert!(
+            !PARSE_SERVICES.is_empty(),
+            "★ 解析服务列表不能为空 —— 空的话任何非 m3u8 的地址都解析不出来"
+        );
         assert_eq!(count("if !url.to_lowercase().contains(\".m3u8\") {"), 1, "resolve 里的 .m3u8 短路判断应存在且唯一");
         assert_eq!(count("found = self.try_parsers(&page_url).await;"), 1, "resolve 必须真的走到 try_parsers");
-        assert_eq!(count("https://player.gimy.bot/u/parse.php?url="), 1, "解析服务 1 的地址");
-        assert_eq!(count("https://api.huaqi.pro/api/?key="), 1, "解析服务 2 的地址");
+        for svc in PARSE_SERVICES {
+            assert_eq!(
+                count(svc),
+                1,
+                "解析服务 {svc} 应在生产代码里出现且唯一"
+            );
+        }
+        /*
+         * ★ 反面判据：凭据不许再回到代码里（2026-10-10 的安全事故）。
+         *   挡的是「把 key 又硬编码回来」—— 那种改动编译通过、测试全绿，
+         *   但凭据又泄露一次。
+         *
+         * ⚠️ 两个坑（都是实测踩的）：
+         *  ① 只查 `huaqi` 这个**词**会判红 —— 上方那段解释「为什么删掉它」的
+         *     注释里就写着那个域名。
+         *  ② 查完整的 URL 形状同样会判红 —— **连注释里那句「该域名 + key=」
+         *     都会被匹配到**。注意这里踩的是块注释：`/** */` 的续行以 ` * ` 开头，
+         *     逐行剥 `//` 或 `///` 都识别不到它（实测：判据改了三版才绿）。
+         * ⇒ 干脆不查 URL 形状，只查**那个 key 的数字片段**，并且运行时拼出来
+         *    —— 注释里提到「已移除」时不可能恰好带上那串数字。
+         */
+        let bad_url: String = ["api.huaqi", ".pro/api/"].concat();
+        assert!(
+            !src.contains(&bad_url),
+            "★ 硬编码的第三方付费凭据不许再出现（2026-10-10 已移除：它既不安全也早已失效）"
+        );
+        // 那个具体 key 的片段**在运行时拼出来** —— 否则这条断言会匹配到它自己
+        // 源码里的那个字面量，把自己判红（实测踩过）。
+        let key_needle: String = ["key=", "5bd0", "db7c858"].concat();
+        assert!(
+            !src.contains(&key_needle),
+            "★ 那个具体凭据不许再出现在代码里"
+        );
     }
 
-    // ── ② A：分享页（无 m3u8）必须真的请求两个解析服务 ────────────────────
+    // ── ② A：分享页（无 m3u8）必须真的请求**每一个**解析服务 ───────────────
     #[tokio::test]
     async fn a_share_page_reaches_parse_services_with_counted_requests() {
         let sink = start_sink(SHARE_PLAIN);
@@ -3539,22 +3590,36 @@ mod task5_ab_restart {
 
         let hits = sink.hits();
         dump_hits("A-share-page-no-m3u8(real PARSE_SERVICES via proxy)", &hits);
-        assert_eq!(
-            hits.len(),
-            3,
-            "A 应恰好 3 条真实请求（1×GET 分享页 + 2×CONNECT 解析服务），实际：{:?}",
-            sink.lines()
-        );
         let g = hits.iter().find(|h| h.method == "GET").expect("缺少分享页 GET");
         assert!(g.target.contains("/share/"), "分享页 GET 目标不对：{}", g.target);
         assert_eq!(g.status, 200, "分享页应回 200");
         assert_eq!(g.bytes, SHARE_PLAIN.len(), "分享页字节数应等于服务端应答体长度");
 
-        assert_eq!(sink.count_method("CONNECT"), 2, "两个解析服务都必须被真实请求，实际：{:?}", sink.lines());
+        /*
+         * ⚠️ 断言「**每一个**已配置的服务都被真实请求」，而不是「恰好 N 条」。
+         *    （2026-10-10 删掉 huaqi 后，原来写死的 3 条 / 2 个 CONNECT 就��红了。）
+         *    这样以后增删解析服务都不必改这里，而「配置了却不请求」这个缺陷
+         *    仍然会被抓住。
+         */
         let targets: Vec<String> =
             hits.iter().filter(|h| h.method == "CONNECT").map(|h| h.target.clone()).collect();
-        assert!(targets.iter().any(|t| t == "player.gimy.bot:443"), "应请求 gimy，实际 {targets:?}");
-        assert!(targets.iter().any(|t| t == "api.huaqi.pro:443"), "应请求 huaqi，实际 {targets:?}");
+        assert_eq!(
+            targets.len(),
+            PARSE_SERVICES.len(),
+            "每个已配置的解析服务都必须被真实请求，实际：{:?}",
+            sink.lines()
+        );
+        for svc in PARSE_SERVICES {
+            let host = svc
+                .split("://")
+                .nth(1)
+                .and_then(|r| r.split('/').next())
+                .expect("服务地址应形如 https://host/path");
+            assert!(
+                targets.iter().any(|t| t == &format!("{host}:443")),
+                "应请求 {host}，实际 {targets:?}"
+            );
+        }
         for h in hits.iter().filter(|h| h.method == "CONNECT") {
             assert_eq!(h.status, 502, "CONNECT 应被假服务用 502 拒掉：{}", h.target);
             assert!(h.bytes > 0, "CONNECT 也应有真实回包字节：{}", h.target);
