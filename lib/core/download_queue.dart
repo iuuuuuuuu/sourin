@@ -76,6 +76,11 @@ class DownloadTask {
     this.error,
     this.path,
     this.cover,
+    this.description,
+    this.year,
+    this.area,
+    this.kind,
+    this.badges = const [],
   });
 
   /// 稳定 id（`provider:mediaId:episodeId`）—— 用来去重
@@ -108,6 +113,25 @@ class DownloadTask {
   /// 让每个消费方各自再去查一次详情接口。
   final String? cover;
 
+  // ══════════════════════════════════════════════════════════════════
+  //  ★★★ Owner 第 1009 批 13：随下载一起**缓存作品元数据**
+  // ══════════════════════════════════════════════════════════════════
+  //
+  // # 为什么这四个字段必须**下载那一刻**就记下来
+  // ```text
+  // 本地播放页要"跟在线播放页一模一样"：标题、简介、年份、地区、类型、角标。
+  // 而这些**只有详情接口能给** —— 离线时核心也拿不到（本地没有 provider 可路由）。
+  // ⇒ 唯一能离线显示的时机就是**下载那一刻还在线**。
+  // ★ 全部可空：老任务 / 插件没给 → 本地页降级显示（不编造），不崩。
+  // ```
+  final String? description;
+  final String? year;
+  final String? area;
+  final String? kind;
+
+  /// 后端拼好的角标（「连载中」「9.2 分」…）—— 与在线页显示的是**同一份**
+  final List<String> badges;
+
   double get progress => total <= 0 ? 0 : (done / total).clamp(0.0, 1.0);
 
   DownloadTask copyWith({
@@ -134,6 +158,13 @@ class DownloadTask {
         error: clearError ? null : (error ?? this.error),
         path: path ?? this.path,
         cover: cover ?? this.cover,
+        // ★ 元数据不参与 copyWith：它们在入队时就定了，
+        //   队列里的状态变更（进度/状态/错误）不应该把它们抹掉。
+        description: description,
+        year: year,
+        area: area,
+        kind: kind,
+        badges: badges,
       );
 }
 
@@ -639,18 +670,95 @@ class DownloadQueue {
   /// ```
   static const String kSidecarName = '_sourin-cache.json';
 
+  /// 旁文件里「本地封面文件名」那个键（读侧 cache_page 必须引用同一个常量）
+  static const String kSidecarCoverFileKey = 'coverFile';
+
+  /// ★★★ 旁文件**原子写**（先写 .tmp 再 rename）
+  ///
+  /// 改前是直接 `writeAsString`：写到一半崩了/断电 ⇒ 盘上留下**半个 JSON**。
+  /// 而读侧（`cache_page._readSidecar`）解析失败会静默降级成"没封面"
+  /// ⇒ 用户看到的是"我明明下过，怎么封面没了"，而文件明明就在那儿。
+  /// rename 在同一卷上是原子的 ⇒ 要么完整的新文件，要么完整的老文件。
   static Future<void> _writeSidecarFor(DownloadTask t, String dir) async {
     try {
+      /*
+       * ★ 封面图先抓：抓成功了才知道本地文件名，好一起写进旁文件。
+       * ⚠️ 抓图是网络 IO ⇒ 绝不能让它挡住后面的字段写入（顺序即此）。
+       */
+      final coverFile = await cacheCoverImage(t.cover, dir);
       final f = File('$dir${Platform.pathSeparator}$kSidecarName');
-      await f.writeAsString(jsonEncode(<String, Object?>{
+      final tmp = File('${f.path}.tmp');
+      await tmp.writeAsString(jsonEncode(<String, Object?>{
         'provider': t.provider,
         'id': t.mediaId,
         'title': t.title,
         'cover': t.cover,
-      }));
+        kSidecarCoverFileKey: coverFile,
+        // ★ 以下给「本地播放页」补（Owner：封面介绍啥的在线播放器有的，
+        //   本地播放器也要有）。全部可空 —— 缺就缺，读侧降级，绝不编造。
+        'description': t.description,
+        'year': t.year,
+        'area': t.area,
+        'kind': t.kind,
+        'badges': t.badges,
+      }), flush: true);
+      await tmp.rename(f.path);
     } catch (e) {
-      // 封面丢了是小事，把下载本身搞失败是大事
+      // 旁文件丢了是小事，把下载本身搞失败是大事
       AppLog.write('DL', '旁文件写入被忽略：$e');
+    }
+  }
+
+  /// 把封面图抓到剧集目录里（返回落地的文件名；没封面 / 失败 ⇒ null）
+  ///
+  /// ★ 为什么**必须**缓存图片本体而不只是记 URL：离线时那张图照样拉不下来
+  ///   ⇒ 本地页仍是灰底占位 —— 而"离线也能看到封面"正是这一轮的要求。
+  ///
+  /// ⚠️ 失败绝不阻断下载（有些源防盗链、或根本没有封面），只记日志。
+  @visibleForTesting
+  static Future<String?> cacheCoverImage(String? url, String dir) async {
+    final raw = url?.trim() ?? '';
+    if (raw.isEmpty) return null;
+    // 只认 http(s)：data: 与本地路径没有"抓取"的必要，也免得拼出怪文件名
+    if (!raw.startsWith('http://') && !raw.startsWith('https://')) return null;
+
+    HttpClient? client;
+    try {
+      client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
+      final req = await client.getUrl(Uri.parse(raw));
+      // ★ 不带 Referer 是**对的**（见 poster_card 顶部的说明：CDN 拒绝陌生来源）
+      final res = await req.close().timeout(const Duration(seconds: 20));
+      if (res.statusCode != 200) return null;
+      final bytes = await consolidateHttpClientResponseBytes(res);
+      // 0 字节 / 超过 8 MiB 都不写：前者是没抓到，后者多半不是封面而是整集视频
+      if (bytes.isEmpty || bytes.length > 8 * 1024 * 1024) return null;
+
+      /*
+       * ★ 扩展名只从 **URL 的 path** 上取，且要白名单 ——
+       *   query 里常带一串伪扩展名（`?format=webp&x=jpg`），
+       *   直接截整个 URL 会写出怪文件名，还会漏掉没有扩展名的 CDN 地址。
+       */
+      var ext = '.jpg';
+      final m =
+          RegExp(r'\.(jpe?g|png|webp|gif)$', caseSensitive: false)
+              .firstMatch(Uri.parse(raw).path);
+      if (m != null) {
+        final g = m.group(1)!.toLowerCase();
+        // jpeg/jpg 都写成 .jpg，免得同一张图有两个文件名
+        ext = g == 'jpeg' ? '.jpg' : '.$g';
+      }
+
+      final name = '_sourin-cover$ext';
+      final f = File('$dir${Platform.pathSeparator}$name');
+      final tmp = File('${f.path}.tmp');
+      await tmp.writeAsBytes(bytes, flush: true);
+      await tmp.rename(f.path);
+      return name;
+    } catch (e) {
+      AppLog.write('DL', '封面缓存失败（不阻断下载）：$e');
+      return null;
+    } finally {
+      client?.close(force: true);
     }
   }
 

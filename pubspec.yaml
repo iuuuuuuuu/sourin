@@ -100,8 +100,7 @@ dependencies:
 
   # 取流地址需要走 HTTP，且要能带自定义请求头（Referer 防盗链）
   http: ^1.2.2
-
-  # ★ 校验更新安装包的 SHA-256（与 Release 里的 SHA256SUMS.txt 对账）。
+# ★ 校验更新安装包的 SHA-256（与 Release 里的 SHA256SUMS.txt 对账）。
   #   ⚠️ 它此前只是 forui 带进来的**传递依赖**（forui 已于 2026-10-10 移除，
   #   那一刻就会消失）—— 正因为如此必须显式声明，否则那个 import 会突然编不过
   #   （这正是 material_ui 那段注释记过的同一个坑）。

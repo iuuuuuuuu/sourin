@@ -18,6 +18,8 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart'
+    show PointerDeviceKind, PointerHoverEvent;
 import 'package:flutter/widgets.dart' show Widget;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:material_ui/material_ui.dart' as mui;
@@ -25,9 +27,10 @@ import 'package:sourin_spike/core/download_dir.dart';
 import 'package:sourin_spike/core/models.dart' show StreamCandidate;
 import 'package:sourin_spike/core/download_queue.dart';
 import 'package:sourin_spike/core/ui_prefs.dart';
-import 'package:sourin_spike/ui/cache_page.dart';
 import 'package:sourin_spike/ui/app_scaffold.dart';
 import 'package:sourin_spike/ui/app_theme.dart';
+import 'package:sourin_spike/ui/cache_page.dart';
+import 'package:sourin_spike/ui/widgets/poster_card.dart';
 
 /// ★ 探针沙盒根 —— 必须是绝对路径，且落在系统临时目录下
 Directory _sandboxRoot() {
@@ -343,45 +346,67 @@ void main() {
     expect(dry.deleted, isFalse, reason: '★★ 不传 force 必须只是演练、绝不真删');
     expect(dir.existsSync(), isTrue, reason: '★★ 演练后目录必须原样在');
 
-    // ── ★★ 走**真实 UI 路径**：点「要删的剧」那张卡片上的「删除整部」──
+    // ── ★★ 走**真实 UI 路径**：悬停「要删的剧」那张卡 ⇒ 点封面右上角的
+    //    「更多」⇒ 菜单里选「删除整部」──
     //
-    // ⚠️ 不能点 `find.text('删除整部').first`：卡片按**目录名**排序
-    //    （scanCacheWorks 的 works.sort），「别删我」排在「要删的剧」前面
-    //    ⇒ .first 会点到**邻居**那张卡（实测就删错了目标，是探针的错不是页面的）。
-    //    正确做法：先定位到标题所在的卡片列，再取同一列里的删除按钮。
-    /*
-     * 2026-10-09: the delete entry changed from a TEXT row
-     * ('delete whole show') to an ICON button -- Owner asked for it
-     * ('the trash can below looks ugly, please improve it').
-     * It is now a right-aligned IconButton(Icons.delete_outline_rounded),
-     * neutral by default and turning red on hover.
-     *
-     * So we cannot find.text() it any more (that string is now the
-     * tooltip, not visible text). Locate by ICON instead.
-     *
-     * Still must NOT use .first: cards are sorted by directory name, so
-     * the neighbour card comes first and .first would delete the WRONG
-     * show (this probe really did that once). Anchor to the title first.
-     */
+    // ⚠️ 不能按图标找删除入口了：Owner 1009 第 1 条把它收进了「更多」菜单，
+    //    页面上**不再有**垃圾桶图标（见 _CacheWorkCard 的注释）。
+    // ⇒ 断言也必须跟着改成**新行为**：
+    //    ① 悬停前：屏幕上**一个**「更多」按钮都没有（它默认隐藏）
+    //    ② 悬停后：目标卡上出现一枚，且点它弹出的菜单里有「删除整部」
+    //    这两条在旧行为下都会红（旧卡片下方常驻一个 delete_outline 图标）。
+    //
+    // ⚠️ 仍不许用 .first：卡片按目录名排序，「别删我」在前面 ⇒ .first 会
+    //    操作到邻居那张卡（实测删错过目标）。先锚到标题所在的那张卡。
     final myCard = find.ancestor(
       of: find.text('要删的剧'),
       matching: find.byType(mui.Column),
+    ).last;
+    // ★ 「更多」在 PosterCard **之外**（它在卡片外层 Stack 里）
+    //   ⇒ 不能用 descendant 取。而本卡片在标题乊方 ⇒ 用给它的稳定 key 定位。
+    // ★ 选择器：「更多」不在标题那个 Column 里（它在卡片外层 Stack）
+    //   ⇒ 按几何挑：落在**目标卡 PosterCard 矩形内**的那一枚。
+    final posterRect = t.getRect(
+      find.ancestor(of: find.text('要删的剧'),
+          matching: find.byType(PosterCard)),
     );
-    final delBtn = find.descendant(
-      of: myCard.last,
-      matching: find.byIcon(mui.Icons.delete_outline_rounded),
-    );
-    debugPrint('DEL delete-icons on screen=' +
-        find.byIcon(mui.Icons.delete_outline_rounded).evaluate().length.toString() +
-        ' (inside target card=' + delBtn.evaluate().length.toString() + ')');
-    expect(delBtn, findsOneWidget,
-        reason: 'the target card must have exactly one delete entry');
-    // Pin the redesigned shape: it is an ICON now, not a text row.
-    expect(find.text('删除整部'), findsNothing,
-        reason: 'delete entry is an icon now; that string is only a tooltip');
-    final target = t.getCenter(delBtn);
-    debugPrint('DEL 命中点=$target（应落在「要删的剧」那张卡上）');
-    await t.tapAt(target);
+    // ★ 按**目标那部的目录名**定位：按钮的 key 带着 dirName，
+    //   因此不用在几何上猜（两张卡都有同类按钮，照旧方式会取到邻居）。
+    final moreBtn =
+        find.byKey(ValueKey<String>('cache-card-more:要删的剧'));
+    debugPrint('DEL target PosterCard rect=$posterRect');
+    debugPrint('DEL 全页「更多」按钮个数（悬停前）='
+        '${find.byIcon(mui.Icons.more_horiz).evaluate().length}');
+
+    // ① 悬停前：默认隐藏（Owner 原话「孤零零一个删除按钮真不好看」的正解）
+    expect(find.byIcon(mui.Icons.delete_outline_rounded), findsNothing,
+        reason: '★★★ 页面上不再有常驻的垃圾桶按钮（那是 Owner 要求去掉的）');
+
+    // ② 悬停 ⇒ 「更多」显形（悬停点在**目标卡的封面上**，不能碰邻居那张）
+    final poster = find.descendant(
+      of: find.ancestor(of: find.text('要删的剧'),
+          matching: find.byType(PosterCard)),
+      matching: find.byType(mui.ClipRRect),
+    ).first;
+    // ★ 用“悬停事件”而不是拖一只虚拟鼠标：
+    //   `TestGesture` 的位移在这里不会被转成 PointerHoverEvent，
+    //   而 `MouseRegion.onEnter` 只认 hover 事件 ⇒ 需要直接发。
+    await t.sendEventToBinding(PointerHoverEvent(
+      position: t.getCenter(poster),
+      kind: PointerDeviceKind.mouse,
+    ));
+    await t.pumpAndSettle();
+    debugPrint('DEL 悬停后目标卡上的「更多」个数='
+        '${moreBtn.evaluate().length}');
+    expect(moreBtn, findsOneWidget,
+        reason: '★★★ 悬停后目标卡必须出现「更多」入口');
+    // 悬停态不可点（IgnorePointer）⇒ 必须先把它显形出来才 tap 得到
+    await t.tap(moreBtn);
+    await t.pumpAndSettle();
+    expect(find.text('删除整部'), findsOneWidget,
+        reason: '★★★ 菜单里必须有「删除整部」');
+    // → 选它，之后才是二次确认弹窗（旧测试假设点就是删除按钮）
+    await t.tap(find.text('删除整部').last);
     await t.pump(const Duration(milliseconds: 50));
     // 弹窗里的预览是一次**真读盘** ⇒ 必须在 runAsync 里等它回来
     await t.runAsync(() async {

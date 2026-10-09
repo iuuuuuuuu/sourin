@@ -51,8 +51,10 @@ import 'widgets/overlay_motion.dart';
 //      下面的 `export` 只对 import 本文件的人生效（Dart 语义）。
 // ★ task-12 ⑤：只取一个常量（kLocalProvider）—— 本地命名空间必须**只有一处定义**，
 //   在本文件里再写一份字面量就是第二个契约（本仓反复踩过这个形态）。
-import 'cache_page.dart' show humanBytes, kLocalProvider;
+import 'cache_page.dart'
+    show CachedDelete, CachedWork, humanBytes, kLocalProvider;
 import 'media_session.dart';
+import '../core/network_status.dart';
 import 'tokens.dart';
 import 'widgets/cover_image.dart';
 import 'widgets/detail_raw_meta.dart';
@@ -512,6 +514,7 @@ class LocalEpisodeRef {
     required this.episodeTitle,
     required this.absolutePath,
     this.bytes = 0,
+    this.watchRatio = 0,
   });
 
   /// 磁盘上的文件名（含扩展名）—— 也是这一行的稳定 key
@@ -530,6 +533,19 @@ class LocalEpisodeRef {
   ///    在 flutter_test 的假时钟下那次 IO 甚至永不完成（弹窗永远不出现）。
   ///    而扫盘**本来就量过**这个数（CachedEpisode.bytes）⇒ 直接带过来。
   final int bytes;
+
+  /// 这一集的**观看进度**（0..1；0 = 没看过 / 看过但不到 1%）
+  ///
+  /// ★ 为什么需要（Owner：「已缓存的 一集一行」，并要从一眼看出看过没看过）
+  /// ```text
+  /// 进度存在 `local` 命名空间（provider='local', contentId=文件绝对路径），
+  /// 而那是**本地页自己的主键**——所以这里能直接问库，不用去推测。
+  /// ★ 不读为它发请：进度表是**本地 SQLite**，不需要网络，且小快。
+  /// ```
+  final double watchRatio;
+
+  /// 看过一矩以上（Owner：「已看标记」）
+  bool get watched => watchRatio > 0.01;
 
   @override
   bool operator ==(Object other) =>
@@ -621,6 +637,7 @@ class DetailPage extends StatefulWidget {
     this.localCover,
     this.localEpisodes = const <LocalEpisodeRef>[],
     this.onLocalEpisodesChanged,
+    this.localMeta,
   });
 
   final String provider;
@@ -750,6 +767,21 @@ class DetailPage extends StatefulWidget {
   /// ⚠️ 本页**不自己扫盘**（见 localEpisodes 的注释）—— 扫盘是外层的职责。
   ///    删完不刷新的话，列表会一直挂着已经不存在的行（假刷新比不刷新更糟）。
   final VoidCallback? onLocalEpisodesChanged;
+
+  /// ★★★ Owner 1009 ⑬：本地模式下**随下载缓存下来的作品信息**
+  ///
+  /// （简介 / 年份 / 地区 / 类型 / 角标 / 本地封面文件）
+  ///
+  /// # 为什么需要它（这一轮之前本地页为什么是"半成品"）
+  /// ```text
+  /// 本地页原本只填 title + cover ⇒ 页面上只有一行标题 + 一个徽章，
+  /// 跟在线播放页一比就是"少了大半截"，Owner 说的「半成品」正是这个。
+  /// 而这些字段**只有详情接口能给**，离线时核心也路由不到（provider='local'）
+  /// ⇒ 唯一出路就是下载那一刻把它们缓存下来（见 DownloadQueue._writeSidecarFor）。
+  /// ```
+  ///
+  /// ⚠️ null / 字段为空 ⇒ **降级显示**（少几行），绝不编造，也绝不报错。
+  final CachedWork? localMeta;
 
   @override
   State<DetailPage> createState() => _DetailPageState();
@@ -1056,6 +1088,13 @@ class _DetailPageState extends State<DetailPage> {
   /// ⚠️ null 与「本地」**语义不同**：前者是"还没算出来"，后者是"算过了，认不回来"。
   String? _localOrigin;
 
+  /// ★ Owner ⑬：本地页此刻**能不能上网**（决定那几枚操作按钮画不画）
+  ///
+  /// ★ 初始 true（=「先按有网画」）：探测是异步的，首帧不能等它；
+  ///   联网用户因此零感知，断网用户顶多看到按钮"闪一下再消失"。
+  ///   反过来（初始 false）会让联网用户白等一下才能用按钮 —— 更糟。
+  bool _online = true;
+
   /// ★ task-12 ⑤：本地模式认回来的那条**站点记录**（provider + nativeId）
   ///
   /// 用途：① 溯源（日志/排查）② 补真详情时用它去拉（见 _loadLocalOrigin 的第 ② 步）。
@@ -1284,24 +1323,32 @@ class _DetailPageState extends State<DetailPage> {
     final file = widget.localFile;
     if (file == null) return;
     /*
-     * ① 首帧就用**外层给的信息**铺满标题（cache_page 扫盘时的目录名 / 真标题）：
-     *    MediaDetail.id 用文件绝对路径 —— 它在本模式里只是个标识，不会外发。
-     *    cover 用外层给的（只有从下载面板点进来时才可能有；扫盘那条路是 null）。
+     * ① 首帧就用**缓存下来的作品信息**铺满（Owner ⑬）——
+     *    零网络、零 FFI ⇒ 断网时这一页也是完整的。
+     *    ⚠️ 本地页本来没有 title/cover 字段（在线路径的标题来自拉回来的详情），
+     *      而本地拿不到站点详情 ⇒ 只能用外层给的那几样。
      */
+    final meta = widget.localMeta;
     setState(() {
-      /*
-     * ⚠️ 标题与封面取外层喂进来的 localTitle / localCover —— DetailPage
-     *    本来**没有** title / cover 字段（在线路径的标题来自拉回来的详情）。
-     *    本地路径拿不到站点详情 ⇒ 只能用外层给的那两样。
-     */
       _detail = MediaDetail(
         id: file,
         title: widget.localTitle ?? widget.id,
-        cover: widget.localCover,
+        cover: widget.localCover ?? meta?.localCoverPath ?? meta?.cover,
+        description: meta?.description,
+        year: meta?.year,
+        area: meta?.area,
+        kind: meta?.kind,
+        badges: meta?.badges ?? const <String>[],
       );
       _loading = false;
       _error = null;
     });
+
+    /*
+     * ★ 联网探测（Owner ⑬：「有网络那几个按钮也要显示,如没网络就不显示操作按钮」）
+     * ⚠️ unawaited ⇒ 绝不影响首帧；结果到了只改 `_online` 重建一次。
+     */
+    unawaited(_probeNetwork());
 
     /*
      * ② 来源 + （可能的）真详情 —— 见 [_resolveLocalOrigin]。
@@ -1321,6 +1368,21 @@ class _DetailPageState extends State<DetailPage> {
       debugPrint('[DETAIL] 本地模式读续播进度失败（不影响其它区块）: $e');
     }
   }
+
+  /// 联网探测（结果只驱动 `_online`，**不阻塞首帧**）
+  ///
+  /// ⚠️ 失败一律降级成"有网"：按钮少显示一次，好过整页报错。
+  Future<void> _probeNetwork() async {
+    try {
+      await NetworkStatus.probe();
+      if (mounted) setState(() => _online = NetworkStatus.online.value);
+    } catch (e) {
+      AppLog.write('DETAIL', '联网探测失败（按有网处理）: $e');
+    }
+  }
+
+  /// 本地模式下「那几枚操作按钮」画不画（Owner ⑬：没网就不显示）
+  bool get _showLocalActions => !widget.isLocalFile || _online;
 
   /// 解析本地模式的「来源」，并把**真封面**用上（task-17 ②）
   ///
@@ -2068,6 +2130,19 @@ class _DetailPageState extends State<DetailPage> {
       // ★★★ task-11 ④：把封面带上 —— 下载完成后写进剧集目录的旁文件，
       //    「已缓存」页据此显示封面（详见 download_queue 的 _writeSidecarFor）。
       cover: d.cover,
+      /*
+       * ★★★ Owner 第 1009 批 13：把作品元数据**一起缓存下来**
+       * ```text
+       * 本地播放页要"跟在线播放页一模一样"（简介/年份/地区/类型/角标），
+       * 而这些只有详情接口能给，离线时永远拿不到
+       * ⇒ 唯一能离线显示的时机就是**入队这一刻**（那时详情就在手里）。
+       * ⚠️ 全部可空：插件没给就留空，本地页降级显示，不崩也不编造。
+       */
+      description: d.description,
+      year: d.year,
+      area: d.area,
+      kind: d.kind,
+      badges: d.badges,
     );
     final added = DownloadQueue.enqueue(task);
     if (!quiet) {
@@ -2457,6 +2532,7 @@ class _DetailPageState extends State<DetailPage> {
           //   在线模式仍是 _providerName —— 逐字不变。
           providerName: widget.isLocalFile ? _localOrigin : _providerName,
           localMode: widget.isLocalFile,
+          showActions: _showLocalActions,
           isFav: _isFav,
           following: _following,
           resume: _resume,
@@ -3020,27 +3096,27 @@ class _DetailPageState extends State<DetailPage> {
 
   /// 真删（单集与批量共用这一条路径 —— 两处各写一遍迟早不一致）
   ///
-  /// # 顺序（与 DownloadQueue.remove 同一条纪律）
-  /// ```text
-  /// ① 队列里若还有这一集（正在下）⇒ 先走 remove(id)：它会先停、再删、最后出队
-  /// ② 否则直接删盘上产物（同名 + 各后缀 + .part）
-  /// ③ 删完**让外层重新扫盘** —— 不刷新的话列表会一直挂着已经不存在的行
-  /// ```
+  /// ★ 删盘上文件时**只认文件名**，绝对路径由 `CachedDelete` 现拼 —— 那是
+  ///   唯一带**路径穿越防护**的实现（lead 明令）。
+  ///   改前这里直接拿 `ref.absolutePath` 去删，而那个绝对路径来自磁盘扫描
+  ///   与本地命名空间，理论上可被构造出目录外的目标。
   Future<void> _deleteLocalPaths(List<LocalEpisodeRef> refs) async {
+    final dir = _localWorkDir();
+    if (dir == null) {
+      _sayLocal('找不到这部作品的文件夹，已取消删除');
+      return;
+    }
     var deleted = 0;
     for (final ref in refs) {
       final name = ref.fileName;
       // ① 队列里还有这条任务 ⇒ 走正规删除路径（含"先停再删"）
-      final task = DownloadQueue.tasks.value
-          .where((t) => t.fileName == name)
-          .toList();
-      if (task.isNotEmpty) {
-        for (final t in task) {
-          await DownloadQueue.remove(t.id);
-        }
+      final task =
+          DownloadQueue.tasks.value.where((t) => t.fileName == name).toList();
+      for (final t in task) {
+        await DownloadQueue.remove(t.id);
       }
       // ② 盘上产物（无论队列里有没有，都要确保文件真的没了）
-      if (await _deleteLocalFile(ref.absolutePath)) deleted++;
+      if (await CachedDelete.deleteEpisodeFile(dir, name)) deleted++;
     }
     if (!mounted) return;
     setState(() {
@@ -3058,35 +3134,14 @@ class _DetailPageState extends State<DetailPage> {
         : '没有删除任何文件（文件可能已经不在了）');
   }
 
-  /// 删一个绝对路径上的视频产物（含各种后缀与半截文件）
+  /// 本地会话所在的**作品目录**（拿不到 ⇒ 不许删）
   ///
-  /// ★ 后缀清单与 `DownloadQueue.deleteTaskFiles` **逐字对齐** ——
-  ///   两处各写一份迟早漂移（一个删 .mp4、一个删 .ts）。
-  ///   这里没有直接调它，是因为它的入参是 DownloadTask（见上面那段说明）。
-  Future<bool> _deleteLocalFile(String absPath) async {
-    var any = false;
-    // 去掉可能的 .part 尾巴，得到"基名"
-    final base = absPath.endsWith('.part')
-        ? absPath.substring(0, absPath.length - 5)
-        : absPath;
-    for (final p in <String>[
-      base,
-      '$base.part',
-      '$base.ts',
-      '$base.ts.part',
-    ]) {
-      try {
-        final f = File(p);
-        if (await f.exists()) {
-          await f.delete();
-          any = true;
-          AppLog.write('LOCAL', '已删文件 $p');
-        }
-      } catch (e) {
-        AppLog.write('LOCAL', '删文件失败 $p：$e');
-      }
-    }
-    return any;
+  /// ★ 从任一集的文件名往上退一层 —— 这样就不必把整个 CachedWork 传进来
+  ///   （本页拿的是 LocalEpisodeRef，只有绝对路径）。
+  String? _localWorkDir() {
+    if (widget.localEpisodes.isEmpty) return null;
+    final p = Directory(widget.localEpisodes.first.absolutePath).parent.path;
+    return p.isEmpty ? null : p;
   }
 
   /// 一句话反馈（与 cache_page._say 同款）
@@ -3489,6 +3544,16 @@ List<String> _metaFallbackBadges(Map<String, dynamic> meta) {
 class _Cover extends StatelessWidget {
   const _Cover({required this.detail, required this.width});
 
+  /// 这个封面是**本地文件**还是**网络 URL**
+  ///
+  /// ★ 判据是「能不能被解析成本地路径」—— `Uri.tryParse` 能解出 scheme 的
+  ///   就是网络地址（http/https）。真正的 Windows 路径解析出来是无 scheme 的。
+  static bool _isLocalCover(String? cover) {
+    if (cover == null || cover.isEmpty) return false;
+    if (cover.startsWith('http://') || cover.startsWith('https://')) return false;
+    return Uri.tryParse(cover)?.hasScheme != true;
+  }
+
   final MediaDetail detail;
   final double width;
 
@@ -3511,7 +3576,30 @@ class _Cover extends StatelessWidget {
                   alpha: AppColors.posterPlaceholderAlpha,
                 ),
               ),
-              if (detail.cover != null && detail.cover!.isNotEmpty)
+              /*
+               * ★ Owner ３：本地页的封面是**磁盘上那张图**（断网也能看见）
+               * ```dart
+               * Image.network(‘C:\...\_sourin-cover.jpg’)  → 网络协议，离线拿不到。
+               * ```
+               * ⇒ 本地路径走 `Image.file`。判据是「能被解析成本地路径」，
+               *   而不是 provider == local（那只是一个字符串常量）。
+               */
+              if (_isLocalCover(detail.cover))
+                Image.file(
+                  File(detail.cover!),
+                  fit: BoxFit.cover,
+                  cacheWidth: coverDecodeWidth(context, width),
+                  errorBuilder: (_, __, ___) => Center(
+                    child: Text(
+                      detail.title.isEmpty ? '?' : detail.title.characters.first,
+                      style: TextStyle(
+                        fontSize: FontSizes.display * 0.6,
+                        color: colors.onSurfaceVariant.withValues(alpha: 0.5),
+                      ),
+                    ),
+                  ),
+                )
+              else if (detail.cover != null && detail.cover!.isNotEmpty)
                 coverImage(
                   context,
                   url: detail.cover!,
@@ -3573,6 +3661,7 @@ class _Info extends StatelessWidget {
     required this.episodeCount,
     this.localCount = 0,
     this.localMode = false,
+    this.showActions = true,
     required this.sourceCount,
     required this.providerName,
     required this.isFav,
@@ -3604,6 +3693,12 @@ class _Info extends StatelessWidget {
   ///
   /// 只影响两件事：① 画不画那枚「已下载 N 集」角标；② 操作行（收藏/追更/换源/下载）画不画。
   final bool localMode;
+
+  /// ★ Owner ３：操作行画不画（无网时不显示那几枚按钮）
+  ///
+  /// ★ 在线页恒为 true（那几枚按钮本来就要打网络，——“能不能用”
+  ///   在那里由点了发不出来说）；只有本地页才会变 false。
+  final bool showActions;
 
   /// 线路总数（顶层 + 嵌套，展平后）—— 用于「N 个播放源」角标
   final int sourceCount;
@@ -3837,7 +3932,7 @@ class _Info extends StatelessWidget {
          * ```
          * ⚠️ 所以这里**不是"藏起来"**，而是它们本就无处可落。
          */
-        if (!localMode) ...[
+        if (showActions) ...[
         // ── 操作 ──
         const SizedBox(height: Sp.x4),
         Wrap(
@@ -4261,15 +4356,59 @@ class _LocalEpisodeRow extends StatelessWidget {
           ),
           const SizedBox(width: Sp.x2),
           Expanded(
-            child: Text(
-              ref.episodeTitle,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                fontSize: FontSizes.sm,
-                fontWeight: active ? FontWeight.w600 : FontWeight.w400,
-                color: active ? colors.primary : colors.onSurface,
-              ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  ref.episodeTitle,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: FontSizes.sm,
+                    fontWeight: active ? FontWeight.w600 : FontWeight.w400,
+                    color: active ? colors.primary : colors.onSurface,
+                  ),
+                ),
+                // ★ Owner ３：大小 · 看过多少（那些“在线播放页有的信息”之一）
+                const SizedBox(height: 2),
+                Row(
+                  children: [
+                    Text(
+                      humanBytes(ref.bytes),
+                      style: TextStyle(
+                        fontSize: FontSizes.cap,
+                        color: colors.onSurfaceVariant,
+                      ),
+                    ),
+                    if (ref.watched) ...[
+                      const SizedBox(width: Sp.x2),
+                      // 已看标记：看过（不是当前在播）
+                      Icon(Icons.check_circle, size: 13, color: colors.primary),
+                      const SizedBox(width: 3),
+                      Text(
+                        ref.watchRatio >= 0.995 ? '已看完' : '已看 ${(ref.watchRatio * 100).round()}%',
+                        style: TextStyle(
+                          fontSize: FontSizes.cap,
+                          color: colors.primary,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+                // 看过一截但没看完 → 一条极薄的底度进度条
+                if (ref.watched && ref.watchRatio < 0.995) ...[
+                  const SizedBox(height: 4),
+                  ClipRRect(
+                    borderRadius: Radii.rSm,
+                    child: LinearProgressIndicator(
+                      value: ref.watchRatio,
+                      minHeight: 3,
+                      backgroundColor: colors.surfaceContainerHighest,
+                    ),
+                  ),
+                ],
+              ],
             ),
           ),
           // ── 单集删除（仅普通态且外层给了回调）──

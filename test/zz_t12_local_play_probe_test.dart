@@ -59,6 +59,9 @@ void main() {
   late Directory root;
   late String videoPath;
 
+  /// 夹具缺失的原因（非 null ⇒ 整条用例 skip）
+  String? _fixtureMissing;
+
   /*
    * ★★★ `MediaKit.ensureInitialized()` 必须先调 —— 这是**第二个假绿陷阱**
    * ```text
@@ -149,8 +152,19 @@ void main() {
     videoPath = '${root.path}${Platform.pathSeparator}本地剧.mp4';
     final fixture = File('.probe${Platform.pathSeparator}t3_12${Platform.pathSeparator}fixture.mp4');
     if (!fixture.existsSync() || fixture.lengthSync() < 1024) {
-      fail('★ 夹具缺失：${fixture.path} —— 需先用 ffmpeg 造一个真 mp4 放那儿');
+      /*
+       * ★★★ 2026-10-10：改成**门控（skip）**，而不是 fail
+       * ```text
+       * 夹具 `.probe/t3_12/fixture.mp4` 不在版本库里（.probe/ 是本地探针目录），
+       *   所以在没有 ffmpeg 的机器（**包括 CI**）上这条用例必然红 ——
+       *   而它红的理由与产品无关。
+       * ⇒ 缺夹具时 skip 并把原因写进 skip 原因（lead 要求的纪律）。
+       * ```
+       */
+      _fixtureMissing = '${fixture.path} 不存在（或小于 1 KiB）';
+      return;
     }
+    _fixtureMissing = null;
     fixture.copySync(videoPath);
     debugPrint('LOCAL 夹具就绪 = ${File(videoPath).lengthSync()} 字节');
   });
@@ -312,6 +326,10 @@ void main() {
   }
 
   testWidgets('(b-0) 探针必须活着：候选条数 == 1（0 条 = 假绿，立刻判红）', (t) async {
+    if (_fixtureMissing != null) {
+      markTestSkipped('★ 缺夹具：$_fixtureMissing（需 ffmpeg 造一个真 mp4）');
+      return;
+    }
     final r = await bootWith(t, videoPath);
     // ★ 先把异步到达的那条插件异常收走，再断言（收不到就留给框架判红）
     await settleAndDrain(t);
@@ -364,6 +382,10 @@ void main() {
   });
 
   testWidgets('(b-2) ★ 反面对照：localPath=null 时**必须**走网络解析并失败', (t) async {
+    if (_fixtureMissing != null) {
+      markTestSkipped('★ 缺夹具：$_fixtureMissing（需 ffmpeg 造一个真 mp4）');
+      return;
+    }
     final r = await bootWith(t, null);
     debugPrint('LOCAL(b-2) 在线路的候选=${r.urls} err=${r.err}');
     // ★ 目的：证明这个探针**能区分**两条路 ——
