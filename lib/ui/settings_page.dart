@@ -3716,11 +3716,17 @@ const double _dragSlotW = 22;
 /// 图标与正文间距 ………………………………………… 12
 /// 正文（名称行硬需求）……………………………… 156
 /// 正文与按钮间距 …………………………………………  8
-/// 操作按钮区（5 个按钮，flex:none）……………… 264
+/// 操作按钮区（7 个按钮，flex:none）…………… 232
 /// ────────────────────────────────────────────────
-/// 合计 ………………………………………………… 516
+/// 合计 ………………………………………………… 484
 /// ```
-/// 向上取整到 10 的倍数 → **520**。
+/// 向上取整到 10 的倍数 → **520**（当时按钮区是 264，本轮收进 ⋮ 菜单后
+/// 降到 232，卡片总需求 484；520 留 36 余量给 chip 与窄列，见下）。
+///
+/// ⚠️ 这些数字会变：加一个按钮（约 +32~48）、换把手宽度、
+///    改图标尺寸，都要**重新量一遍**再改这个常量 ——
+///    否则卡片会在某个宽度区间悄悄溢出（`RenderFlex overflowed`）。
+///    量法：把窗口扫一遍，看哪里开始出现 overflow（`.probe/` 里有探针）。
 ///
 /// ⚠️ 这些数字会变：加一个按钮（约 +40~48）、换把手宽度、
 ///    改图标尺寸，都要**重新量一遍**再改这个常量 ——
@@ -4765,37 +4771,39 @@ class _ProviderCard extends StatelessWidget {
          *    > JS 插件当然该能编辑 —— 它就是磁盘上的一个 .js 文件。
          *    所以 `_canEdit` 里必须有 `'js'`。
          */
-        if (_canEdit)
-          TextButton(
-            onPressed: onEdit,
-            style: TextButton.styleFrom(
-              padding: const EdgeInsets.symmetric(horizontal: Sp.x3),
-              minimumSize: const Size(0, 32),
-              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        if (_canEdit || _isThirdParty)
+          PopupMenuButton<String>(
+            tooltip: '更多操作',
+            padding: EdgeInsets.zero,
+            icon: Icon(
+              Icons.more_vert,
+              size: 17,
+              color: colors.onSurfaceVariant,
             ),
-            child: const Text('编辑', style: TextStyle(fontSize: FontSizes.cap)),
-          ),
-        // 「启用 / 停用」—— 文案随状态变（原版也是）
-        TextButton(
-          onPressed: onToggle,
-          style: TextButton.styleFrom(
-            padding: const EdgeInsets.symmetric(horizontal: Sp.x3),
-            minimumSize: const Size(0, 32),
-            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-          ),
-          child: Text(
-            provider.enabled ? '停用' : '启用',
-            style: const TextStyle(fontSize: FontSizes.cap),
-          ),
-        ),
-        // 「移除」只对第三方显示（内置源删了会复活）
-        if (_isThirdParty)
-          IconButton(
-            onPressed: onRemove,
-            icon: const Icon(Icons.delete_outline, size: 17),
-            tooltip: '移除',
-            visualDensity: VisualDensity.compact,
-            color: colors.onSurfaceVariant,
+            onSelected: (v) {
+              if (v == 'edit') onEdit();
+              if (v == 'remove') onRemove();
+            },
+            itemBuilder: (_) => [
+              if (_canEdit)
+                const PopupMenuItem(
+                  value: 'edit',
+                  child: Row(children: [
+                    Icon(Icons.edit_outlined, size: 16),
+                    SizedBox(width: Sp.x3),
+                    Text('编辑'),
+                  ]),
+                ),
+              if (_isThirdParty)
+                PopupMenuItem(
+                  value: 'remove',
+                  child: Row(children: [
+                    Icon(Icons.delete_outline, size: 16, color: colors.error),
+                    SizedBox(width: Sp.x3),
+                    Text('移除这个源', style: TextStyle(color: colors.error)),
+                  ]),
+                ),
+            ],
           ),
       ],
     );

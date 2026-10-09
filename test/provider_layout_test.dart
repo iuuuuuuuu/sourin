@@ -199,11 +199,23 @@ void main() {
         isTrue,
         reason: '要有"是否第三方"的判断',
       );
-      expect(
-        src.contains("if (_isThirdParty)\n          IconButton("),
-        isTrue,
-        reason: '★ 「移除」只在第三方源上显示',
-      );
+      /*
+       * ★ 2026-10-10：判据从**字面形状**改成**行为不变式**
+       *
+       * 改前断言找的是 `"if (_isThirdParty)\n          IconButton("`
+       * —— 它把「移除是第三方专属」和「移除画成 IconButton」两件事
+       * 焊死在一个字符串上。卡片操作收进 ⋮ 菜单后，移除从 IconButton
+       * 变成 `PopupMenuItem`，这条断言就红了 —— 但**行为没变**。
+       *
+       * ⇒ 改判「移除那一项确实仍被 `_isThirdParty` 把守」，
+       *    这才是这条测试从一开始要守的东西（内置源删了会复活）。
+       */
+      final i = src.indexOf("if (_isThirdParty)\n                PopupMenuItem(");
+      expect(i > 0, isTrue,
+          reason: '★ 「移除」只在第三方源上显示（现在收在 ⋮ 菜单里）');
+      final item = src.substring(i, i + 400);
+      expect(item.contains("value: 'remove'"), isTrue,
+          reason: '★ 菜单项就是「移除」那个动作');
     });
 
     test('★ 能力标签必须来自**同一份**数据源（避免空行）', () {
