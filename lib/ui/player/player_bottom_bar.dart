@@ -70,18 +70,19 @@ class _BarAction {
 }
 
 /// 「更多」浮层需要的数据（宿主算好传进来）
+///
+/// ★ 2026-10-10：这里原来还有 `castUrl` / `castHeaders` / `castTitle`
+///   三个字段，是底栏还没瘦身前「底栏上直接画一枚投屏按钮」的遗留。
+///   瘦身后投屏收进「更多」浮层，数据由宿主算好的 `MoreMenuEntry`
+///   （`player_page.dart` 的 `castEntry`，带真的 `CastButton`）带进来
+///   ⇒ 这三个字段**声明了但一次都没读过**，属于死接线。
+///   删掉，免得下一个人以为「改这里就能改投屏行为」。
 class PlayerMoreMenuData {
   const PlayerMoreMenuData({
     required this.groups,
-    this.castUrl = '',
-    this.castHeaders = const <String, String>{},
-    this.castTitle = '',
   });
 
   final List<MoreMenuGroup> groups;
-  final String castUrl;
-  final Map<String, String> castHeaders;
-  final String castTitle;
 }
 
 /// 底栏（桌面 / 手机 / TV 共用）

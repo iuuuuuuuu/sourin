@@ -11261,11 +11261,10 @@ class _PlayerPageState extends State<PlayerPage>
                      * 点了只弹一句提示的按钮”更诚实（详见 _BottomBar
                      * 的 castUrl 文档）。
                      */
-                        onCast: _openCast,
-                        castUrl: _current?.url ?? '',
-                        castHeaders:
-                            _current?.httpHeaders ?? const <String, String>{},
-                        castTitle: _castTitle,
+                        // ★ 2026-10-10：投屏已收进「更多」浮层（数据由
+                        //   `castEntry` 带着真的 CastButton 带进来），
+                        //   底栏不再接收 onCast/castUrl/castHeaders/castTitle
+                        //   —— 那四个参数留着是「声明了但一次都没读」的死接线。
                         /*
                      * ★ 2026-10-08（Owner 第 9 条）：底栏与顶栏**同一个**
                      *    `_controlsFade` 实例 ⇒ 两条一起淡出，
