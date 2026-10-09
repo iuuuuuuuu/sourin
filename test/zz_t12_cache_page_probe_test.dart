@@ -27,6 +27,8 @@ import 'package:sourin_spike/core/download_dir.dart';
 import 'package:sourin_spike/core/models.dart' show StreamCandidate;
 import 'package:sourin_spike/core/download_queue.dart';
 import 'package:sourin_spike/core/ui_prefs.dart';
+import 'package:sourin_spike/ui/app_scaffold.dart';
+import 'package:sourin_spike/ui/app_theme.dart';
 import 'package:sourin_spike/ui/cache_page.dart';
 import 'package:sourin_spike/ui/widgets/poster_card.dart';
 
