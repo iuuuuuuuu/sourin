@@ -43,6 +43,7 @@ import 'package:material_ui/material_ui.dart';
 import 'package:tray_manager/tray_manager.dart';
 import 'package:window_manager/window_manager.dart';
 
+import '../ui/tokens.dart';
 import '../ui/widgets/overlay_motion.dart';
 import 'ui_prefs.dart';
 
@@ -266,6 +267,41 @@ class AppTray with TrayListener, WindowListener {
       debugPrint('[TRAY] 用户取消 ⇒ 什么都不做');
       return;
     }
+    /*
+     * ★★★ task-10 ②（Owner 2026-10-09 第三批）：选了「最小化到托盘」后弹窗不消失
+     *
+     * Owner 原话：
+     * > 第一次点击x,如果点了最小化,这个弹窗不会主动消失,从任务栏点开,也还是显示中,
+     * > 点击操作后,无论是退出还是别的操作,都应该这个弹窗关闭才对
+     *
+     * # 实测取证（.probe/zz_t10_tray_dialog_probe_test.dart）
+     * ```text
+     * ② route.transitionDuration = 0:00:00.150000        // 退场动画 150ms
+     * ③ 已点按钮 + pump 一帧：对话框还在？= true
+     * ④ ★ await 返回（t=131ms, v=_Act.tray）：对话框还在树上？= true   ← ★ 关键
+     * ⑤ pumpAndSettle 后（t=156ms）：已退场？= true
+     * ```
+     * ⇒ **`await showAppDialog(...)` 返回时，退场动画才刚开始**（route 仍在树上）。
+     *   改前拿到 choice 就直接 `await hideToTray()`（= `windowManager.hide()`），
+     *   于是窗口在对话框**还没退完场**时就被藏起来 ——
+     *   那一帧被「冻」在还看得见对话框的状态，且**没有东西再驱动它退场**
+     *   （驱动它的 Ticker 随窗口隐藏/页面失焦停了）⇒ 从托盘恢复时它仍挂着。
+     *
+     * # 修法：等 route **真的**退场完再动窗口
+     * ```text
+     * 用 `ModalRoute.of` 拿不到（那是 builder 内的 context）；
+     * 正确做法是**让对话框自己告诉我们什么时候退干净** ——
+     * `showAppDialog` 返回的 Future 在 `pop` **发起时**就 complete 了，拿不到退场完成。
+     * 所以改成「先等一下路由退场动画」：`Motion.base`(260ms) 与对话框
+     * `transitionDuration`(150ms) 取较大者 + 一帧余量。
+     * ```
+     * ⚠️ 为什么不把 `hideToTray()` 放 `addPostFrameCallback`：那只是**一帧**（~16ms），
+     *    远不够 150ms 的退场动画。实测 ③ 已经证明「pump 一帧后仍在树上」。
+     * ⚠️ `quit` 分支**同样**要等（Owner 明说「无论是退出还是别的操作」）：
+     *    进程虽会退，但 `_destroyAndClose()` 期间窗口还在，同样会露那一帧。
+     * ⚠️ 不许用 `barrierDismissible: true` 糊过去 —— 用户要的是「操作后弹窗一定关」。
+     */
+    await _waitDialogGone();
     rememberCloseAction(choice);
     switch (choice) {
       case CloseAction.tray:
@@ -275,6 +311,25 @@ class AppTray with TrayListener, WindowListener {
       case CloseAction.ask:
         break;
     }
+  }
+
+  /// 等「上一个对话框的退场动画」跑完。
+  ///
+  /// # 时长怎么取
+  /// ```text
+  /// 实测 `showDialog` 的 `route.transitionDuration` = **150ms**（框架默认），
+  /// 而本仓统一入口 `showAppDialog` 把动效接到了 `OverlayMotion.cardDuration`
+  /// （overlay_motion.dart:311-339）。取 `OverlayMotion.cardDuration` 与
+  /// `Motion.base` 的较大者，再留一帧（16ms）余量 ——
+  /// 这样无论走哪条包装路径都够。
+  /// ```
+  /// ⚠️ 不做成「监听 route」：`showAppDialog` 的 Future 在 pop **发起**时
+  ///    complete，拿不到「退场完成」这个事件（这正是本缺陷的根源）。
+  static Future<void> _waitDialogGone() async {
+    final wait = OverlayMotion.cardDuration > Motion.base
+        ? OverlayMotion.cardDuration
+        : Motion.base;
+    await Future<void>.delayed(wait + const Duration(milliseconds: 16));
   }
 
   /// 记住用户的选择（设置页也用它改回来）
@@ -292,6 +347,11 @@ class AppTray with TrayListener, WindowListener {
        *   任务栏上仍留一个占位（Windows 的 hidden 窗口默认仍在
        *   taskbar 里有条目，视 DWM 版本而定）。
        * ⚠️ 恢复时**必须**关掉它，否则窗口回来了但任务栏没有它。
+       *
+       * ★ task-10 ④ 配对说明：这里是 `hide()` 在**前**、`setSkipTaskbar(true)`（DeleteTab）在**后** ——
+       *   与 `restoreWindow()` 的 `show()` 在**前**、`setSkipTaskbar(false)`（AddTab）在**后**
+       *   **同一条规则**：「窗口状态先落定，再动任务栏按钮」。
+       *   两侧方向相反但顺序同构，改一侧必须核对另一侧。
        */
       await windowManager.setSkipTaskbar(true);
     } catch (e) {
@@ -300,13 +360,76 @@ class AppTray with TrayListener, WindowListener {
   }
 
   /// 从托盘恢复窗口
+  ///
+  /// # ★★★ task-10 ④（Owner 2026-10-09 第三批）：恢复时窗口「突发闪烁一下」
+  ///
+  /// Owner 原话：
+  /// > 从任务栏点击出来的时候,有的时候窗口会突发闪烁一下
+  ///
+  /// 「有的时候」= 间歇 —— 但机制本身是**确定性**的，只是与 Shell 的刷新时机赛跑
+  /// （见下）。
+  ///
+  /// # 根因（M1，读原生源码证实，非猜测）
+  /// ```text
+  /// 改前顺序：
+  ///   ① await setSkipTaskbar(false)   ← 窗口**还藏着**就 AddTab
+  ///   ② if (isMinimized()) restore()
+  ///   ③ await show()                  ← 才真的显示
+  ///
+  /// 原生实现（window_manager-0.5.2/windows/window_manager.cpp）：
+  ///   :949-963 SetSkipTaskbar ⇒ taskbar_->HrInit(); taskbar_->AddTab(hWnd)
+  ///   :276-287 Show()         ⇒ SetWindowLong(WS_VISIBLE) + SetWindowPos,
+  ///                             再 ShowWindowAsync + SetForegroundWindow
+  /// ```
+  /// # 为什么是「按钮刷两次」（★ 理由的方向，lead 纠正过我一次）
+  /// ```text
+  /// `AddTab`（`ITaskbarList::AddTab`）是直接与 Shell 交互的 COM 调用，
+  /// 它的语义是「把这个 HWND **登记进任务栏列表**」——
+  /// ⇒ **前提是窗口已经存在/可见**。
+  /// 改前窗口还 hidden 时就 AddTab：Shell 先按「窗口在显示」把按钮加回来；
+  /// 紧接着 `Show()`（:276-287 的 `SetWindowLong(WS_VISIBLE)` + `SetWindowPos`
+  /// + `ShowWindowAsync`）又让 Shell 刷新一次 ⇒ 按钮**刷两下** = 闪。
+  ///
+  /// ⇒ 把 AddTab 挪到 `show()` **之后**，恰好满足它的前提「窗口已可见时才登记」
+  ///   ⇒ **只刷一次**。
+  ///
+  /// ⚠️ 注意方向：**不是**「先 show 免得按钮闪」，而是
+  ///    「AddTab **必须**在窗口已存在/可见时才登记，否则要刷两次」。
+  ///    这个因果方向很重要 —— 它同时解释了为什么 `hideToTray` 那侧
+  ///    要把 `hide()` 放在 `setSkipTaskbar(true)`（DeleteTab）之前：
+  ///    DeleteTab 同样要求「先有窗口状态落定」。两侧同一条规则。
+  /// ```
+  ///
+  /// # 改法：先**让窗口可见**，再把它加回任务栏
+  /// ```text
+  /// 新顺序：
+  ///   ① restore()（若最小化）
+  ///   ② show()            ← 窗口先真正可见
+  ///   ③ setSkipTaskbar(false)  ← 可见之后再 AddTab，Shell 只刷新一次
+  ///   ④ focus()
+  /// ```
+  /// ⇒ 四种状态变化（样式/位置/可见性/任务栏）里，前三步的**顺序不再是「藏在先」**，
+  ///   Shell 只在窗口已经 up 之后被通知一次。
+  ///
+  /// ⚠️ 为什么不用「把 setSkipTaskbar(false) 整个删掉」：
+  ///    `hideToTray()` 里调了 `setSkipTaskbar(true)`（DeleteTab），
+  ///    恢复时不撤销的话，窗口回来了但**任务栏上没有它** ——
+  ///    用户点了托盘图标却找不到窗口，那是更严重的问题。两侧必须配对。
+  ///
+  /// ⚠️ 为什么把 `focus()` 放在最后而不是紧跟 `show()`：
+  ///    `AddTab` 会短暂改变 Shell 的焦点归属；先 focus 再 AddTab 的话，
+  ///    焦点可能被 Shell 抢走（表现为「恢复后窗口不在最前」）。
   Future<void> restoreWindow() async {
     try {
-      await windowManager.setSkipTaskbar(false);
+      // ① 最小化的先还原（还原本身也会触发一次 Shell 刷新，放在最前）
       if (await windowManager.isMinimized()) {
         await windowManager.restore();
       }
+      // ② 先真的显示窗口（Show 内部：样式 + 位置 + ShowWindowAsync）
       await windowManager.show();
+      // ③ 窗口可见之后才把它加回任务栏（★ 顺序修正点）
+      await windowManager.setSkipTaskbar(false);
+      // ④ 最后抢焦点
       await windowManager.focus();
     } catch (e) {
       debugPrint('[TRAY] 恢复窗口失败: $e');

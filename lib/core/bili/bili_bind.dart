@@ -518,12 +518,55 @@ bool shouldRejectAutoBind(BiliBindOutcome o, {bool isMultiPart = false}) {
 }
 
 /// 把 [planBinding] 的结果落盘。
+///
+/// # ★★★ 2026-10-09 修复：**空绑定不许落盘**
+///
+/// # 症状（Owner 真机报的「bilibili 也选了但就是没显示弹幕」）
+/// ```text
+/// 他机器上的 ui-prefs.json 里躺着这样一条：
+///   dsh.bili.bind.local:c:/users/.../第01集 第01集.mp4
+///     = {"b":"BV1nJ396JEhH","t":"【4K超清】无职转生 S1+S2+S3三季全集","a":…,"u":…}
+/// 注意它**没有 `e` 字段**（逐集映射）——
+/// 因为 `toJson` 里写的是 `if (episodes.isNotEmpty) 'e': …`。
+///
+/// ⇒ `episodes` 为空 ⇒ `BiliBinding.isEmpty == true` ⇒ `cidFor()` 恒返回 0
+/// ⇒ 播放页走「绑了 B 站但这一集没 cid」那条分支
+/// ⇒ 屏幕上「B 站弹幕：这一集没匹配到分 P（cid），已改用 dandanplay」
+/// ⇒ 接着 dandanplay 没凭证 ⇒ 403 ⇒ 「弹幕失败：Missing Authentication Headers」。
+/// ```
+///
+/// # 根因：`bindFromInput` 会**无条件**落盘
+/// ```text
+/// 它拿到视频信息后算 `planBinding`；若 B 站那边一个分 P 都没有
+/// （`episodes.isEmpty`），`planBinding` 的 reason 是「B 站那边一个分 P
+/// 都没有，没法绑」—— **但它照样返回一个 binding**，于是照样落盘。
+///
+/// 结果是一条"存在但没用"的绑定：
+///   ① 它让 `loadBinding(...) != null` 成立 ⇒ 播放页**不再尝试自动搜索**
+///      （那正是我这次新加的那条路）⇒ 用户被永久卡在"没 cid"上；
+///   ② 它还在面板里显示成"已绑定"，用户以为成功了。
+/// ```
+///
+/// # 修法
+/// ```text
+/// 空绑定**不写盘**，并顺手把可能已存在的旧空绑定**清掉**
+/// （自愈：Owner 机器上那条就是旧版本留下的，不清的话修了也白修）。
+/// ```
+///
+/// ⚠️ 清盘用 `UiPrefs.remove` 而不是写一个空对象 —— 写空对象的话
+///    `loadBinding` 仍会返回一个 `isEmpty == true` 的绑定，
+///    与"没绑过"是两种状态，播放页判据会更绕。
 void persistOutcome(
   String provider,
   String id,
   BiliBindOutcome o, {
   bool manual = false,
 }) {
+  if (o.binding.isEmpty) {
+    // 见上面的长注释：空绑定落盘会让用户**永久**卡在"没 cid"
+    clearBinding(provider, id);
+    return;
+  }
   final b = manual ? o.binding.copyWith(manual: true) : o.binding;
   saveBinding(provider, id, b);
 }
@@ -597,6 +640,141 @@ int resolveCid({
   // 这样「第 5 集但只绑了 3 集」也不会空手。
   if (b.episodes.length == 1) return b.episodes.first.cid;
   return 0;
+}
+
+// ══════════════════════════════════════════════════════════════════════
+//  六、自动匹配（免登录搜 B 站 → 选最像的那条 → 绑定）
+// ══════════════════════════════════════════════════════════════════════
+
+/// 自动搜 B 站并绑定 —— **不需要用户提供任何链接**。
+///
+/// # 为什么需要它（Owner 2026-10-09 报的「弹幕流程有问题」）
+///
+/// ```text
+/// 改前：播放页只做两件事 ——
+///   ① 有绑定 ⇒ 用绑定；
+///   ② 没绑定 ⇒ 直接走 dandanplay（而它要 AppId/AppSecret）⇒ 没配就 403
+///      ⇒ 屏幕上那句「弹幕失败：Missing Authentication Headers」。
+/// ```
+/// 于是「bilibili 明明支持搜索、也选了，但就是没显示弹幕」——
+/// 因为**搜索是用户手动点的**，而播放时那条自动路径压根没走搜索。
+///
+/// # 为什么免登录也成立
+/// ```text
+/// B 站搜索（/x/web-interface/search/type）与弹幕 XML
+/// （comment.bilibili.com/<cid>.xml）**都不需要登录** ——
+/// 实测（2026-10-09，无任何 Cookie）：
+///   GET comment.bilibili.com/279786.xml → 200 text/xml，1200 条弹幕
+/// ⇒ 所以「未登录」从来不是障碍，缺的只是**自动去搜**这一步。
+/// ```
+///
+/// # 判据（两道，都要过）
+/// ```text
+/// ① 标题相似度 >= [minScore]（bigram Jaccard，见 title_match.dart）
+/// ② 必须真的拿到视频信息（能取到 pages ⇒ 才有 cid）
+/// ```
+/// 只有一条候选也照样过判据 —— 宁可如实说"没匹配到"，也不要绑错的。
+///
+/// 返回 null = 没匹配到（调用方据此决定要不要提示用户手动搜）。
+/// 不抛异常：网络失败/无结果都归成 null，由调用方给文案。
+Future<BiliBindOutcome?> autoBindBySearch({
+  required BiliApi api,
+  required String provider,
+  required String id,
+  required String localTitle,
+  required List<String> episodeTitles,
+  double minScore = 0.34,
+}) async {
+  final kw = localTitle.trim();
+  if (kw.isEmpty) return null;
+
+  /*
+   * ★ 已经手动绑过就不动它 —— 用户的选择永远优先于自动匹配。
+   *   （`planBinding` 里也有同一条判据，但在这里短路能省掉一次网络请求。）
+   */
+  final existing = loadBinding(provider, id);
+  if (existing != null && existing.manual && !existing.isEmpty) {
+    return BiliBindOutcome(
+      binding: existing,
+      score: 1.0,
+      reason: '这是你手动绑的，自动匹配不动它',
+    );
+  }
+
+  List<BiliSearchItem> hits;
+  try {
+    hits = await api.searchVideos(kw);
+  } catch (_) {
+    return null;
+  }
+  if (hits.isEmpty) return null;
+
+  /*
+   * ★ 按相似度挑最像的一条。
+   *
+   * ⚠️ 用相似度而不是"取第一条"：B 站搜索第一条经常是
+   *    预告/PV/解说，直接取会把弹幕绑到错的视频上（时间轴全错）。
+   *
+   * ★★★ 2026-10-09 关键修正：用 `titleCoverage` 而**不是** `titleSimilarity`。
+   *
+   * # 为什么不能用 titleSimilarity（我第一版就错在这）
+   * ```text
+   * 它是 bigram **Jaccard**（交集 / 并集）—— 而并集里含**候选标题**
+   * 的全部 bigram。B 站的标题很长（带栏目名/画质/集数/字幕组），
+   * 于是并集被撑大、分数被压低：
+   *
+   *   查询「无职转生 第三季」
+   *     正片『无职转生 第三季 到了异世界就拿出真本事』全14话 → Jaccard 0.286
+   *     OP  【编曲向】旅人の唄 - 无职转生 OP             → Jaccard 0.200
+   *
+   * ⇒ 正片只拿 0.286，低于 `kBiliAutoBindThreshold`(0.34)
+   *   ⇒ **明明搜到了正片却判成"没匹配到"**（实测：绑定返回 null）。
+   *   阈值本身没错 —— 它是为"短标题互相比较"调的（见它的文档）；
+   *   错的是**拿对称度量去比长短悬殊的两个标题**。
+   * ```
+   *
+   * # titleCoverage 为什么对
+   * ```text
+   * coverage = |query∩candidate| / |query| ——**只除查询的词数**，
+   * 不含候选长度 ⇒ "候选是否覆盖了我要找的全部词"，正是搜索的语义。
+   * 同一组实测：
+   *
+   *   正片     coverage 1.000   ✓
+   *   全季合集 coverage 0.667   （也含"无职转生"，但缺"第三季"）
+   *   OP       coverage 0.500   （含"无职转生"，但那是 OP 不是正片）
+   *   无关番   coverage 0.000   ✓ 干净地排除
+   * ```
+   * ⇒ 正片(1.0) 与 OP(0.5) 拉开了，且无关的归零。
+   *
+   * ⚠️ 阈值仍用 `minScore`（0.34）：coverage 的 0.34 含义是
+   *    "查询里三分之一以上的词在候选里出现过" —— 对乱码/错名仍然拦得住，
+   *    而"无职转生"这种完整命中拿满分。
+   */
+  BiliSearchItem? best;
+  var bestScore = 0.0;
+  for (final h in hits) {
+    final s = titleCoverage(kw, h.title);
+    if (s > bestScore) {
+      bestScore = s;
+      best = h;
+    }
+  }
+  if (best == null || bestScore < minScore) return null;
+
+  try {
+    return await bindFromInput(
+      api: api,
+      input: best.bvid,
+      provider: provider,
+      id: id,
+      localTitle: localTitle,
+      episodeTitles: episodeTitles,
+      // 自动匹配 ⇒ 不是用户手填的，允许被后续自动流程更新
+      manual: false,
+    );
+  } catch (_) {
+    return null;
+  }
 }
 
 /// 同上，但返回整个 [BiliEpisodeBinding]（UI 要显示「绑到 P 几」）。

@@ -97,6 +97,8 @@ import 'ui/titlebar_visibility.dart';
 //   已把它们去掉（留着就是 unused import）。唯一真源是
 //   `AppMetrics.effectiveTextScale`（`ui/tokens.dart`），它同时管住
 //   「挂上去的 TextScaler」与「卡片文字区高度」。
+// ★ task-3 ⑲「已缓存」底部页（列表 = 真扫下载目录）
+import 'ui/cache_page.dart';
 import 'ui/detail_page.dart';
 import 'ui/follow_page.dart';
 import 'ui/home_page.dart';
@@ -143,6 +145,23 @@ enum AppTab {
   live('直播', '/live'),
   follow('追更', '/follow'),
   search('搜索', '/search'),
+  /*
+   * ★ task-3 ⑲ 新增「已缓存」页（Owner 原话）：
+   * > 对于已下载的,底部是不是应该加个已缓存的页面?
+   * > 然后有封面,并且显示出来缓存了多少
+   *
+   * ⚠️ 顺序即**底栏顺序**：这里必须排在 settings **之前** ——
+   *    用户看到的第 5 项就是「已缓存」，设置被挤到第 6 项。
+   *    枚举顺序另有语义：`_transitionDir` 靠 index 差算切换方向，
+   *    插在中间（而不是末尾）会让「搜索 → 已缓存」的动画方向
+   *    与「搜索 → 设置」不同 —— 这正是我们要的（它物理上排在前）。
+   * ⚠️ 往这里加成员会**同时**影响 5 处，改完必须全部核对：
+   *    `_icons` / `_iconsActive`（漏加 = **运行时 null 崩**，见 :167 的 `[this]!`）、
+   *    `_pageFor` 的 switch（无 default ⇒ 漏 case 是编译期非穷尽错误）、
+   *    `_pageCache`（按 values.length 自动扩容，无需改）、
+   *    底部栏宽度 `_tabWidthFor`（用 values.length 均分 ⇒ 每格变窄）。
+   */
+  cached('已缓存', '/cached'),
   settings('设置', '/settings');
 
   const AppTab(this.label, this.path);
@@ -154,6 +173,9 @@ enum AppTab {
     AppTab.live: Icons.live_tv_outlined,
     AppTab.follow: Icons.star_border_rounded,
     AppTab.search: Icons.search_rounded,
+    // ★「已缓存」用 download_done 语义（**不是** folder）——
+    //   Owner 要的是"已经存下来的东西"，folder 会让人以为是下载目录入口。
+    AppTab.cached: Icons.download_done_outlined,
     AppTab.settings: Icons.settings_outlined,
   };
   static const _iconsActive = {
@@ -161,6 +183,7 @@ enum AppTab {
     AppTab.live: Icons.live_tv,
     AppTab.follow: Icons.star_rounded,
     AppTab.search: Icons.search_rounded,
+    AppTab.cached: Icons.download_done_rounded,
     AppTab.settings: Icons.settings,
   };
 
@@ -2301,6 +2324,13 @@ class _ShellPageState extends State<ShellPage>
   final _searchKey = GlobalKey<SearchPageState>();
   final _settingsKey = GlobalKey<SettingsPageState>();
 
+  /// ★ task-3 ⑲「已缓存」页的 key —— 与上面四个同契约（一页一个，只出现一次）
+  ///
+  /// ⚠️ 必须用 `CachePageState` 这个**具体**类型：`_switchTo` 要调
+  ///    `loadAll()`，而 GlobalKey 的 `currentState` 是 `State<T>` ——
+  ///    泛型给错就取不到那个方法（编译期报错，好在不会静默失败）。
+  final _cachedKey = GlobalKey<CachePageState>();
+
   /// ★★ task-65：**待激活**的追更页 tab（`null` = 无请求）
   ///
   /// # 为什么需要这个字段（而不是直接调 `_followKey.currentState.showTab`）
@@ -2418,6 +2448,17 @@ class _ShellPageState extends State<ShellPage>
   /// **测试要控制前提**，不该依赖"按多少次键能走到"这种脆弱假设。
   void debugSwitchTo(AppTab t) => _switchTo(t);
 
+  /// 缺陷 3 探针读数口：当前离场页的淡出不透明度 + 离场窗口是否还在
+  ///
+  /// 返回 `(leavingTabName, leavingFadeValue, leaveControllerValue)`；
+  /// 没有离场页时第一项为 null。用于 `.probe/zz_t3_overlap_probe_test.dart`
+  /// 逐帧核对 `enter(t) + leavingFade(t) == 1.000`。
+  (String?, double, double) debugLeavingFadeForProbe() => (
+        _leavingTab?.name,
+        _leavingFade.value,
+        _leaveC.value,
+      );
+
   /// 上一个 tab 的序号 —— 用来算切换方向
   int _prevIndex = 0;
 
@@ -2476,6 +2517,12 @@ class _ShellPageState extends State<ShellPage>
 
   /// 离场页的不透明度：1.0（刚就位）→ 0.0（彻底消失）
   ///
+  /// [2026-10-09 / Owner 第 3 条] 曲线 = `Motion.easeOut`，**与进入页
+  /// `_KeepAliveTransition._c` 同源** => 两条动画同一 ticker 时间轴、
+  /// 同一 duration => `enter(t) + leave(t) === 1.000`（逐帧互斥）。
+  /// 改前用 `Motion.easeInOut`，与进入页互为反相 —— 真机峰值 sum 1.719。
+  /// 全部推导与读数见下面 `_leaveC` 处那段长注释。
+  ///
   /// 只在 `t == _leavingTab` 的那一页上生效（见 build 里的传参）。
   late final Animation<double> _leavingFade = Tween<double>(
     begin: 1.0,
@@ -2483,8 +2530,62 @@ class _ShellPageState extends State<ShellPage>
   ).animate(
     CurvedAnimation(
       parent: _leaveC,
-      curve: MotionPrefs.curve(context, Motion.easeInOut),
-      reverseCurve: MotionPrefs.curve(context, Motion.easeInOut),
+      /*
+       * [2026-10-09 / Owner 第 3 条「切页文字重叠」] 曲线从 easeInOut 换成
+       *   **与进入页同源**的 easeOut。
+       *
+       * # 改前的真机读数（.probe/zz_t3_overlap_probe_test.dart v4）
+       * ```text
+       * t=  0ms  enter out=0.000  |  leave out=1.000  |  sum(out)=1.000
+       * t= 16ms  enter out=0.261  |  leave out=0.997  |  sum(out)=1.257
+       * t= 40ms  enter out=0.565  |  leave out=0.977  |  sum(out)=1.542
+       * t= 80ms  enter out=0.840  |  leave out=0.879  |  sum(out)=1.719  <-- 峰值
+       * t=130ms  enter out=0.961  |  leave out=0.500  |  sum(out)=1.461
+       * t=260ms  enter out=1.000  |  leave out=1.000  |  sum(out)=2.000  <-- 见下
+       * ```
+       * 80ms 时两页**同时**处于 0.84 / 0.88 的「都很亮」区间
+       *   => 屏幕上是两份文字叠在一起 = Owner 说的「文字重叠」
+       *
+       * # 根因：不是「层数」，是**两条曲线互为反相**
+       * ```text
+       * 进入页  _c      走 Motion.easeOut   = Cubic(0.22, 1, 0.36, 1)
+       * 离场页  _leaveC 走 Motion.easeInOut = Cubic(0.65, 0, 0.35, 1)
+       *   -> easeOut  : 起步快、收尾长 —— 16ms 就 0.261、80ms 已 0.841
+       *   -> easeInOut: 起步平、收尾也平 —— 80ms 才掉到 0.880
+       * => 恰好是「一个猛涨、一个不动」=> 峰值 sum 1.72 出现在 81ms
+       * ```
+       * 原注释（下方 2026-10-08 记录）以为「离场用 easeInOut 前段几乎不动
+       * 才能继续挡住 floorColor」—— 挡住 floorColor 是**对的**（确实要挡），
+       * 但它没算「新页此时已经很亮」=> 挡住的代价就是叠影。
+       *
+       * # 为什么换成 easeOut 就是**精确互斥**
+       * ```text
+       * 离场页绘制不透明度 = _leavingFade = 1.0 -> 0.0，由 _leaveC 驱动
+       * 两个 controller 都在**同一个 setState 帧**里 forward(from: 0)
+       *   => 同一 ticker 时间轴、同一 duration(Motion.base) => elapsed 相同
+       * => leave(t) = 1 - easeOut(t) = 1 - enter(t)
+       * => enter(t) + leave(t) === 1.000 **对每一个 t 都成立**
+       * ```
+       * 数值验算（同一求值器）：峰值 = 1.000 @ 0ms，sum>1.5 持续 **0ms**。
+       * 逐帧：0.000/1.000、0.261/0.739、0.565/0.435、0.840/0.160、0.961/0.039。
+       * => 任意时刻两页不透明度之**和恒为 1** => 数学上不可能「两页都亮」。
+       *
+       * # 为什么这一改**同时收掉**缺陷 18（切页残影）
+       * ```text
+       * 改前 t>=260ms: _leavingTab 已被 _leavingTimer 清成 null => 外层
+       *   FadeTransition 被整个移除（下方 lf == null 分支）=> 离场页回到
+       *   **不透明度 1**（读数 sum=2.000）=> 若此刻它还没被 offstage
+       *   （换位/重建的时序差），就是一块**满亮的残影**
+       * 改后 t>=260ms: _leaveC 走到 1 => _leavingFade = 0 => 即使外层
+       *   那层被移除，离场页在退出窗口那一刻**本身就是 0**
+       *   => 残影从「靠时序侥幸」变成「数学上为 0」
+       * ```
+       *
+       * 曲线**只在**离场侧改；进入页仍是 Motion.easeOut（一行未动）。
+       * `Motion.easeInOut` 在 tokens.dart:170 仍被别处使用，**不删**。
+       */
+      curve: MotionPrefs.curve(context, Motion.easeOut),
+      reverseCurve: MotionPrefs.curve(context, Motion.easeOut),
     ),
   );
 
@@ -3444,6 +3545,19 @@ class _ShellPageState extends State<ShellPage>
      * > 遥控可能被别的入口改过（比如底栏长按），
      * > 回来不刷新会显示过期状态。
      */
+    /*
+     * ★ task-3 ⑲「已缓存」页：切回来重新扫盘
+     *
+     * 与上面几支同一个理由，而且这一支**更需要**刷新：盘上的文件
+     * 会被别处改 —— 用户在播放页删了缓存、在详情页新下了一集、
+     * 或直接在资源管理器里拖走一个文件。不重扫就会显示过期数字。
+     *
+     * ⚠️ 只能调 `load()`（重扫）**不能**调 `_pageFor(AppTab.cached)` ——
+     *    后者会 new 出一个新 CachePage ⇒ 保活失效（本文件的核心不变量）。
+     */
+    if (t == AppTab.cached) {
+      _cachedKey.currentState?.load();
+    }
     if (t == AppTab.settings) {
       _settingsKey.currentState?.loadAll();
     }
@@ -4553,6 +4667,23 @@ class _ShellPageState extends State<ShellPage>
           isTv: Device.isTv,
           onOpenDetail: _openDetail,
         );
+      /*
+       * ★ task-3 ⑲「已缓存」页（Owner 要的「底部已缓存页 + 封面 + 缓存了多少」）
+       *
+       * 数据源 = **真扫盘**（`scanCacheWorks(DownloadDir.root())`）：
+       * lib/core/sourin_api.dart 里**根本没有**下载记录这类接口，
+       * 盘上的文件才是唯一真相 —— 也因此这里的数字与用户
+       * 在资源管理器里看到的是同一个。
+       *
+       * `onOpen` 复用「我的」版块那条现成入口（push 合并页 MediaPage：
+       * 上播放器 + 下详情，见 `onShelfPlay`），不新造一条播放路径。
+       */
+      case AppTab.cached:
+        return CachePage(
+          key: _cachedKey,
+          isTv: Device.isTv,
+          onOpen: _openCachedWork,
+        );
       case AppTab.settings:
         /*
          * ★ 设置页（2026-09-23）
@@ -4579,6 +4710,75 @@ class _ShellPageState extends State<ShellPage>
   // ═══════════════════════════════════════════════════════════════════
   //  导航回调（发现页 → 其它页）
   // ═══════════════════════════════════════════════════════════════════
+
+  /// ★ task-3 ⑲ / ★★ task-12 ④：点「已缓存」页的一张卡片 ⇒ 进播放
+  ///
+  /// # 为什么必须与 `onShelfPlay` 走**同一个** MediaPage（而不是直接开播放器）
+  ///
+  /// 与下面 `_openDetail` 那段讲的是同一件事：多集内容要选集、多源要换源，
+  /// 那些能力长在 MediaPage 内部。直接开 PlayerPage 会退回老毛病 ——
+  /// 永远只能看第一集。
+  ///
+  /// # ★★ task-12 ④：会话由 **CachePage 组织好**，这里只转发
+  ///
+  /// `buildLocalPlayRequest(work)` 在 **cache_page.dart** 里把会话（含
+  /// provider=local、规范化后的绝对路径）组织成 `CachedPlayRequest`；
+  /// 本方法只往 `MediaPage` 喂值，**不猜任何字段**。
+  ///
+  /// # ★★★ 两条路怎么分（lead 裁决）
+  /// ```text
+  /// 旁文件在（provider/id 齐） ⇒ **仍然走在线路径**（与 task-3 行为逐字相同）
+  ///   为什么：旁文件意味着这一集是**从某个站点下载的**，在线路径能拿到
+  ///   选集 / 换源 / 弹幕那些能力（Owner：「弹幕 历史等等功能也还是要有的」）。
+  ///   ⇒ 本地播放是**兜底**，不是替代。
+  ///
+  /// 旁文件不在（老下载 / 用户手拷进来的）⇒ **走本地播放**（localPath）
+  /// ```
+  ///
+  /// # 本地播放为什么能成立（链路，全部实测核过）
+  /// ```text
+  /// ① mpv 原生支持 `file://`；`player_page.dart:3263` 把 url 原样交给 mpv；
+  ///    `models.dart:822` 的 isPlayable 只判 `!drmProtected && url.isNotEmpty`
+  ///    ⇒ file:// 能过闸。
+  /// ② `player_page.dart:2921 _load()` 是唯一生产起播入口，且**无条件**走
+  ///    `SourinApi.resolveStream` → Rust `registry.route`（playback.rs:161-164）
+  ///    ⇒ 本地路径没有 provider 可路由 ⇒ 必须**在它之前**短路。
+  /// ③ 落点（lead 裁决「路 A」）：PlayerPage / MediaPage 各加一个**可选**
+  ///    `localPath`，在 `initState` 里短路、**根本不调 _load()** ——
+  ///    这样 `_load()` 的字节一行不动（不碰 ui-dev 正在改的那个函数）。
+  ///    那两处由 **ui-dev** 落（它 owner 那两个文件）；本文件只负责喂值。
+  /// ```
+  void _openCachedWork(CachedPlayRequest req) {
+    final w = req.work;
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => MediaPage(
+          // ★ 有旁文件 ⇒ 用站点 provider/id（在线能力全都在），
+          //   没有 ⇒ 用 req 里组织好的 local 会话（provider='local'）。
+          provider: w.provider ?? req.provider,
+          id: w.mediaId ?? req.mediaId,
+          title: w.displayTitle,
+          cover: w.cover,
+          episodeId: req.episode.fileName,
+          /*
+           * ★★ localPath 的取值规则（与上面那个三元一一对应，不能只改一半）：
+           * ```text
+           * 有旁文件 ⇒ **null** —— 让播放器走原来的网络解析（行为逐字不变）；
+           * 没旁文件 ⇒ 文件的**绝对路径** —— initState 短路成 file:// 起播。
+           * ```
+           * ⚠️ 必须显式写 `null` 而不是省掉：省掉的话，将来若有人把这两个三元
+           *    改歪（比如 provider 有旁文件、localPath 却给了路径），
+           *    症状是「有旁文件的在线剧被当成本地文件播」——很难查。
+           */
+          localPath: w.provider != null && w.mediaId != null
+              ? null
+              : req.episodeAbsolutePath,
+          isTv: Device.isTv,
+          isTouchOnly: Device.isTouchOnly,
+        ),
+      ),
+    );
+  }
 
   /// 打开**合并页**（task-58：上播放器 + 下详情）
   ///
@@ -4743,8 +4943,37 @@ class _ShellPageState extends State<ShellPage>
   /// 打开直播频道
   ///
   /// 直播没有剧集/多源可选，跳详情页反而是多余的一步，故直接进播放器。
-  void _openLiveChannel(String channelId, String name) {
-    debugPrint('[NAV] 打开直播: $channelId ($name)');
+  ///
+  /// ══════════════════════════════════════════════════════════════════
+  /// ★★★ task-6：新增第一个参数 [provider]（这个频道**属于哪个源**）
+  /// ══════════════════════════════════════════════════════════════════
+  ///
+  /// # 错在哪
+  ///
+  /// 旧签名只有 `(channelId, name)`，而下面 push 的 `PlayerPage` 里
+  /// `provider` 被**写死成 'cctv'`**：
+  /// ```text
+  /// 旧 :4913  void _openLiveChannel(String channelId, String name)
+  /// 旧 :4923    provider: 'cctv',        ← ★ 无论频道来自哪个源都写 cctv
+  /// ```
+  /// 而调用方（首页直播条的 `onOpenLive`）**本来就知道源** ——
+  /// 它每个频道都是按 `(provider, channelId)` 探出来的。
+  /// 信息在回调边界上被丢掉 ⇒ 一旦用户在首页切到别的源再看直播，
+  /// 播放器仍然去 cctv 取流 ⇒ 取不到 ⇒ **黑屏**。
+  /// （正是 Owner 第 8 条要消灭的症状；task-4 实测：cctv 的 20 个频道
+  ///   视频线 100% `drmProtected: true`，写死 cctv 等于写死黑屏。）
+  ///
+  /// # 为什么这么改
+  ///
+  /// 让**知道源的那一层**把源如实传上来，参数顺序与
+  /// `HomePage.onOpenLive` / `LivePage.onWatchLive`（`(provider, channelId, name)`）
+  /// 保持一致 —— 同一个语义在三个回调上用同一种形状，少一次"顺序记错"的机会。
+  ///
+  /// ⚠️ 刻意**不给默认值**：写死 'cctv' 正是本次要修的 bug，
+  ///    留个默认值等于把它换个地方留着（下一个人漏传时静默回到黑屏）。
+  ///    没有默认值 ⇒ 漏传是**编译错误**。
+  void _openLiveChannel(String provider, String channelId, String name) {
+    debugPrint('[NAV] 打开直播: $provider/$channelId ($name)');
     // 同 `_openPlayer`：置位，让全局 handler 把方向键让给播放器
     _playerOpen = true;
     // 同 `_openPlayer`：代号守卫（否则被遥控替换掉时，
@@ -4753,7 +4982,8 @@ class _ShellPageState extends State<ShellPage>
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => PlayerPage(
-          provider: 'cctv',
+          // ★ task-6：源来自调用方（旧代码在这里写死 'cctv'）
+          provider: provider,
           id: channelId,
           title: name,
           liveChannelId: channelId,

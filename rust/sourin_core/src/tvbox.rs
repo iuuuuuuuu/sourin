@@ -456,7 +456,99 @@ pub fn parse_episodes(s: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// 去 HTML 标签（对应 stripTags：/<[^>]+>/g）
+/// HTML 实体解码（对应插件模板的 decodeEntities）
+///
+/// # ★★ 顺序是**实测**定的，不是推理定的：`&amp;` 必须**最后**解
+///
+/// 直觉是"先解 `&amp;` 免得 `&amp;nbsp;` 被解成 `&nbsp;`" ——
+/// **反过来才对**。实测（`.probe/t9_order_test.mjs`，真跑 JS）：
+/// ```text
+/// 输入 "&amp;nbsp;"
+///   · &amp; 最先解 ⇒ 得到 "&nbsp;" ⇒ 后续规则再把它换成空格 ⇒ **" "**   ← 错
+///   · &amp; 最后解 ⇒ 得到 "&nbsp;" ⇒ 已经没有后续规则 ⇒ **"&nbsp;"** ← 对
+/// ```
+/// 即：`&amp;nbsp;` 是"用户**想显示** `&nbsp;` 这 6 个字符"，
+/// 所以解码后必须**停**在字面量 `&nbsp;` 上，不能再被当实体解一次。
+/// 只有把 `&amp;` 放在最后，其它规则跑完时它还没变成 `&`，
+/// 因此**不可能**再触发第二轮替换 —— 这正是"只解一遍"的语义。
+///
+/// ⚠️ 只解**标准 HTML 实体**，不许顺手改别的字符
+///    （例如把 U+00A0 全角空格也当 nbsp 处理 —— 那是**另一件事**，
+///     真要处理得由调用方自己决定，见 `strip_tags` 的说明）。
+pub fn decode_entities(s: &str) -> String {
+    if !s.contains('&') {
+        return s.to_string();
+    }
+    let mut out = s.to_string();
+    // ① 具名实体（`&amp;` 除外 —— 见上，它留到最后）
+    for (from, to) in [
+        ("&nbsp;", " "),
+        ("&lt;", "<"),
+        ("&gt;", ">"),
+        ("&quot;", "\""),
+        ("&apos;", "'"),
+    ] {
+        if out.contains(from) {
+            out = out.replace(from, to);
+        }
+    }
+    // ② 数字实体 `&#NNNN;` 与十六进制 `&#xNNNN;`（十进制先做：`&#` 前缀更短）
+    out = replace_numeric_entities(&out);
+    // ③ `&amp;` **最后**（见上）
+    if out.contains("&amp;") {
+        out = out.replace("&amp;", "&");
+    }
+    out
+}
+
+/// 解 `&#NNNN;` / `&#xNNNN;` 数字实体（手写扫描，不引正则）
+///
+/// 无法解析的（超范围 / 空 / 非法码点）**原样保留** ——
+/// 与 assrt/bili 的 Dart 实现同语义（那里是 `v == null ? 原样 : 转换`）。
+fn replace_numeric_entities(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let bytes: Vec<char> = s.chars().collect();
+    let mut i = 0;
+    while i < bytes.len() {
+        // 需要 "&#" 开头，且后面至少有 1 个数字字符 + ";"
+        if bytes[i] == '&' && i + 1 < bytes.len() && bytes[i + 1] == '#' {
+            let hex = i + 2 < bytes.len() && (bytes[i + 2] == 'x' || bytes[i + 2] == 'X');
+            let start = if hex { i + 3 } else { i + 2 };
+            let mut j = start;
+            while j < bytes.len() && bytes[j].is_ascii_hexdigit() && (hex || bytes[j].is_ascii_digit())
+            {
+                j += 1;
+            }
+            if j > start && j < bytes.len() && bytes[j] == ';' {
+                let digits: String = bytes[start..j].iter().collect();
+                let v = u32::from_str_radix(&digits, if hex { 16 } else { 10 })
+                    .ok()
+                    .and_then(char::from_u32);
+                if let Some(c) = v {
+                    out.push(c);
+                    i = j + 1;
+                    continue;
+                }
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    out
+}
+
+/// 去 HTML 标签（对应 stripTags：/<[^>]+>/g）+ **解 HTML 实体**
+///
+/// # ★ 为什么要解实体（Owner 实测报的 bug）
+///
+/// Owner 原话：「右边介绍居然还有 &nbsp; 这种代码」。
+/// 根因：本函数原来**只去标签**，一个实体都不解 ——
+/// 苹果CMS 的 `vod_content` 里写着 `&nbsp;`，于是详情页简介直接把它
+/// 当普通文本显示出来了。
+///
+/// 上游 TVBox 原版同样不解，转换器模板（`tools/tvbox-convert.mjs` 的
+/// `stripTags`）也照抄了 ⇒ 这是**共性**缺陷，三处一起修
+/// （本函数、转换器 JS 模板、Dart 详情页兜底）。
 pub fn strip_tags(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut tag = String::new();
@@ -487,7 +579,9 @@ pub fn strip_tags(s: &str) -> String {
         out.push('<');
         out.push_str(&tag);
     }
-    out.trim().to_string()
+    // ★ 去完标签**再**解实体（顺序不能反：先解实体会把 `&lt;p&gt;` 解成
+    //   真标签 `<p>`，那它就躲过了上面这轮去标签，最后**显示成标签**）
+    decode_entities(&out).trim().to_string()
 }
 
 /// 由站名/域名生成源 id（对应 toId）
@@ -1276,8 +1370,35 @@ impl MediaProvider for TvboxAppleCmsProvider {
         })
     }
 
-    async fn resolve(&self, id: &MediaId, _req: &PlayRequest) -> Result<Vec<StreamCandidate>> {
-        let mut url = id.native.clone();
+    async fn resolve(&self, id: &MediaId, req: &PlayRequest) -> Result<Vec<StreamCandidate>> {
+        /*
+         * ★★★ 剧集地址优先于条目 id —— 与 plugins/mod.rs 那处是**同一个 bug**
+         *
+         * # Owner 报的症状
+         * > 播放第二集,实际还是第一集,这是bug
+         *
+         * # 为什么本模块也要改
+         *
+         * 本模块是"应用内直接导入 TVBox 配置"走的那条路（Rust 原生 Provider，
+         * 不生成 JS 插件，见文件头说明）。它与转换插件**同构**：
+         *   · detail() 里剧集的 id **就是剧集地址**（上面 :${Episode.id = u}）
+         *   · resolve() 原来只认 id.native（条目 id），**忽略 req**
+         * ⇒ 无论点第几集，都会掉进下面 ① 分支、取 episodes.first() = 第一集。
+         *
+         * # 判据与 plugins/mod.rs 保持一致（必须一致，否则两条路行为不同）
+         *
+         * req.episode_id 是 http(s) URL ⇒ 它就是剧集地址，直接用；
+         * 否则（None / 空 / 纯数字条目 id）⇒ 维持原行为，走 ① 取第一集。
+         *
+         * ⚠️ 不能无条件信任 episode_id：别的 provider 用这个字段表达别的东西
+         *    （如 cycani 拿它当 section_id），所以必须用 starts_http 精确判断。
+         *    本条只影响"episode_id 明确是 URL"的情形 —— 那种情形下**只有**
+         *    tvbox 系（转换插件 / 本模块）会产生，语义无歧义。
+         */
+        let mut url = match req.episode_id.as_deref() {
+            Some(ep) if starts_http(ep) => ep.to_string(),
+            _ => id.native.clone(),
+        };
 
         // ① 不是 URL → 当成条目 id，去取详情拿第一集
         if !starts_http(&url) {
@@ -2622,11 +2743,67 @@ mod tests {
         assert_eq!(only[0].0, "");
     }
 
+    // ═══════════════════════════════════════════════════════════════
+    //  task-9 ②：HTML 实体解码（Owner：「右边介绍居然还有 &nbsp; 这种代码」）
+    // ═══════════════════════════════════════════════════════════════
+
+    #[test]
+    fn decode_entities_named() {
+        assert_eq!(decode_entities("a&nbsp;b"), "a b");
+        assert_eq!(decode_entities("&lt;p&gt;"), "<p>");
+        assert_eq!(decode_entities("&quot;x&quot;"), "\"x\"");
+        assert_eq!(decode_entities("&apos;y&apos;"), "'y'");
+        assert_eq!(decode_entities("a&amp;b"), "a&b");
+        // 没有 & 就原样返回（不白跑一遍）
+        assert_eq!(decode_entities("纯文本"), "纯文本");
+    }
+
+    #[test]
+    fn decode_entities_numeric() {
+        assert_eq!(decode_entities("&#39;"), "'");
+        assert_eq!(decode_entities("&#x2913;"), "\u{2913}");
+        assert_eq!(decode_entities("&#65;&#66;"), "AB");
+        assert_eq!(decode_entities("&#x41;"), "A");
+        // 解不出来的一律**原样保留**（不吞、不变成空）
+        assert_eq!(decode_entities("&#xZZ;"), "&#xZZ;");
+        assert_eq!(decode_entities("&#;"), "&#;");
+        assert_eq!(decode_entities("&#999999999;"), "&#999999999;");
+    }
+
+    /// ★★ 顺序：`&amp;` 必须**最后**解
+    ///
+    /// 实测（`.probe/t9_order_test.mjs`）：
+    /// ```text
+    /// 输入 "&amp;nbsp;"
+    ///   · &amp; 最先解 ⇒ 得 "&nbsp;" ⇒ 再被 nbsp 规则换成空格 ⇒ " "      ← 错
+    ///   · &amp; 最后解 ⇒ 得 "&nbsp;" ⇒ 没有后续规则 ⇒ 字面量 "&nbsp;"    ← 对
+    /// ```
+    /// 语义上 `&amp;nbsp;` 表示"用户想显示 `&nbsp;` 这 6 个字符"。
+    #[test]
+    fn decode_entities_amp_is_last() {
+        // 若把 &amp; 放最前，这里会得到 " "（错）
+        assert_eq!(decode_entities("&amp;nbsp;"), "&nbsp;");
+        assert_eq!(decode_entities("&amp;lt;"), "&lt;");
+        // 真嵌套（只有一层实体，&amp; 解完就停）也不重复解
+        assert_eq!(decode_entities("&amp;amp;"), "&amp;");
+    }
+
     #[test]
     fn strip_tags_removes_markup() {
         assert_eq!(strip_tags("<p>你好<br/>世界</p>"), "你好世界");
         assert_eq!(strip_tags("  <b>x</b>  "), "x");
         assert_eq!(strip_tags("a < b"), "a < b");
+        // ★ task-9 ②：去完标签还要解实体（Owner 截图里就是 &nbsp;）
+        assert_eq!(strip_tags("<p>介绍&nbsp;文本</p>"), "介绍 文本");
+        assert_eq!(strip_tags("A&amp;B"), "A&B");
+        // ⚠️ 顺序：必须**先**去标签**再**解实体 ——
+        //    反过来会把 &lt;p&gt; 解成真标签，那它就躲过去标签、最后显示成标签
+        assert_eq!(strip_tags("&lt;p&gt;x&lt;/p&gt;"), "<p>x</p>");
+        // 真实形态：标签 + 实体混排
+        assert_eq!(
+            strip_tags("<div>第1集&nbsp;&nbsp;主演：A&amp;B</div>"),
+            "第1集  主演：A&B"
+        );
     }
 
     #[test]

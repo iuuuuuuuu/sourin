@@ -46,11 +46,12 @@
 
 import 'dart:async';
 
-import 'package:flutter/foundation.dart' show kDebugMode;
+import 'package:flutter/foundation.dart' show kDebugMode, visibleForTesting;
 import 'package:material_ui/material_ui.dart';
 
 import '../core/sourin_api.dart';
 import '../core/ui_prefs.dart';
+import 'live_availability.dart';
 import 'tokens.dart';
 import 'widgets/fade_in_sliver.dart';
 import 'widgets/poster_card.dart';
@@ -135,6 +136,242 @@ bool providesHomeContent(ProviderManifest p) => p.capabilities.vod;
 List<ProviderManifest> homeSourceList(List<ProviderManifest> all) =>
     all.where(providesHomeContent).toList();
 
+// ═══════════════════════════════════════════════════════════════════════
+//  ★★★ task-11：首页列表的**进程级内存缓存**（切源不重拉 = stale-while-revalidate）
+// ═══════════════════════════════════════════════════════════════════════
+//
+// Owner 原话（逐字）：
+// > 这些封面啊,什么的信息能不能也做一下缓存?不然太耗费流量和使用感觉,
+// > 每次都重载
+// > 我在首页每次切换源的时候都要重载,我想如果有缓存就好了
+//
+// # ★ 先把「封面」与「列表」分开 —— 这两个的现状**完全不同**
+//
+// ```text
+// 封面 → ★ 本来就有缓存，而且是**字节级**的：
+//          · Flutter 侧 ImageCache（同一个 URL 不会解码两次）
+//          · 核心侧 URL→token 复用（同一 URL 复用同一 token，浏览器缓存才生效）
+//          ⇒ 这一半用户的直觉（"不是有缓存吗"）是对的：再给封面加一层
+//            （precache / 调大 maximumSizeBytes）**买不到任何东西** ——
+//            字节本来就在，问题不在字节。
+// 列表 → ✗ **零缓存**：切一次源 = 1 次 get_home + 每个区块 1 次 get_list
+//          ⇒ 骨架/占位停留数秒 = 用户说的"重载"
+// ```
+// ⇒ 所以本任务做的是**列表数据**缓存，不是图片缓存。
+//
+// # 真机读数（隔离数据目录 + 真核心 + 真网络，task-6 探针产物）
+//
+// ```text
+// 源: cctv（已启用 3 个；首页可用 1 个 —— 纯直播源被 homeSourceList 排除）
+// 实测 getHome 耗时: 1597ms / 803ms（同一台机器两次读数）
+// 待加载区块 9 个（当前源=cctv）        ← 9 次 get_list
+// 渲染完成: 分区=9 卡片=160
+// ```
+// ⇒ 冷切一次源 ≈ 1 次 get_home（0.8~1.6s）+ 9 次 get_list（网络往返）。
+//   切走再切回来**每次都重来**，这就是"太耗费流量 + 每次都重载"的成因。
+//
+// # 设计（三条，先定判据再写代码）
+//
+// ```text
+// ① 键 = provider id（首页没有 tab 这一层 —— 「我的」那三个 tab 走 MyShelf
+//    自己的刷新路径，与本缓存无关，别混为一谈）
+// ② 命中 ⇒ 数据**进这次 setState**，第一帧就有卡片（不经过骨架屏），
+//    紧接着后台 loadAll(force: true) 去对新的 ⇒ 先看旧的、新的自己追上来
+// ③ 上限 = LRU 12 个源 + TTL 10 分钟 + 骨架指纹不符即作废
+// ```
+//
+// # ★ 为什么不放在 HomePageState 的字段里
+//
+// 放字段里 = "本页实例"的缓存，而"切走再回来"有可能换实例
+// （本项目踩过：内容区曾用换 key 触发重挂载 ⇒ 整个 State 重建）。
+// 放**文件级 final** ⇒ 进程活多久它活多久。
+// ⚠️ 代价是必须自己管上限 —— 所以 LRU + TTL 是**硬约束**，不是优化项。
+
+/// 首页列表缓存的**条目上限**（LRU 淘汰用；硬约束，见上面 ③）
+///
+/// ```text
+/// 一个条目 ≈ 该源的 _groups（分区骨架，很小）
+///          + 各区块 items 的**引用**（列表对象共享，不做深拷贝）
+/// 实测 cctv 源 9 个区块 / 160 张卡 ⇒ 一个条目 ≈ 160 个引用
+/// 12 个条目 ≈ 2000 个引用 ⇒ 与"一屏 160 张卡"同一个量级，不会失控
+/// ```
+/// ★ 定成 12 而不是"无限"：用户可能装几十个源，来回切不能让内存线性涨。
+const int kHomeCacheMaxEntries = 12;
+
+/// 快照的**存活时长**：超过就不当"可用缓存"（宁可直接冷加载一次）
+///
+/// ★ 为什么有后台刷新还要有 TTL（两者不是一回事）
+/// ```text
+/// 后台刷新 → 保证"命中之后内容会变新"（stale-while-revalidate 的 revalidate）
+/// TTL      → 保证"命中之前不会拿**很久以前**的数据当秒开"
+///            （应用在后台搁了几小时、期间一次都没刷新 ⇒ 宁可直接冷加载）
+/// ```
+const Duration kHomeCacheTtl = Duration(minutes: 10);
+
+/// 「新鲜窗口」：快照存下来不到这么久 ⇒ **连后台刷新都不用发**
+///
+/// ★ 为什么需要（不加它，用户点一下底栏就会立刻重发一轮请求）
+/// ```text
+/// 回首页 → shell 的 _switchTo(home) → loadAll(force: false)
+///   ⇒ 那一步的语义是「内容可能变了，去对一下」
+///   ⇒ 但用户刚在 2 秒前看过这个源、缓存就是那一刻存的
+///     ⇒ 立刻重新发一轮 get_list = 纯浪费（也正是用户抱怨的"每次都重拉"）
+/// ```
+/// # 与 TTL 的区别（两个阈值，管的不是同一件事）
+/// ```text
+/// freshFor(30s) → 命中之后**要不要去后台对新的**（revalidate 的节流）
+/// ttl(10min)    → 命中**之前**这份快照还算不算数（stale 的上限）
+/// ```
+/// ⚠️ 有意的代价：这 30 秒内**不会**发现源那边新上的内容。
+///    用户手动下拉刷新永远是 `force: true` ⇒ **不受本窗口影响**。
+const Duration kHomeCacheFreshFor = Duration(seconds: 30);
+/// 一个源的首页列表快照（分区骨架 + 各区块 items）
+///
+/// ⚠️ `groups` / `items` 里存的是**引用**，靠的是"只整体替换、从不原地改"
+///    （`loadAll` 里 `if (changed) { _groups = next; }`）、
+///    存下来的不会被后续刷新改脏 —— 所以不需要深拷贝。
+class HomeSnapshot {
+  HomeSnapshot({
+    required this.fingerprint,
+    required this.groups,
+    required Map<String, List<MediaItem>> items,
+    required this.at,
+  }) : items = Map<String, List<MediaItem>>.unmodifiable(items);
+
+  /// 分区骨架指纹（就是 `_fingerprint`）—— 骨架变了，这份快照就不作数了
+  final String fingerprint;
+
+  /// 该源的分区列表（只含**这个源**的 ProviderGroup）
+  final List<ProviderGroup> groups;
+
+  /// `provider::sectionId` → items（含"已知为空"的键，见 `_switchSource` 的说明）
+  final Map<String, List<MediaItem>> items;
+
+  /// 存入时刻（TTL 判据）
+  final DateTime at;
+
+  /// 卡片总数（探针读数用：证明"秒开的第一帧"里真的有内容）
+  int get cardCount {
+    var n = 0;
+    for (final l in items.values) {
+      n += l.length;
+    }
+    return n;
+  }
+}
+
+/// 首页列表的**进程级**缓存（LRU + TTL）
+///
+/// # 为什么不能只用一个 Map + "看着差不多就清"
+///
+/// ```text
+/// 只清"太大"的表  → 用户装 30 个源来回切 ⇒ 30 份列表常驻（线性涨，无上限）✗
+/// LRU（本实现）    → 最近用过的 12 个留下，最久的**真的被删掉**        ✓
+/// ```
+/// ★ "真的被删掉"是硬约束（任务书第 4 条）：
+///   `_entries.remove(oldest)` 之后没有别处再持有它 ⇒ 真的可回收。
+///   （只"标记不命中"却留着对象 = 内存照涨，等于没做上限。）
+class HomeListCache {
+  HomeListCache({
+    this.maxEntries = kHomeCacheMaxEntries,
+    this.ttl = kHomeCacheTtl,
+  });
+
+  final int maxEntries;
+  final Duration ttl;
+
+  /// ★ 用 `Map` 的**插入序**当 LRU 序：命中时先 remove 再写回 = 挪到末尾。
+  ///   不引第三方 LRU 实现（本仓不许加依赖）。
+  final Map<String, HomeSnapshot> _entries = <String, HomeSnapshot>{};
+
+  /// ★★ 探针开关：置 false 后本缓存**完全不起作用**（take 恒 null、put 空操作）
+  ///
+  /// # 为什么必须留这个开关（第一版探针缺了它，得出了一个**站不住的结论**）
+  /// ```text
+  /// 我原本用一个"阳性对照"来证明判据有效：把缓存 clear() 掉再切回 A，
+  /// 期望"第一帧没有卡片"。实测**有 4 张卡片、0 次请求** ⇒ 对照失败。
+  /// 原因不在缓存，而在页面**本来就保留着** `_sectionItems`
+  ///   （它从不被清空，`build()` 又按 `_currentSource` 过滤）
+  ///   ⇒ 切回已看过的源，**改之前也是秒出**。
+  /// ⇒ 要量"我的改动到底带来了什么"，必须能真的**退回改之前的行为**，
+  ///   而 clear() 做不到这件事（clear 只清缓存，清不掉 `_sectionItems`）。
+  /// ```
+  bool enabled = true;
+
+  // ── 探针读数（判据必须与判据对象**同源**：要测"命中没有"，就记命中本身）──
+  //
+  // ★★ 为什么**不**用 `if (kDebugMode)` 门控（第一版就是这么写的，真机读数全 0）
+  // ```text
+  // 真机探针是 `flutter build windows --release` 构建的 ⇒ kDebugMode=false
+  //   ⇒ 计数器一次都不自增 ⇒ hits=0 misses=0 puts=0（而缓存其实工作得好好的）
+  //   ⇒ 那几条"仪器同源"的断言全部假红，看起来像缓存没生效。
+  // ```
+  // 代价：4 个 int 自增。与"切源要不要重发 9 次 get_list"相比可以忽略 ——
+  // 而这几个数**是**证明本任务生效的唯一同源证据（见 t11 探针产物）。
+  int hits = 0;
+  int misses = 0;
+  int puts = 0;
+  int evictions = 0;
+
+  /// 当前驻留条目数（探针用它证明"上限真的生效"）
+  int get length => _entries.length;
+
+  /// 取快照：**未过期** 且 **指纹一致** 才算命中（命中会做 LRU 提升）
+  ///
+  /// ⚠️ 不命中时**顺手删掉**这一条（过期/作废的数据不占名额、不占内存）。
+  HomeSnapshot? take(
+    String provider, {
+    required String fingerprint,
+    required DateTime now,
+  }) {
+    if (!enabled) {
+      misses++;
+      return null;
+    }
+    final s = _entries.remove(provider);
+    if (s == null) {
+      misses++;
+      return null;
+    }
+    if (now.difference(s.at) > ttl || s.fingerprint != fingerprint) {
+      misses++;
+      return null;
+    }
+    _entries[provider] = s; // 挪到末尾 = 最近使用
+    hits++;
+    return s;
+  }
+
+  void put(String provider, HomeSnapshot s) {
+    if (provider.isEmpty || !enabled) return;
+    _entries.remove(provider);
+    _entries[provider] = s;
+    puts++;
+    while (_entries.length > maxEntries) {
+      final oldest = _entries.keys.first; // 插入序最前 = 最久未用
+      _entries.remove(oldest);
+      evictions++;
+    }
+  }
+
+  /// 彻底清空（测试启动前调用）
+  void clear() {
+    _entries.clear();
+  }
+}
+
+/// ★★ task-11 的缓存实例 —— **产品走的就是这一个**
+///
+/// # 为什么把产品实例直接当探针（而不是另建一个计数器）
+///
+/// 本项目踩过两次"仪器与被测对象不是同一个东西"（见 `debugLoadAllCalls`
+/// 记的两条教训）。这里反过来：产品调的就是 `homeListCache`，
+/// 测试读它的 `hits / misses / puts / evictions / length` ——
+/// **判据与被测属性同源**。
+///
+/// ⚠️ 计数器只在 debug 自增；release 下缓存照常工作，只是不计数。
+final HomeListCache homeListCache = HomeListCache();
+
 /// ★★ 探针：`loadAll` 的**调用记录**（task-41）
 ///
 /// # 为什么需要它（两个"日志判据失效"的原因叠加）
@@ -159,6 +396,37 @@ List<ProviderManifest> homeSourceList(List<ProviderManifest> all) =>
 final List<({bool force, String reason})> debugLoadAllCalls =
     <({bool force, String reason})>[];
 
+/// ★★ task-6 探针：首页直播条的**过闸读数**（闸前候选 N / 闸后渲染 M）
+///
+/// # 为什么要成对记两个数
+///
+/// 判据是这一对**同源**读数：
+/// ```text
+/// N = 直播条本来会画几个 chip（= `kLivePreview` 的长度，8）
+/// M = 过完可用性闸之后**真正画出来**的 chip 数
+/// ```
+/// ★ 只报 M 没有意义：M=0 既可能是"闸生效了"，也可能是"直播条压根没渲染"
+///   （当前源不是 cctv / 页面还在骨架态）—— 两个原因读数**相同**。
+/// ⇒ 必须成对记录，且由**渲染路径自己**写（同 `debugLoadAllCalls` 的教训：
+///   要测"画了几个"，就直接记渲染时那个数，不要记它的副作用）。
+///
+/// ⚠️ 只在 debug 下写入（`kDebugMode`），release 构建零开销。
+final List<({int candidates, int rendered})> debugHomeLiveStrip =
+    <({int candidates, int rendered})>[];
+
+/// 最近一次直播条渲染读数（`null` = 本次会话还没渲染过直播条）
+({int candidates, int rendered})? get debugHomeLiveStripLast =>
+    debugHomeLiveStrip.isEmpty ? null : debugHomeLiveStrip.last;
+
+/// 探针可读的**闸前候选名单**（`provider::channelId`）
+///
+/// ★ 有它才能回答"这 8 个候选里**具体哪几个**被闸掉了" ——
+///   只看 `rendered=0` 无法区分"全被闸掉"和"渲染路径根本没跑到"。
+final List<String> debugHomeLiveStripCandidates = <String>[];
+
+/// 探针可读的**过闸后名单**（同上，两者都为空 = 直播条没渲染）
+final List<String> debugHomeLiveStripPassed = <String>[];
+
 /// 发现页
 class HomePage extends StatefulWidget {
   const HomePage({
@@ -180,7 +448,23 @@ class HomePage extends StatefulWidget {
   final void Function(String provider, String id)? onOpenDetail;
 
   /// 点直播频道 → 直接进播放器（直播没有剧集/多源，跳详情是多余一步）
-  final void Function(String channelId, String name)? onOpenLive;
+  ///
+  /// ⚠️ ★ task-6：第一个参数是**频道所属的源**（旧签名只有 channelId/name）。
+  ///
+  /// # 错在哪
+  ///
+  /// 旧签名不带源 ⇒ 接收方（`shell.dart:4913 _openLiveChannel`）只能把
+  /// `provider` **写死成 'cctv'`**（`shell.dart:4923`）。
+  /// 于是"从哪个源看到的频道"这个信息**在回调边界上被丢掉了**，
+  /// 播放器永远去 cctv 取流 —— 换成别的源必然取不到流（黑屏/报错）。
+  ///
+  /// # 为什么这么改
+  ///
+  /// 源不是"猜"出来的：直播条里的每个频道都是**按 (provider, channelId)
+  /// 探出来的**（见 `HomePageState._probeLiveStrip`），
+  /// ⇒ 让同一个 provider 原样带上去，回调两侧才指向同一个源。
+  final void Function(String provider, String channelId, String name)?
+      onOpenLive;
 
   /// 「查看全部」→ 浏览页
   final void Function(String provider, String sectionTitle, SectionSource src)?
@@ -229,9 +513,46 @@ class HomePageState extends State<HomePage> {
   /// 单冒号做分隔符会切错。
   final Map<String, List<MediaItem>> _sectionItems = {};
 
+  /// ★★★ task-11：**已经拉过**（哪怕结果是空）的区块键集合
+  ///
+  /// # 为什么必须有它 —— 否则"空区块"会让缓存与请求**无限循环**
+  ///
+  /// 判"要不要拉"原来只看 `_sectionItems[key]?.isEmpty ?? true`（见 `_loadSectionsOf`），
+  /// 而"拉过但结果为空"与"从来没拉过"**在这个判据下完全同形**。
+  /// 以前无所谓（每次进页面都全拉一遍），但缓存命中后就成了真问题：
+  /// ```text
+  /// 命中缓存 → 后台 force 重拉 → 某区块**仍然为空**（源那边确实没有内容）
+  ///   → 没有本集合 ⇒ 它下一帧又算"没拉过" ⇒ 再拉 ⇒ …
+  /// ```
+  /// ⇒ 把"拉过"记成**独立的事实**，别用"列表是不是空的"去推断。
+  ///   （同一条纪律见 `MyShelf` 的 `return null`：失败/空/没拉过必须分得开。）
+  ///
+  /// ★★ task-11 改成**按源分表**（原来是全局一张表）
+  ///
+  /// # 为什么必须按源分（我发现的一处真实错配）
+  /// ```text
+  /// 全局表 + 缓存命中时 `_sectionLoaded.addAll(snapshot.keys)`：
+  ///   快照里的键格式是 `provider::sectionId` ⇒ 加进去是**带前缀**的，
+  ///   而第 ④ 步判断用的是 `g.provider::s.id` ⇒ 前缀与区块所属的源**都对**，
+  ///   看起来没事。但反过来：用户切到 A 源时拉过 A 的区块，
+  ///   切到 B 源后 `_sectionLoaded` 里仍留着 A 的键 —— 一旦两个源有**同名**区块 id
+  ///   （聚合站很常见：`hot` / `new` / `tv`），B 源的同名区块就会被误判成"拉过"
+  ///   ⇒ **永远显示空轨道**，而且没有任何报错。
+  /// ```
+  /// ⇒ 按源分表，语义上根本不可能串台。
+  final Map<String, Set<String>> _loadedBy = <String, Set<String>>{};
+
   bool _loading = true;
   String? _error;
 
+  /// ★★ task-11：dispose 后禁止再写状态（异步回来的后台刷新 / 缓存写入检查它）
+  ///
+  /// 原来这里只有一个 `mounted` —— 那对**同步**的 setState 够用，
+  /// 但缓存写入（`_cacheSource`）不是 setState，它会在 State 已经销毁后
+  /// 继续往进程级缓存里写。写进去的内容本身没问题（就是那个源的快照），
+  /// 但**读 `_groups` / `_sectionItems` 去组装**这个动作在已销毁的 State 上
+  /// 是没有意义的 —— 显式记一个 flag 比靠 `mounted` 的边界语义更清楚。
+  bool _disposed = false;
   /// 当前显示的源
   ///
   /// ══════════════════════════════════════════════════════════════════
@@ -286,8 +607,247 @@ class HomePageState extends State<HomePage> {
   final _scrollController = ScrollController();
 
   /// 分区骨架指纹（用于「没变就不换引用」）
+  ///
+  /// ★ task-11 明确语义：它**始终是 `getHome()` 全量结果的指纹**，
+  ///   而不是 `_groups` 当前装的那份的指纹。
+  ///   为什么必须钉死这一点：缓存快照的命中判据与写入判据都是它 ——
+  ///   若这里改成「子集的指纹」，那 `_switchSource` 与 `loadAll` 两条路径
+  ///   就会用**两个不同的值**去查同一份快照 ⇒ 永远不命中，而且是**静默**的
+  ///   （表现只是「缓存好像没生效」，不会有任何报错）。
   String _fingerprint = '';
 
+  /// ★★ task-11：最近一次 `loadAll` **显示过**的源（判「源真的换了」用）
+  ///
+  /// 与 `_currentSource` 的区别：那个在 `_switchSource` 里就改了（立刻生效），
+  /// 这个只在 `loadAll` 走完时更新 —— 用来区分「换源」与「同一个源刷新」。
+  String _shownSource = '';
+
+  /// ★★ task-11：最近一次 `getHome()` 的**全量**分组（只含骨架，很小）
+  ///
+  /// # 为什么需要留着它
+  ///
+  /// 缓存命中后 `_groups` 会收窄成「当前源的子集」（那样才有「秒开」：
+  /// 命中那一刻的 `_groups` 必须**就是**要画的那份，不能等下一轮全量回来）。
+  /// 但收窄之后就再也解析不出**别的源**的分区了 —— 用户点另一个源时会看到空态。
+  /// ⇒ 全量骨架单独留一份，切到没缓存的源时从它里面取子集。
+  ///
+  /// ⚠️ 它只在 `loadAll` 里整体替换（`_allGroups = next`），从不原地改。
+  List<ProviderGroup> _allGroups = [];
+  // ════════════════════════════════════════════════════════════════════
+  //  ★★★ task-6：首页直播条的**可用性闸**（Owner 第 8 条）
+  // ════════════════════════════════════════════════════════════════════
+  //
+  // Owner 原话（逐字）：
+  // > 只能黑屏的兼容不了直接放弃不要出现
+  //
+  // # 错在哪（行号）
+  //
+  // 直播条整条链路**零可用性判定**：
+  // ```text
+  // :1099-1100  if (src.type == 'custom') _LiveStrip(onOpenLive: onOpenLive)
+  // :1285       itemCount: kLivePreview.length          ← 恒 8
+  // :1288       final ch = kLivePreview[i]
+  // :1291       onTap: () => onOpenLive?.call(ch.id, ch.name)
+  // ```
+  // 它直接渲染 `kLivePreview` 里写死的 8 个频道名，**一次网络都不发**
+  // ⇒ 无论这 8 个台此刻有没有可播线路，都会画出来；
+  //   用户点进去 ⇒ 播放器取到的全是 `drmProtected: true` 的线
+  //   ⇒ 黑屏。用户看到的就是"一排能点、点了全黑"的假入口。
+  //
+  // # 为什么这么改（而不是"写死 cctv 不可用"）
+  //
+  // 判据必须**动态探测**，理由见 `live_availability.dart` 文件头：
+  // 央视 CDN 地址会过期/更换，内容方哪天取消加密就会变成可用 ——
+  // 写死过滤会造成**永久性假阴性**，比多显示几个台危险得多。
+  //
+  // 所以复用直播页（`live_page.dart:188`）那一套：
+  // `LiveAvailabilityProbe` 探测 → `classifyStreams` 分类。
+  // ★ 本页**自己持有一个探针实例**（不跨页共享）——
+  //   本页与直播页的刷新时机、TTL 需求都不同，共享一个对象会让
+  //   两页互相污染缓存（还多一条跨文件依赖）。
+  LiveAvailabilityProbe _liveProbe = LiveAvailabilityProbe();
+
+  /// 上一次「直播条探测」的批次号
+  ///
+  /// ⚠️ 与 `live_page.dart` 的批次守卫同一个理由：探测是**异步**的，
+  ///    用户可能在探测期间切源/刷新 —— 回来时必须丢掉**过期批次**的结果，
+  ///    否则会把旧源的可用性写到新源的头上（串台）。
+  int _liveProbeGen = 0;
+
+  /// 直播条过闸（只留 `playable`；其余一律不画）
+  ///
+  /// # 四档怎么处理（判据与直播页**刻意不同**，这里必须说清）
+  ///
+  /// ```text
+  /// playable     → 画        有带视频的可播线路
+  /// audioOnly    → ★ 不画    只有音频线 ⇒ 点进去是黑屏，正是 Owner 第 8 条
+  /// unavailable  → 不画      一条可播线路都没有
+  /// unknown      → ★ 不画    还没探到 / 探测失败
+  /// ```
+  ///
+  /// ## ★ 为什么这里把 `unknown` 也闸掉（直播页却把它当"显示"）
+  ///
+  /// `shouldShowByDefault(unknown) == true` 的理由是"**探不到 ≠ 不可用**"，
+  /// 那条规则针对的是**直播页的完整频道列表** —— 少一个台是用户的损失。
+  /// 但首页这条是 `kLivePreview` 写死的 **8 个入口**，不是用户的频道清单：
+  /// ```text
+  /// 画出来 = 给用户一个"能点"的承诺
+  /// 而 unknown 档的承诺**兑现不了**（要么黑屏、要么多等一次取流）
+  /// ⇒ 首页宁可不画：用户想看直播，走「直播」页那条完整列表（那里
+  ///   会把 unknown 如实显示出来，一个台都不少）
+  /// ```
+  /// ⇒ 一句话：**「不漏台」的诉求在直播页满足，「不画假入口」的诉求在首页满足。**
+  ///   两处判据不同是**有意的**，不是不一致。
+  ///
+  /// ## ★ 为什么不能"塞个 unknown 占位"（Lead 明确要求）
+  ///
+  /// 那等于把"探不到"伪装成"可以点" —— 用户点下去还是黑屏，
+  /// 只是多绕一圈。宁可**整块不出现**（见 `_LiveStrip` 的空列表分支）。
+  List<({String id, String name})> _liveStripGate(String provider) {
+    final passed = <({String id, String name})>[];
+    for (final ch in kLivePreview) {
+      if (_liveProbe.cached(provider, ch.id) == LiveAvailability.playable) {
+        passed.add(ch);
+      }
+    }
+    return passed;
+  }
+
+  /// 记录一次直播条渲染读数（★ 只在 debug 下，见顶部 `debugHomeLiveStrip`）
+  void _recordLiveStrip(int candidates, int rendered, String provider) {
+    if (!kDebugMode) return;
+    debugHomeLiveStrip.add((candidates: candidates, rendered: rendered));
+    debugHomeLiveStripCandidates
+      ..clear()
+      ..addAll(kLivePreview.map((c) => '$provider::${c.id}'));
+    debugHomeLiveStripPassed
+      ..clear()
+      ..addAll(_liveStripGate(provider).map((c) => '$provider::${c.id}'));
+    debugPrint('[HOME] 直播条: 闸前候选=$candidates 闸后渲染=$rendered'
+        '（源=$provider）');
+  }
+
+  /// 探测当前源的直播条频道（**只为过闸**，结果进探针缓存）
+  ///
+  /// # 为什么用 `probe()` 而不是自己循环 `cached()`
+  ///
+  /// `probe()` 内部有并发池（`concurrency: 8`）与 TTL 跳过逻辑，
+  /// 自己循环等于把那份逻辑抄一遍（还容易抄漏"已缓存就跳过"）。
+  ///
+  /// ★ 只探 `kLivePreview` 这 8 个 —— **不探该源的全部频道**：
+  ///   首页只需要这 8 个的结论，多探的请求是纯浪费
+  ///   （直播页要探全部，是因为它要显示全部）。
+  ///
+  /// ⚠️ 探测**失败**时 `probe()` 会记 `unknown`（见那里的注释）——
+  ///    本闸把 unknown 当"不画"处理，所以失败不会变成假入口。
+  Future<void> _probeLiveStrip(String provider) async {
+    final gen = ++_liveProbeGen;
+    // 拿不到频道列表也照探：探针只按 (provider, channelId) 取流，
+    // 列表只是用来喂 probe() 的形状（LiveGroup）。
+    final groups = <LiveGroup>[
+      LiveGroup(
+        provider: provider,
+        providerName: provider,
+        channels: [
+          for (final c in kLivePreview) LiveChannel(id: c.id, name: c.name),
+        ],
+      ),
+    ];
+    try {
+      final n = await _liveProbe.probe(groups);
+      // ★ 过期批次直接丢（用户可能已切源）
+      if (!mounted || gen != _liveProbeGen) return;
+      debugPrint('[HOME] 直播条探测完成: 新探到 $n 个'
+          '（源=$provider）⇒ 可播=${_liveStripGate(provider).length}'
+          '/${kLivePreview.length}');
+      setState(() {});
+    } catch (e) {
+      // 探测整体失败不影响首页其它内容（错误隔离，同 _loadSection）
+      debugPrint('[HOME] 直播条探测失败: $e');
+    }
+  }
+
+  /// 若当前源有 `type:'custom'`（直播条）区块 ⇒ 排一次探测
+  ///
+  /// ★ 判据用 `_groups` 而不是 `_enabled`：区块列表只有 `getHome()`
+  ///   回来之后才知道（`_groups` 是它的缓存），而"这个源有没有直播条"
+  ///   正是由区块决定的。
+  ///
+  /// ⚠️ 只在 `!_loading` 之后调用（见 `loadAll` 尾部）——
+  ///    探测本身与骨架无关，但它会 setState，提前跑会白重建一次。
+  void _maybeProbeLiveStrip() {
+    final provider = _currentSource;
+    if (provider.isEmpty) return;
+    final hasCustom = _groups
+        .where((g) => g.provider == provider)
+        .expand((g) => g.sections)
+        .any((s) => s.source.type == 'custom');
+    if (!hasCustom) return;
+    unawaited(_probeLiveStrip(provider));
+  }
+
+  /// 探针钩子：让测试注入一个假 fetch（**不碰真网络**）
+  ///
+  /// ⚠️ 只在测试里用。生产路径永远走 `LiveAvailabilityProbe` 的默认实现
+  ///    （`SourinApi.getLiveStream`）。
+  @visibleForTesting
+  void debugSetLiveProbeFetch(
+    Future<List<StreamCandidate>> Function(String provider, String channelId)
+        fetch,
+  ) {
+    _liveProbe = LiveAvailabilityProbe(fetch: fetch);
+  }
+
+  /// ★★★ task-11 探针读数值：**渲染真正会用到的那几份状态**
+  ///
+  /// # 为什么必须有它（而不是在探针里数屏幕上的组件）
+  ///
+  /// 判据必须是「**用户看到卡片了没有**」，而：
+  /// ```text
+  /// 数屏幕上的 PosterCard → 受懒加载 / sliver cacheExtent 影响
+  ///                         （屏幕外的区块根本没 build ⇒ 数出来恒偏小）
+  /// 数 debugPrint 的文本   → 本项目已实测：binding 会接管 debugPrint ✗
+  /// ```
+  /// ⇒ 直接读「这一帧要拿去画卡片的那两份状态」（`_groups` × `_sectionItems`），
+  ///   与 `build()` 里 `_itemsOf(g.provider, s.id)` 读的**是同一份数据**。
+  ///   （同一条纪律见文件头的 `debugLoadAllCalls`：判据要与被测属性同源。）
+  ///
+  /// ⚠️ 只读不写；`@visibleForTesting` 只影响 lint 提示，不影响行为。
+  @visibleForTesting
+  ({String source, int groups, int sections, int cards, bool loading})
+      get debugHomeReadout {
+    var sections = 0;
+    var cards = 0;
+    for (final g in _groups) {
+      if (_currentSource.isNotEmpty && g.provider != _currentSource) continue;
+      for (final s in g.sections) {
+        sections++;
+        cards += _itemsOf(g.provider, s.id).length;
+      }
+    }
+    return (
+      source: _currentSource,
+      groups: _groups.length,
+      sections: sections,
+      cards: cards,
+      loading: _loading,
+    );
+  }
+
+  /// ★★ task-11 探针入口：**完全走生产路径**地切一次源
+  ///
+  /// 就是源条 `onSelect` 接的那个函数（`SourceBar(onSelect: _switchSource)`）——
+  /// 探针不自己模拟点击（指针注入会受窗口位置/遮挡影响），
+  /// 直接调同一个回调 ⇒ 走的还是同一条代码路径。
+  @visibleForTesting
+  void debugSwitchSource(String id) => _switchSource(id);
+
+  /// ★★ task-11 探针入口：跑一次**生产的按需补拉**（`_ensureSections`）
+  ///
+  /// 探针用它把"装完源之后可能存在的空快照"补实，然后再开始测量 ——
+  /// ⚠️ 走的是产品路径，不是探针自己造的请求。
+  @visibleForTesting
+  Future<void> debugEnsureSections(String provider) => _ensureSections(provider);
   @override
   void initState() {
     super.initState();
@@ -302,6 +862,8 @@ class HomePageState extends State<HomePage> {
 
   @override
   void dispose() {
+    // ★ task-11：先置 flag 再 super —— 异步回来的后台刷新会看它
+    _disposed = true;
     _scrollController.dispose();
     super.dispose();
   }
@@ -459,8 +1021,42 @@ class HomePageState extends State<HomePage> {
        * > 返回本页时若把 loading 置回 true，整个首页会**闪一下骨架**
        * > （内容明明还在内存里）。只在「没有任何数据」时才显示加载态。
        */
-      final showSkeleton = _groups.isEmpty;
-
+      /*
+       * ★★★ task-11：整页刷新时也先亮缓存
+       *
+       * 这条路径覆盖「回首页 / 刷新 / 设置页改完源 / 用户下拉」——
+       * 与 _switchSource 的命中判据**同源**（都用 homeListCache.take），
+       * 所以不会出现「切源秒开、回首页还是要等」这种只修一半的状态。
+       *
+       * ⚠️ `_groups.isEmpty` 这个判据的方向**反了**：它是「没有骨架就不显示加载态」，
+       *    而缓存命中意味着**数据已经在手上** ⇒ 同样不该显示加载态。
+       *    ⇒ 改成 `_groups.isEmpty && cachedTop == null`。
+       */
+      final cachedTop = homeListCache.take(
+        current,
+        fingerprint: _fingerprint,
+        now: DateTime.now(),
+      );
+      final showSkeleton = _groups.isEmpty && cachedTop == null;
+      if (cachedTop != null && _groups.isEmpty) {
+        debugPrint('[HOME] 整页刷新前命中缓存（源=$current）：'
+            '分区=${cachedTop.groups.length} 卡片=${cachedTop.cardCount} ⇒ 先画它');
+        if (mounted) {
+          setState(() {
+            /*
+             * ★ 这里**只补内容，不动 `_groups`**
+             *
+             * `_groups` 在本函数稍后会被全量 `next` 覆盖（它是**全量**语义），
+             * 而「收窄成子集」只发生在 `_switchSource` 的命中路径上 ——
+             * 两条路径各管一段，语义不重叠（见 `_groups` 那段说明）。
+             */
+            _sectionItems.addAll(cachedTop.items);
+            // ⚠️ 不动 `_loadedBy`：它是"这个 State 拉过"的事实，
+            //    而快照是**上一个** State 拉的（见那个字段的说明）。
+            //    这里要的都是"有没有数据可画"，`_sectionItems` 已经回答了。
+          });
+        }
+      }
       final t0 = DateTime.now();
       debugPrint('[HOME] 调 getHome()…（25 个源，可能要几秒）');
       final next = await SourinApi.getHome();
@@ -477,14 +1073,63 @@ class HomePageState extends State<HomePage> {
           .map((g) => '${g.provider}:${g.sections.map((s) => s.id).join(",")}')
           .join('|');
       final changed = fp != _fingerprint;
+      // ★ task-11：全量骨架单独留一份（切到没缓存的源时要用，见 _allGroups）
+      _allGroups = next;
+
+      /// ★ task-11：骨架变了但**当前源的分区没变** ⇒ 保留当前源的子集 + 数据，
+      /// 只让下面第 ④ 步去把内容拉新（见那段长注释）
+      var keepSubset = false;
 
       if (mounted) {
         setState(() {
           _enabled = homeSources;
           _currentSource = current;
+          /*
+           * ★ task-11：骨架变了时**不能**拿全量 `next` 去覆盖 `_groups`
+           *
+           * # 为什么（不这么改，缓存的第一帧就白做了）
+           *
+           * 缓存命中的那一刻 `_groups` 已经缩成**当前源的子集**
+           * （`_switchSource` 命中路径干的就是这件事），于是：
+           * ```text
+           * 用户切回首页 → loadAll（tab-switch）→ 命中缓存 → 画出来（1 帧，卡片全在）
+           *   → 拿到 next（全量）→ 指纹与缓存的子集指纹**必然不同** ⇒ changed=true
+           *   → _groups = next（全量）⇒ visible 又能解析了…但 _fingerprint 也变成了全量指纹
+           *   → ★ 于是**下一次** take() 拿着全量指纹去比子集指纹 ⇒ 永不命中
+           * ```
+           * ⇒ 复用已有的 `_refreshSource`：它把**当前源**的数据补齐 + 重新存快照，
+           *   存的是**同一个语义**（子集 + 子集指纹），命中链就不断。
+           *
+           * ⚠️ 只在 `_groups` **非空**时走这条路：首屏冷启动（_groups 为空）
+           *    必须老老实实 `_groups = next`，否则永远没有骨架可渲染。
+           */
           if (changed) {
-            _groups = next;
-            _fingerprint = fp;
+            if (_groups.isNotEmpty && current.isNotEmpty) {
+              /*
+               * 当前源的分区 id 串**逐字相同** ⇒ 骨架没变，只刷新内容。
+               * ⚠️ 用 id 串比而不是「个数相同」：区块**换了一个**（数量不变）
+               *    同样是骨架变了，那种情况必须换引用（否则画的是旧标题）。
+               */
+              final newSubset =
+                  next.where((g) => g.provider == current).toList();
+              final oldIds = _groups
+                  .expand((g) => g.sections.map((s) => s.id))
+                  .join(',');
+              final newIds = newSubset
+                  .expand((g) => g.sections.map((s) => s.id))
+                  .join(',');
+              if (newSubset.isNotEmpty && oldIds == newIds) {
+                keepSubset = true;
+                debugPrint('[HOME] 骨架变了但当前源（$current）的分区没变'
+                    ' ⇒ 保留子集，只刷内容');
+              } else {
+                _groups = newSubset;
+                _fingerprint = fp;
+              }
+            } else {
+              _groups = next;
+              _fingerprint = fp;
+            }
           }
           _loading = showSkeleton;
           _error = null;
@@ -495,24 +1140,92 @@ class HomePageState extends State<HomePage> {
        * ④ 区块内容按需刷新 + **只拉当前源**
        *
        * 已有数据 → 跳过；force → 全拉；只处理当前源的分区。
+       *
+       * ★★ task-11：加了一条**新鲜度闸**（recentlyFresh）
+       *
+       * # 为什么（不加它，用户点回首页的**那一刻**就会重新发一轮请求）
+       *
+       * ```text
+       * 回首页 → _switchTo(home) → loadAll(force: false, reason: tab-switch)
+       *   这条路径**本来就是设计成「要刷新」的**（原版 onActivated）——
+       *   对「内容可能变了」是对的，但对着**刚刚缓存过 2 秒**的源就是纯浪费：
+       *   用户点一下底栏 ⇒ 立刻重新发一轮 get_list。
+       * ```
+       * ⇒ 快照足够新（kHomeCacheFreshFor）时跳过补拉。
+       * ⚠️ 这是**有意的权衡**，代价写清楚：这段时间内不会去对新的，
+       *    而窗口只有 30 秒（用户手动下拉刷新**永远**是 force，不受它影响）。
        */
+      final recent = homeListCache.take(
+        current,
+        fingerprint: _fingerprint,
+        now: DateTime.now(),
+      );
+      final recentlyFresh = recent != null &&
+          DateTime.now().difference(recent.at) <= kHomeCacheFreshFor;
+      if (recentlyFresh) {
+        debugPrint('[HOME] 快照足够新（源=$current，存了 '
+            '${DateTime.now().difference(recent.at).inSeconds}s）'
+            ' ⇒ 这一轮不发区块请求');
+      }
+
       final pending = <Future<void>>[];
       for (final g in _groups) {
         if (current.isNotEmpty && g.provider != current) continue;
         for (final s in g.sections) {
           final key = '${g.provider}::${s.id}';
           final has = (_sectionItems[key]?.isNotEmpty) ?? false;
-          if (force || !has) {
+          final tried =
+              (_loadedBy[g.provider] ?? const <String>{}).contains(s.id);
+          /*
+           * ⚠️ tried 参与判据是**必须**的：没有它，一个「拉过但确实是空」的区块
+           *    会在**每一帧**都被算成「没拉过」⇒ 无限重拉（见 _loadedBy 的说明）。
+           */
+          if (force || (!has && !tried && !recentlyFresh)) {
             pending.add(_loadSection(g.provider, s.id, s.source));
           }
         }
       }
       debugPrint('[HOME] 待加载区块 ${pending.length} 个'
-          '（当前源=$current）');
+          '（当前源=$current）'
+          '${keepSubset ? "（骨架未变 ⇒ 只刷内容）" : ""}');
       await Future.wait(pending);
       debugPrint('[HOME] 全部区块加载完成');
 
       if (mounted) setState(() => _loading = false);
+
+      /*
+       * ★ task-11：loadAll 换源时把视口复位到顶部
+       *
+       * # 为什么需要（缓存**放大**了这个问题）
+       *
+       * 冷加载时 `_loading = true` ⇒ 骨架屏高度很短 ⇒ `ScrollPosition`
+       * 自动被钳到 0（反正没内容可滚）。而缓存命中时 `_loading = false`
+       * 且**满屏内容**：用户上一次在 A 源滚到 3000，切到 B 源后
+       * 视口**留在 3000** ⇒ 看到的是 B 源中段（甚至一片空白）。
+       * 对用户来说这正是「切源没生效 / 又白屏了」。
+       *
+       * ⚠️ 只在**当前显示的源真的换了**时复位：同一个源的下拉刷新/后台刷新
+       *    不该把用户正在看的位置顶掉（那是「刷新把页面弹回顶部」的老毛病）。
+       */
+      if (mounted && current != _shownSource) {
+        _shownSource = current;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted || !_scrollController.hasClients) return;
+          _scrollController.jumpTo(0);
+        });
+      }
+
+      /*
+       * ★★★ task-11：把这一轮的结果存进缓存（stale-while-revalidate 的写入端）
+       *
+       * ⚠️ 必须放在 `await Future.wait(pending)` **之后** ——
+       *    存早了会把「还没拉回来的空 items」当结果存进缓存，
+       *    于是下次命中直接画出空轨道（看起来像「源里没内容」）。
+       *
+       * ⚠️ 存的是**当前源的子集 + 子集指纹**（见 _cacheSource）——
+       *    命中判据与写入判据必须是同一个指纹，否则永不命中。
+       */
+      _cacheSource(current);
 
       /*
        * ★ 渲染探针（2026-09-23）—— **不依赖屏幕**
@@ -557,6 +1270,30 @@ class HomePageState extends State<HomePage> {
           '（首页可用，已排除纯直播源）'
           '（当前=$_currentSource）'
           ' 分区=$sections 卡片=$cards 错误=${_error ?? "无"}');
+
+      /*
+       * ★★★ task-6：首页直播条的**可用性探测**（Owner 第 8 条）
+       *
+       * # 为什么要在这里排、而不是在 build 里排
+       *
+       * ```text
+       * build 每次重建都会跑（滚动、setState、主题变化…）
+       *   ⇒ 排在这里等于"每帧都可能触发一次探测调度"
+       * ```
+       * 而 `loadAll` 是"页面数据刷新"的唯一入口
+       *（initState / 下拉刷新 / 切源 / shell 通知）—— 与探测的
+       * 生命周期**天然对齐**：内容刷新了，可用性跟着重判一次。
+       *
+       * ★ 只探**当前源**且该源真的声明了 `type:'custom'` 区块 ——
+       *   实测（task-4）28 个源里只有 `cctv` 有这种区块，
+       *   其余源在这里**零请求**（见下面 `hasCustom`）。
+       *
+       * ⚠️ **不 await**：直播条探测要发 8 个取流请求，
+       *    await 会把"首页渲染完成"推迟到探测结束之后 ——
+       *    而直播条是**次要内容**，不该拖慢首屏。
+       *    结果回来后由 `_probeLiveStrip` 自己 setState 补画。
+       */
+      _maybeProbeLiveStrip();
     } catch (e, st) {
       debugPrint('[HOME] ★ loadAll 失败: ');
       debugPrint('');
@@ -591,12 +1328,20 @@ class HomePageState extends State<HomePage> {
       if (src.isCategory && src.categoryId != null) {
         final page = await SourinApi.getList(provider, src.categoryId!);
         if (mounted) {
-          setState(() => _sectionItems[key] = page.items);
+          setState(() {
+            _sectionItems[key] = page.items;
+            // ★ task-11：**空结果也算"拉过"** —— 否则缓存命中后的后台刷新
+            //   会把这个空区块判成"没拉过"，一帧一次地重拉（见 _loadedBy）。
+            _markLoaded(provider, sectionId);
+          });
         }
       } else if (src.isRank && src.rankId != null) {
         final page = await SourinApi.getRank(provider, src.rankId!);
         if (mounted) {
-          setState(() => _sectionItems[key] = page.items);
+          setState(() {
+            _sectionItems[key] = page.items;
+            _markLoaded(provider, sectionId);
+          });
         }
       }
       // 其它类型（custom / static / recent）由界面自行处理，无需预取
@@ -618,18 +1363,127 @@ class HomePageState extends State<HomePage> {
   ///
   /// 为什么不一次拉全部源的：那正是要避免的 ——
   /// 4 个源 × 8 区块 ≈ 30 次请求。按需拉，切到才拉。
-  Future<void> _loadSectionsOf(String provider) async {
-    final g = _groups.where((x) => x.provider == provider).firstOrNull;
+  ///
+  /// ★★★ task-11：加了 [force]（缓存命中后的后台刷新要它）
+  ///
+  /// ```text
+  /// force=false（切源用）→ 只补"从来没拉过"的 ⇒ 缓存命中的区块**不发请求**
+  ///                         （用户要的"不重拉"就是这一条）
+  /// force=true（后台刷新用）→ 全拉一遍 ⇒ 保证旧的会被新的追上
+  /// ```
+  /// ⚠️ 判据用 `_loadedBy[provider]` 而**不是** `items.isEmpty` ——
+  ///    见那个字段的说明（空结果的区块也要算"拉过"，否则会无限重拉）。
+  Future<void> _loadSectionsOf(String provider, {bool force = false}) async {
+    // ⚠️ 同 `_ensureSections`：必须用**全量骨架** `_allGroups`。
+    //    用 `_groups`（已被 loadAll 收窄成当前源）时，后台刷新**非当前源**会静默失效。
+    //    ★ 这条正是"C 过期后 revalidate 请求=0"的成因：刷新根本没发生。
+    final g = (_allGroups.isEmpty ? _groups : _allGroups)
+        .where((x) => x.provider == provider)
+        .firstOrNull;
     if (g == null) return;
 
+    final loaded = _loadedBy[provider] ?? const <String>{};
     final pending = <Future<void>>[];
     for (final s in g.sections) {
-      final key = '$provider::${s.id}';
-      if ((_sectionItems[key]?.isEmpty) ?? true) {
+      final has = loaded.contains(s.id) || _hasItems(provider, s);
+      if (force || !has) {
         pending.add(_loadSection(provider, s.id, s.source));
       }
     }
     await Future.wait(pending);
+  }
+
+  /// 标记「provider 的这个区块已经拉过」（**空结果也算**）
+  void _markLoaded(String provider, String sectionId) {
+    (_loadedBy[provider] ??= <String>{}).add(sectionId);
+  }
+
+  /// 该区块**有没有数据可画**
+  ///
+  /// ⚠️ 只看 `_sectionItems`，**不看** `_loadedBy` —— 两者回答的是不同问题：
+  /// ```text
+  /// _sectionItems 有内容吗 → "现在画得出来吗"  ⇒ 决定**切源那一刻要不要补拉**
+  /// _loadedBy 拉过了吗     → "还要不要再试一次" ⇒ 决定**按需刷新要不要跳过**
+  /// ```
+  /// ★ 分开的理由：一个区块可能"拉过但确实是空的"（源那边没有内容）。
+  ///   那时切源**不该**为它发请求（用户要的"不重拉"），
+  ///   而按需刷新时也没必要再打一次（`_loadedBy` 让它跳过）。
+  bool _hasItems(String provider, Section s) =>
+      (_sectionItems['$provider::${s.id}']?.isNotEmpty) ?? false;
+
+  /// ★★ task-11：进入一个源时**按需**补数据（「不重拉」真正落地的地方）
+  ///
+  /// # 为什么必须有它（原来的路径会**无条件**重拉）
+  ///
+  /// ```text
+  /// 老路径：_switchSource → unawaited(_loadSectionsOf(id))
+  ///   判据 = loaded.contains(s.id) || items 非空
+  ///   缓存命中时 _loadedBy 是**空的**（State 是新的），items 非空 ⇒ 不发 ✓
+  ///   —— 但一个**拉过且确实是空**的区块：items 空 + loaded 空 ⇒ has=false
+  ///      ⇒ **立刻发请求**，与用户诉求（"切回来不要重拉"）直接冲突。
+  /// ```
+  ///
+  /// # 判据（`_hasItems`，而不是 `_loadedBy`）
+  /// ```text
+  /// 有数据 → 一个请求都不发（缓存命中就该是 0 请求）
+  /// 没数据 → 补拉（不能因为"以前拉过是空的"就永远空着）
+  /// ```
+  /// ★ 这条判据天然就对：**发请求的唯一理由是「现在画不出东西」**。
+  Future<void> _ensureSections(String provider) async {
+    /*
+     * ⚠️⚠️ 必须从 `_allGroups` 取骨架，**不能**用 `_groups`
+     *
+     * ```text
+     * `loadAll` 会把 `_groups` 收窄成"当前源的那一份"（keepSubset）⇒
+     *   对**非当前源**，`_groups.where(provider==x)` 是**空的** ⇒ 这里 `return`，
+     *   一个区块都不拉、快照也不写。
+     * ★ 真机读数就是这么露出来的：探针在"当前源=cctv"时预热 t11a ⇒
+     *   预热静默失效 ⇒ 后面切回 t11a **永远不命中**（读数 720ms/2 请求，与冷加载一样）。
+     * ⇒ 那不是缓存坏了，是**找不到骨架就悄悄放弃**。
+     * ```
+     * `_allGroups` 存的正是**完整骨架**（所有源），它的存在就是为了解析任意源的子集。
+     * 收窄 `_groups` 是渲染优化，不该让"预取别的源"跟着失效。
+     */
+    final g = (_allGroups.isEmpty ? _groups : _allGroups)
+        .where((x) => x.provider == provider)
+        .firstOrNull;
+    if (g == null) return;
+
+    final pending = <Future<void>>[];
+    for (final s in g.sections) {
+      /*
+       * ⚠️ 只处理**能预取**的区块（category / rank）。
+       *
+       * `custom` / `static` / `recent` 由界面自己画（见 `_loadSection` 的说明）——
+       * 对它们调 `_loadSection` 是**空操作**：一个请求都不发，但会进 `pending`，
+       * 于是日志里出现"补拉 1 个区块"而实际零请求 ⇒ 读数与日志对不上。
+       * ★ cctv 源的「正在直播」正是 custom ⇒ 这条不加，切到 cctv 每次都多一行假日志。
+       */
+      final fetchable = (s.source.isCategory && s.source.categoryId != null) ||
+          (s.source.isRank && s.source.rankId != null);
+      if (fetchable && !_hasItems(provider, s)) {
+        pending.add(_loadSection(provider, s.id, s.source));
+      }
+    }
+    if (pending.isNotEmpty) {
+      debugPrint('[HOME] 按需补拉（源=$provider）：${pending.length} 个区块'
+          '（其余 ${g.sections.length - pending.length} 个已有数据 ⇒ 零请求）');
+    }
+    await Future.wait(pending);
+    /*
+     * ★★★ 收尾必须**存快照** —— 这一行是「切源缓存」成立的关键
+     *
+     * # 少了它会怎样（我自己第一版就漏了，靠真机探针的读数才发现）
+     * ```text
+     * 快照只在两处写入：loadAll 尾部、_refreshSource 尾部。
+     * 而用户切源的路径是：_switchSource →（未命中）→ _ensureSections
+     *   ⇒ 这条路上**一次都没写** ⇒ 用户切到 B、再切回 A、再切回 B…
+     *     **永远不命中**（缓存里只有 loadAll 那一刻的源）。
+     *   ⇒ 用户报的正是「每次切换源都要重载」—— 修了却对这条路径无效。
+     * ```
+     * ⇒ 放在 `Future.wait` 之后：数据已经落进 `_sectionItems`，快照才完整。
+     */
+    _cacheSource(provider);
   }
 
   /// 切源
@@ -644,7 +1498,111 @@ class HomePageState extends State<HomePage> {
       _railScroll[_currentSource] = _scrollController.offset;
     }
 
-    setState(() => _currentSource = id);
+    /*
+     * ══════════════════════════════════════════════════════════════
+     * ★★★ task-11：缓存命中 ⇒ **同一次 setState 里**把数据换上去
+     * ══════════════════════════════════════════════════════════════
+     *
+     * Owner 原话：
+     * > 我在首页每次切换源的时候都要重载,我想如果有缓存就好了
+     *
+     * # 为什么必须放在**这一次** setState 里（不能"先切源、再补数据"）
+     *
+     * ```text
+     * 两次 setState → 中间那一帧 _groups/_sectionItems 还是空的
+     *   ⇒ build 走的是 `visible.isEmpty` 分支 ⇒ **空态**
+     *   （比骨架更糟：骨架至少说明"在加载"，空态是在说"这个源没内容"）
+     * ⇒ 一次 setState 换完 ⇒ **第一帧就有卡片**，不经过骨架也不经过空态
+     * ```
+     *
+     * ⚠️ 判据取的是 `_fingerprint`（当前骨架的指纹），不是"缓存里有没有这个源"：
+     *    骨架变了（用户刚在设置页启停过源）⇒ 旧快照的分区列表与指纹对不上
+     *    ⇒ `take()` 直接判不命中（那一条也顺手删掉，不占名额）。
+     */
+    final cached = homeListCache.take(
+      id,
+      fingerprint: _fingerprint,
+      now: DateTime.now(),
+    );
+
+    setState(() {
+      _currentSource = id;
+      if (cached != null) {
+        // ★ 命中路径把 _groups 收窄成**这个源**的子集 ——
+        //   这样同一帧里 visible 就能解析出内容（见上面那段说明）。
+        //   冷路径会从 _allGroups 重新取子集，两者互不干扰。
+        _groups = cached.groups;
+        _sectionItems.addAll(cached.items);
+        _loading = false;
+        _error = null;
+      }
+    });
+
+    if (cached != null) {
+      /*
+       * ★ task-11：命中路径也要落盘
+       *
+       * ⚠️ 上面那段「落盘」的注释写着"必须放在 setState 之后" —— 它原来在
+       *    **函数末尾**，而命中路径会 `return`，所以**整段落盘被跳过了**：
+       *    用户在多个源之间切来切去，只有"切到没缓存的源"才写盘，
+       *    切到有缓存的源**不写** ⇒ 下次启动回到的是那个没缓存的源。
+       *    （同一条：`_restoreScroll` 也是末尾那段，命中路径原本也漏了。）
+       */
+      UiPrefs.setHomeSource(id);
+      debugPrint('[HOME] 缓存命中（源=$id）：分区=${cached.groups.length} '
+          '区块=${cached.items.length} 卡片=${cached.cardCount} '
+          '（存了 ${DateTime.now().difference(cached.at).inSeconds}s）');
+      /*
+       * ★★ 后台刷新：这就是 stale-while-revalidate 的 revalidate 那一半
+       *
+       * ★★ 但**必须过一道新鲜度闸** —— 这一条是我第一版写错、后面改的，
+       *   记在这里免得后人再"优化"回去：
+       * ```text
+       * 第一版：命中就无条件 unawaited(_refreshSource(...))
+       *   ⇒ 用户切回一个 2 秒前才拉过的源 ⇒ **立刻又发一轮 get_list**
+       *   ⇒ 与 Owner 的诉求（"每次切换源都要重载"）方向相反：
+       *     观感上是"先画旧内容"，但流量照花，而且探针实测会看到
+       *     "切源第一帧就有请求" ⇒ 判据本身被污染。
+       * ```
+       * ⇒ 只有快照**不够新**（超过 kHomeCacheFreshFor）才去 revalidate。
+       *   30 秒内的第二次切回：一个请求都不发。
+       *
+       * ⚠️ 顺序：**先按需补拉**（`_ensureSections`，可能一个请求都不发），
+       *   再整源后台刷新（`_refreshSource`）。两者写同一批键，
+       *   串行执行才不会有"后完成的赢"把新数据盖回旧的。
+       */
+      final age = DateTime.now().difference(cached.at);
+      final stale = age > kHomeCacheFreshFor;
+      unawaited(() async {
+        await _ensureSections(id);
+        if (stale) {
+          await _refreshSource(id, reason: 'cache-stale');
+        } else {
+          debugPrint('[HOME] 快照够新（源=$id，存了 ${age.inSeconds}s ≤ '
+              '${kHomeCacheFreshFor.inSeconds}s）⇒ 跳过后台刷新');
+        }
+      }());
+      _maybeProbeLiveStrip();
+      _restoreScroll(id);
+      return;
+    }
+
+    debugPrint('[HOME] 缓存未命中（源=$id）⇒ 走冷加载路径');
+    setState(() {
+      _currentSource = id;
+      /*
+       * ★ task-11：`_groups` 可能已经收窄成**别的源的子集**（上一次命中留下的），
+       * 那样这里会解析不出目标源的分区 ⇒ 用户看到空态。
+       * 所以冷路径必须从 `_allGroups`（全量骨架）重新取一次子集。
+       *
+       * ⚠️ 没有 `_allGroups`（还没跑过 loadAll）时保持原样 ——
+       *    `loadAll` 迟早会填上，别在这里造一个空分组。
+       */
+      if (_allGroups.isNotEmpty) {
+        final sub = _allGroups.where((g) => g.provider == id).toList();
+        if (sub.isNotEmpty) _groups = sub;
+      }
+    });
     /*
      * ★ 落盘（2026-09-24 补齐「首页的选中源记录」）
      *
@@ -657,16 +1615,100 @@ class HomePageState extends State<HomePage> {
     UiPrefs.setHomeSource(id);
 
     // 切源后补拉该源还没加载过的区块
-    _loadSectionsOf(id);
+    // ⚠️ 走 `_ensureSections` 而**不是** `_loadSectionsOf`：
+    //    后者对"拉过但是空"的区块会立刻重发请求（见 `_ensureSections` 的说明）。
+    unawaited(_ensureSections(id));
 
-    // 恢复目标源的位置（下一帧 —— 等列表换完）
+    /*
+     * ★ task-6：切源后重探直播条
+     *
+     * 两个源的可播线路完全无关（cctv 全 DRM，iptv 全可播）——
+     * 不重探就会拿 A 源的结论去画 B 源的条（串台）。
+     * ★ 探针按 (provider, channelId) 分键缓存 ⇒ 切回来时是**命中缓存**，
+     *   不会重复发请求。
+     */
+    _maybeProbeLiveStrip();
+
+    _restoreScroll(id);
+  }
+
+  /// 恢复目标源的滚动位置（下一帧 —— 等列表换完）
+  ///
+  /// ★ task-11 把它抽成方法：命中缓存与冷加载**两条路径都要恢复位置**
+  ///   （原来这段内联在 _switchSource 末尾，命中路径提前 return 就漏掉了 ——
+  ///    而「切回来位置也回来了」正是用户对「缓存」的另一个期待）。
+  void _restoreScroll(String id) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!_scrollController.hasClients) return;
+      if (!mounted || !_scrollController.hasClients) return;
       final target = _railScroll[id] ?? 0;
       _scrollController.jumpTo(
         target.clamp(0, _scrollController.position.maxScrollExtent),
       );
     });
+  }
+
+  /// ★★★ task-11：把**一个源**的数据补齐 + 存进缓存
+  ///
+  /// # 为什么不是「重跑一遍 loadAll」
+  ///
+  /// ```text
+  /// loadAll() 会连带 listProviders()（重扫插件目录）+ 重解析当前源的回退 +
+  ///           重画「我的」+ 重算整页探针读数
+  /// ```
+  /// 那些都属于「整页刷新」，与「把**这一个源**的内容拉新」不是一回事。
+  /// 而且 loadAll 拿的是 getHome() 的**全量**结果，会把 _groups 换成全量
+  /// （_switchSource 命中路径靠的正是「当前源的子集」），语义会漂。
+  /// ⇒ 这里只做两件事：拉这个源的区块 + 存快照。
+  ///
+  /// ⚠️ force 必须是 true：缓存命中的意义就是「这些区块已经有数据了」，
+  ///    而 force=false 会被 _sectionLoaded 判成「拉过」⇒ 一个请求都不发 ——
+  ///    那就不是 revalidate，是「永远用旧的」。
+  Future<void> _refreshSource(String provider, {required String reason}) async {
+    if (_disposed) return;
+    debugPrint("[HOME] 后台刷新开始（源=$provider, reason=$reason）");
+    final t0 = DateTime.now();
+    try {
+      await _loadSectionsOf(provider, force: true);
+    } catch (e) {
+      // 单个区块失败已在 _loadSection 里隔离；这里只兜「整体」失败
+      debugPrint("[HOME] 后台刷新失败（源=$provider）: $e");
+    }
+    // ★ 用户可能在刷新期间又切走了 ⇒ 这份快照仍然值得存（它就是这个源的），
+    //   但**不要再 setState**（当前显示的是别的源，刷上去就是串台）。
+    _cacheSource(provider);
+    debugPrint("[HOME] 后台刷新完成（源=$provider）："
+        "耗时 ${DateTime.now().difference(t0).inMilliseconds}ms");
+  }
+
+  /// 把 provider 当前的 _groups + _sectionItems 存成快照（LRU + TTL）
+  ///
+  /// ⚠️ items 只挑**属于这个源**的键（provider:: 前缀）——
+  ///    否则会把别的源的数据一起塞进这个条目，上限与命中语义都会失真。
+  /// ⚠️ 存**引用**不深拷贝：_sectionItems 的值只被整体替换（见 _loadSection），
+  ///    不会被原地改 ⇒ 共享安全，且省掉一次 160 元素的复制。
+  void _cacheSource(String provider) {
+    // ★ dispose 之后不再组装快照：State 已经没了，_groups/_sectionItems 的语义
+    //   在这里不再保证（见 _disposed 的说明）。缓存里那一份保持不变即可。
+    if (_disposed || provider.isEmpty || _groups.isEmpty) return;
+    final prefix = "$provider::";
+    final mine = <String, List<MediaItem>>{};
+    for (final e in _sectionItems.entries) {
+      if (e.key.startsWith(prefix)) mine[e.key] = e.value;
+    }
+    final groups = _groups.where((g) => g.provider == provider).toList();
+    if (groups.isEmpty) return;
+    homeListCache.put(
+      provider,
+      HomeSnapshot(
+        fingerprint: _fingerprint,
+        groups: groups,
+        items: mine,
+        at: DateTime.now(),
+      ),
+    );
+    debugPrint("[HOME] 缓存写入（源=$provider）：分区=${groups.length} "
+        "区块=${mine.length} 驻留=${homeListCache.length}/"
+        "${homeListCache.maxEntries}");
   }
 
   /// `cctv:abc` → (provider, id)
@@ -681,6 +1723,31 @@ class HomePageState extends State<HomePage> {
     widget.onOpenDetail?.call(provider, id);
   }
 
+  /// ★★ task-11 探针：当前**已经建到树上**的卡片元素数（用户真能看到的那些）
+  ///
+  /// # 为什么它和 debugHomeReadout.cards 是两个不同的数，且两个都要
+  ///
+  /// ```text
+  /// debugHomeReadout.cards  = 这一帧**有数据**的卡片数（状态层）
+  /// debugBuiltCards         = 其中**已经真的 build 出元素**的（渲染层）
+  /// ```
+  /// 只看前者可能被「数据在但没渲染」骗过（懒加载、布局异常、可见性闸）；
+  /// 只看后者则分不清「没数据」与「没滚到」。两个一起看才能说「用户看到了」。
+  ///
+  /// ⚠️ `visitChildElements` 会触发**按需 build**（这正是我们要的：
+  ///    它量的就是「如果现在要画，能画出来几张」），且不会改任何状态。
+  @visibleForTesting
+  int get debugBuiltCards {
+    var n = 0;
+    void walk(Element e) {
+      if (e.widget is PosterCard) n++;
+      e.visitChildElements(walk);
+    }
+
+    final el = context as Element;
+    el.visitChildElements(walk);
+    return n;
+  }
   @override
   Widget build(BuildContext context) {
     final visible = _groups.where((g) => g.provider == _currentSource).toList();
@@ -910,6 +1977,26 @@ class HomePageState extends State<HomePage> {
                         onOpenDetail: _openDetail,
                         onOpenLive: widget.onOpenLive,
                         onBrowse: widget.onBrowse,
+                        /*
+                         * ★ task-6：把"**过闸后的名单**"和"记录读数"交给区块。
+                         *
+                         * # 为什么闸在这里过（而不是在 build 里算好）
+                         *
+                         * 闸的键是 `(provider, channelId)` —— 这里的
+                         * `g.provider` 就是**这个区块自己的源**，
+                         * 两者天然对齐，不会串台。
+                         *
+                         * # 为什么 `custom` 型才过闸
+                         *
+                         * `custom` 是"区块内容由界面自己画"的类型
+                         *（实测只有 `cctv` 的「正在直播」用了它，
+                         * 见 `cctv.js:391`）⇒ 只有它才需要直播条的判定；
+                         * 其它类型的区块传空名单，不产生任何请求/查询。
+                         */
+                        liveStrip: s.source.type == 'custom'
+                            ? _liveStripGate(g.provider)
+                            : const <({String id, String name})>[],
+                        onLiveStripRendered: _recordLiveStrip,
                       ),
                 ]),
               ),
@@ -1008,15 +2095,36 @@ class _SectionBlock extends StatelessWidget {
     required this.onOpenDetail,
     this.onOpenLive,
     this.onBrowse,
+    this.liveStrip = const <({String id, String name})>[],
+    this.onLiveStripRendered,
   });
 
   final String provider;
   final Section section;
   final List<MediaItem> items;
   final void Function(MediaItem) onOpenDetail;
-  final void Function(String channelId, String name)? onOpenLive;
+
+  /// 点直播频道 → 进播放器
+  ///
+  /// ★ task-6：第一个参数是**频道所属的源**（旧签名丢了它，
+  ///   接收方只能把 provider 写死成 'cctv'）。详见 [HomePage.onOpenLive]。
+  final void Function(String provider, String channelId, String name)?
+      onOpenLive;
+
   final void Function(String provider, String sectionTitle, SectionSource src)?
       onBrowse;
+
+  /// ★ task-6：**已过闸**的直播频道名单（只含 `playable`）
+  ///
+  /// ⚠️ 这里**不再是** `kLivePreview` 全量 —— 由 `HomePageState._liveStripGate`
+  ///    按 (provider, channelId) 的探测结果筛过。空列表 = 整块不渲染。
+  final List<({String id, String name})> liveStrip;
+
+  /// 直播条**渲染完**之后的回调（参数：闸前候选数 / 闸后渲染数）
+  ///
+  /// ★ 探针读数必须由**渲染路径自己**上报 —— 见 `debugHomeLiveStrip` 的说明。
+  final void Function(int candidates, int rendered, String provider)?
+      onLiveStripRendered;
 
   @override
   Widget build(BuildContext context) {
@@ -1096,8 +2204,35 @@ class _SectionBlock extends StatelessWidget {
           const SizedBox(height: Sp.x4),
 
           // ── 直播区块：横向频道条 ──
+          /*
+           * ★★★ task-6：**先过闸，再决定画不画**（Owner 第 8 条）
+           *
+           * # 错在哪
+           *
+           * 旧代码这里只有一句 `if (src.type == 'custom')` ——
+           * 只要区块是 custom 型就无条件画直播条，
+           * 条里的频道名直接来自写死的 `kLivePreview`，
+           * **完全没问过"这些台现在能不能播"**。
+           *
+           * # 为什么这么改
+           *
+           * `liveStrip` 是**已过闸**的名单（只含 `playable`，见
+           * `HomePageState._liveStripGate`）。★ 空名单时
+           * `_LiveStrip` 返回零尺寸组件 ⇒ 这一块**整个消失**，
+           * 不会留下一条 44dp 的空带（那看起来像"加载失败"，
+           * 比不显示更糟 —— 与 `_Rail` 的「暂无内容」占位是两回事：
+           * 那里是"区块有标题但没有内容"，这里是"区块本身不该存在"）。
+           *
+           * ⚠️ `onLiveStripRendered` 把**闸前/闸后**两个数一起报上去 ——
+           *    只报闸后数无法区分"闸生效了"与"直播条压根没渲染"。
+           */
           if (src.type == 'custom')
-            _LiveStrip(onOpenLive: onOpenLive)
+            _LiveStrip(
+              provider: provider,
+              channels: liveStrip,
+              onOpenLive: onOpenLive,
+              onRendered: onLiveStripRendered,
+            )
 
           // ── 榜单区块：带序号的紧凑卡片 ──
           /*
@@ -1255,13 +2390,90 @@ class _Rail extends StatelessWidget {
 }
 
 /// 直播频道条
+///
+/// ★★★ task-6 改动（Owner 第 8 条「只能黑屏的兼容不了直接放弃不要出现」）
+///
+/// # 错在哪
+///
+/// 旧实现里这一条的数据源是**写死的常量**：
+/// ```text
+/// :1285  itemCount: kLivePreview.length     ← 恒 8，与网络无关
+/// :1288  final ch = kLivePreview[i]
+/// ```
+/// 它**不接收任何"哪些台可用"的输入**，也从不发请求 ⇒ 8 个台名
+/// 必然画出来。而实测（task-4）这 8 个台在 cctv 源里**全部**只有
+/// `drmProtected: true` 的视频线（0 个非 DRM 视频线、20/20 仅音频）
+/// ⇒ 用户点任意一个都是黑屏。这就是"一排能点、点了全黑"的假入口。
+///
+/// # 为什么这么改
+///
+/// 把数据源从"写死的 `kLivePreview`"换成"**调用方过闸后的名单**"
+///（`channels`）。本组件从此**不再自己决定画什么** ——
+/// 它只负责把名单画出来，以及**名单为空时整块不出现**：
+/// ```text
+/// channels.isEmpty ⇒ 返回零尺寸组件
+///   ⇒ 连外面那层 44dp 的 SizedBox 都不存在（不是"空盒子"）
+/// ```
+/// ★ 为什么必须是"整块消失"而不是"留个空盒子"：
+///   空盒子看起来像**加载失败/坏了**，用户会以为应用出问题；
+///   而这一块本来就只是"快捷入口"，没有它首页依然完整
+///   （想看直播走「直播」页那条完整列表）。
 class _LiveStrip extends StatelessWidget {
-  const _LiveStrip({this.onOpenLive});
+  const _LiveStrip({
+    required this.provider,
+    required this.channels,
+    this.onOpenLive,
+    this.onRendered,
+  });
 
-  final void Function(String channelId, String name)? onOpenLive;
+  /// 这些频道所属的源（点进去时要原样带上去 —— 见 [onOpenLive]）
+  final String provider;
+
+  /// ★ **已过闸**的频道名单（只含 `playable`；由 `_liveStripGate` 产出）
+  final List<({String id, String name})> channels;
+
+  /// 点频道 → 进播放器
+  ///
+  /// ★ task-6：第一个参数是 `provider`（本组件自己那份，不是猜的）——
+  ///   旧签名只有 `(channelId, name)`，接收方只能写死 'cctv'。
+  final void Function(String provider, String channelId, String name)?
+      onOpenLive;
+
+  /// 渲染读数上报（闸前候选数 / 闸后渲染数 / 源）
+  final void Function(int candidates, int rendered, String provider)? onRendered;
 
   @override
   Widget build(BuildContext context) {
+    /*
+     * ★ 先上报读数，再决定画不画
+     *
+     * # 为什么上报必须放在"空名单提前 return"**之前**
+     *
+     * 验收要的是「闸前候选 N / 闸后渲染 M」这一对读数 ——
+     * 而本次实测的恰恰是 **N=8 / M=0**（全被闸掉）那一档。
+     * 若空名单不上报，这一档就**根本没有读数**（读数只在"有台可播"时才有），
+     * 而那正是要证明的那一档 ⇒ 判据会缺掉最关键的一次测量。
+     *
+     * # 那"读数存在"会不会把两种情况混起来？
+     *
+     * 不会 —— 读数本身就是**渲染路径跑过的证据**：
+     * ```text
+     * 有读数            = 本源的 custom 区块真的渲染过 ⇒ (N, M) 可信
+     * 没有任何读数       = 这条路径压根没跑（源没有 custom 区块 / 还在骨架态）
+     * ```
+     * 两个问题分别由"读数的**值**"和"读数的**有无**"回答，互不干扰。
+     */
+    onRendered?.call(kLivePreview.length, channels.length, provider);
+
+    /*
+     * ★★★ 全不可播 ⇒ **整块不渲染**（Owner 第 8 条）
+     *
+     * 返回零尺寸组件而不是"高度 44 的空容器"：
+     * 空盒子看起来像**加载失败/坏了**，而这一块本来就只是快捷入口 ——
+     * 没有它首页依然完整（想看直播走「直播」页那条完整列表）。
+     */
+    if (channels.isEmpty) return const SizedBox.shrink();
+
     final colors = Theme.of(context).colorScheme;
 
     return SizedBox(
@@ -1282,13 +2494,16 @@ class _LiveStrip extends StatelessWidget {
          *    （`base.css:906-915`）⇒ 轨道是 ×2，直播条是 ×1。
          */
         padding: EdgeInsets.zero,
-        itemCount: kLivePreview.length,
+        // ★ task-6：数据源从写死的 kLivePreview 换成**过闸后的名单**
+        //   （长度可能小于 kLivePreview，为 0 时上面已提前 return）
+        itemCount: channels.length,
         separatorBuilder: (_, __) => const SizedBox(width: Sp.x2),
         itemBuilder: (context, i) {
-          final ch = kLivePreview[i];
+          final ch = channels[i];
           return Center(
             child: InkWell(
-              onTap: () => onOpenLive?.call(ch.id, ch.name),
+              // ★ task-6：把 provider 原样带上 —— 接收方不再猜源
+              onTap: () => onOpenLive?.call(provider, ch.id, ch.name),
               borderRadius: Radii.rFull,
               child: Container(
                 padding: const EdgeInsets.symmetric(

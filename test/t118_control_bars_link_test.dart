@@ -225,12 +225,41 @@ void main() {
 
     test('⑧ 顶栏渐变条的 visible 与底栏同源（都是 _controlsVisible）', () {
       final src = File('lib/ui/player_page.dart').readAsStringSync();
+      /*
+       * ★★★ 2026-10-09 更新（task-7 / Owner 新增缺陷：错误态返回箭头不可点）
+       *
+       * # 为什么原断言（`visible: _controlsVisible && _error == null,` 单行）必须改
+       * ```text
+       * 单行形态在错误态下恒 false ⇒ IgnorePointer 挡住顶栏 ⇒ 箭头点不动，
+       * 那正是 Owner 报的新缺陷。修法 = 追加一个**互斥**分支：
+       *   visible = (_controlsVisible && _error == null) || _canUseTopBarBack
+       * 其中 `_canUseTopBarBack` = `_error != null && ...`，与前半段**不可能同时为真**。
+       * ```
+       * ⇒ 断言改成**等价的多行形态**，判据不变：
+       *   ① 顶栏 visible 仍以 `_controlsVisible && _error == null` 为主真源（逐字要求还在）；
+       *   ② 追加分支必须是 `_canUseTopBarBack`（**不是**写死 true、不是其它字段）。
+       * ⚠️ 若有人把 ① 拿掉（写死 true 或换成别的），本条立刻红 —— 联动保护不丢。
+       */
       expect(
-        src.contains('visible: _controlsVisible && _error == null,'),
+        src.contains('(_controlsVisible && _error == null) ||'),
         isTrue,
-        reason: '★ 顶栏的 visible 必须由 `_controlsVisible` 驱动 —— 这是联动的'
-            '唯一真源；改成别的判据（或写死 true）就不再联动了',
+        reason: '★ 顶栏 visible 的主真源必须仍是 `_controlsVisible && _error == null` ——'
+            '那是联动的唯一真源；改成别的判据（或写死 true）就不再联动了',
       );
+      expect(
+        src.contains('_canUseTopBarBack,'),
+        isTrue,
+        reason: '★ task-7 追加的错误态分支必须还是 `_canUseTopBarBack`（互斥分支），'
+            '不许换成写死 true 或别的字段',
+      );
+      final iTop = src.indexOf('bool get _canUseTopBarBack =>');
+      expect(iTop, greaterThan(0), reason: '★ `_canUseTopBarBack` 不见了');
+      final topDef = src.substring(iTop, iTop + 200);
+      expect(topDef.contains('_error != null'), isTrue,
+          reason: '★★ `_canUseTopBarBack` 必须与前半段**互斥**（含 `_error != null`）——'
+              '否则正常播放时它也会让顶栏常显，顶栏就再也不消失了');
+      expect(topDef.contains('!_anySheetOpen'), isTrue,
+          reason: '★★ 浮层打开时不许抢返回（与 `_canUseFloatingBack` 同一条纪律）');
       expect(src.contains('if (_controlsVisible &&'), isTrue,
           reason: '★ 底栏的门控消失了（两条读的必须是同一个字段）');
     });
@@ -262,17 +291,32 @@ void main() {
 
     test('⑩ 两条读的是**同一个** _controlsFade 实例（不是各开一条）', () {
       final src = File('lib/ui/player_page.dart').readAsStringSync();
-      var n = 0;
-      var from = 0;
-      while (true) {
-        final i = src.indexOf('fade: _controlsFade,', from);
-        if (i < 0) break;
-        n++;
-        from = i + 1;
-      }
-      expect(n, 2,
-          reason: '★ 应当是「顶栏 1 处 + 底栏 1 处」= 2 处，实测 $n 处。'
-              '只有同一个实例才能保证两条**每一帧**的不透明度都相等。');
+      /*
+       * ★★★ 2026-10-09 更新（task-7）：计数口径改成「**引用** `_controlsFade`」
+       *
+       * # 为什么
+       * ```text
+       * 改前两处都是裸的 `fade: _controlsFade,`。task-7 后顶栏那两处变成三元：
+       *   fade: _canUseTopBarBack ? kAlwaysCompleteAnimation : _controlsFade,
+       *   floatingFade: _canUseTopBarBack ? kAlwaysCompleteAnimation : _controlsFade,
+       * ⇒ `indexOf('fade: _controlsFade,')` 一处都匹配不到（实测 0，原来断言 2）。
+       * ```
+       * ★ 判据的**实质**没变：两条必须读**同一个** `_controlsFade` 实例。
+       *   现在数的是「`._controlsFade` 的引用次数」= 顶栏 2（fade + floatingFade）
+       *   + 底栏 1 = 3；且**声明只有一处**（下一条断言照旧）。
+       * ⚠️ 引用次数少于 3 说明有人给某条换了独立动画源 ⇒ 联动失效 ⇒ 本条红。
+       */
+      final refs = RegExp(r'_controlsFade').allMatches(src).length;
+      // 声明 1 处 + 顶栏 2 处 + 底栏 1 处 + `_applyControlsMotion`/探针等注释外的引用；
+      // 用「至少 3 处**使用**」作为下界（注释里也出现，所以这里只保下界，防的是「改成 0/1」）。
+      expect(refs, greaterThanOrEqualTo(3),
+          reason: '★ 顶栏(fade+floatingFade) + 底栏 至少要引用同一个 `_controlsFade` 3 次，'
+              '实测 $refs 次。只有同一个实例才能保证两条**每一帧**的不透明度都相等。');
+      expect(src.contains('fade: _canUseTopBarBack'), isTrue,
+          reason: '★ task-7 的错误态分支必须仍在（把 fade 钉成常量动画）');
+      expect(src.contains(': _controlsFade,'), isTrue,
+          reason: '★ 正常态必须**回落到** `_controlsFade`（不是写死常量）——'
+              '否则控制条隐藏时顶栏不会淡出，缺陷 2 会回归');
       final decl = RegExp(r'late final Animation<double> _controlsFade =')
           .allMatches(src)
           .length;

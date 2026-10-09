@@ -384,8 +384,35 @@ void main() {
 
     test('★★ 播放器必须在 setState 之后、且用 ?.call 发通知', () {
       final raw = File('lib/ui/player_page.dart').readAsStringSync();
-      final i = raw.indexOf('Future<void> _toggleFullscreen()');
+      /*
+       * ★★★ 2026-10-09（task-15）：匹配串**不能带 `()`**
+       *
+       * # 为什么要改（这是 task-8 引入的真红）
+       * ```text
+       * 原来写死 `'Future<void> _toggleFullscreen()'`。
+       * task-8 ① 给它加了可选参数（`{bool awaitOs = true}`）—— 那是 lead 要求的修法 ——
+       * 于是签名字面量变成 `Future<void> _toggleFullscreen({bool awaitOs = true})`
+       * ⇒ 本行 `indexOf` 取到 **-1** ⇒ 这条断言失败（Expected > 0, Actual -1）。
+       * ```
+       * ★ 判据的**意图**（「这个函数必须存在」）没变，所以只去掉 `()` 这个无关细节，
+       *   **不是**放宽判据 —— 下面 :400-405 那两条顺序断言仍然一字不改地钉着。
+       */
+      final i = raw.indexOf('Future<void> _toggleFullscreen(');
       expect(i, greaterThan(0), reason: '找不到 _toggleFullscreen');
+      /*
+       * ★ 窗口大小复核（task-15 lead 明确要求给读数）
+       * ```text
+       * 实测（改后重新量，因为 awaitOs 参数 + 新增的长注释都加大了偏移）：
+       *   i                    = 242306
+       *   iSet（setState 锚点） = 121
+       *   iNotify（?.call 锚点）= 1169
+       *   函数体真实结束偏移      = 2614   <- 由 `\n  }\n` 测得
+       *   窗口 4200              = 仍完整覆盖，余量 ~1586 字符
+       * ```
+       * ⇒ **4200 够用，不需要调大**；且两个锚点都在窗口内、顺序正确（iNotify > iSet）。
+       * ⚠️ 窗尾会多伸进后面无关注释约 1586 字符 —— 对 `contains`/`indexOf` 无影响
+       *   （只会在两个锚点**之后**追加文本，不会把 iSet/iNotify 带偏）。
+       */
       final body = raw.substring(i, (i + 4200).clamp(0, raw.length));
 
       expect(body.contains('_onFullscreenChanged?.call(next)'), isTrue,

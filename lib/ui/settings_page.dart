@@ -193,6 +193,8 @@ import 'settings/emby_page.dart';
  * 本文件有并发写入者（task-6 在改插件更新 UI），改动面越小冲突越小。
  */
 import 'widgets/overlay_motion.dart';
+import 'widgets/plugin_edit_dialog.dart';
+import 'widgets/plugin_speedtest.dart';
 import 'widgets/settings_kit.dart';
 // ★ task-55：动画效果选择项（`PageTransitionStyle` / `PageTransitionStyleStore`）
 import 'widgets/page_transition.dart';
@@ -1136,20 +1138,33 @@ class SettingsPageState extends State<SettingsPage> {
     }
   }
 
-  /// 从本地内容安装插件
+  /// 添加插件（task-10 ③：与「编辑」共用同一个表单）
+  ///
+  /// # 改前
+  /// ```text
+  /// 一个多行框，只能贴**源码**（`install_plugin_source`）。
+  /// 想按链接装得去另一个入口（「从链接安装」），用户要自己先判断
+  /// 「我手上这个算哪种」—— 而 Owner 的诉求正是「一个表单，自动识别」。
+  /// ```
   Future<void> _installPluginSource() async {
-    final src = await _promptText(
-      title: '粘贴插件内容',
-      hint: '粘贴插件的 JS 源码（需含 @id 头部注释）',
-      maxLines: 10,
-    );
-    if (src == null || src.trim().isEmpty) return;
+    if (!mounted) return;
+    final r = await showPluginEditDialog(context: context);
+    if (r == null || !mounted) return;
 
     try {
-      final r = await SourinApi.installPluginSource(src.trim());
-      await loadAll();
-      widget.onProvidersChanged?.call();
-      _flash('已安装「${r.name}」v${r.version}');
+      if (r.kind == PluginInputKind.link) {
+        // 链接型 ⇒ 走「按链接安装」（会解析插件市场链接并记住来源）
+        final res = await SourinApi.installPlugin(r.text);
+        await loadAll();
+        widget.onProvidersChanged?.call();
+        _flash('已安装「${res.name}」v${res.version}');
+      } else {
+        // 源码型 ⇒ 新建（文件不存在也能建，与 savePluginSource 不同）
+        final res = await SourinApi.installPluginSource(r.text);
+        await loadAll();
+        widget.onProvidersChanged?.call();
+        _flash('已安装「${res.name}」v${res.version}');
+      }
     } catch (e) {
       _flash('安装失败：$e');
     }
@@ -1254,34 +1269,57 @@ class SettingsPageState extends State<SettingsPage> {
     }
   }
 
-  /// 编辑插件源码
+  /// 编辑插件（task-10 ③：改成与「添加」共用的表单）
+  ///
+  /// # 改前
+  /// ```text
+  /// 直接 `SourinApi.readPlugin(e.file)` 读**整份源码**塞进多行框。
+  /// ⇒ 一个按**链接**安装的插件，点「编辑」看到的是 2 万字 JS，
+  ///   用户想改的那个链接**根本不显示**（Owner 原话：
+  ///   「js插件既然已经用链接了,为什么点击编辑还是显示的插件代码?而不是编辑链接?」）。
+  /// ```
+  ///
+  /// # 改后
+  /// ```text
+  /// 走共用表单 `showPluginEditDialog(existing: e)`，类型由**表单内部**判定：
+  ///   · 有真实安装来源（`plugins/.meta/<id>.json` 的 `source_url`）⇒ 链接型
+  ///   · 没有 ⇒ 源码型
+  ///
+  /// ⚠️ 2026-10-09 修：原来判据是 `PluginEntry.upstream` 非空 —— 那是**上游接口地址**
+  ///    （不是安装来源），于是手写插件被误判成链接型 ⇒ 编辑框预填接口地址、
+  ///    保存时走 `installPlugin(接口地址)` ⇒ **覆盖坏本地插件**。
+  ///    判据现在抽在 `plugin_edit_dialog.dart` 的 `kindForExisting()` 里（纯函数，可单测）。
+  /// ```
   Future<void> _editPlugin(PluginEntry e) async {
-    String source;
-    try {
-      source = await SourinApi.readPlugin(e.file);
-    } catch (err) {
-      _flash('读取失败：$err');
-      return;
-    }
-
     if (!mounted) return;
-    final edited = await _promptText(
-      title: '编辑「${e.name}」',
-      hint: '插件源码',
-      initial: source,
-      maxLines: 16,
-    );
-    if (edited == null || edited == source) return;
+    final r = await showPluginEditDialog(context: context, existing: e);
+    if (r == null || !mounted) return;
 
     try {
-      /*
-       * ⚠️ `savePluginSource` 是「编辑**已有**插件」——
-       *    文件不存在会报错。新建要用 `installPluginSource`。
-       */
-      await SourinApi.savePluginSource(e.file, edited);
-      await loadAll();
-      widget.onProvidersChanged?.call();
-      _flash('已保存');
+      if (r.kind == PluginInputKind.link) {
+        /*
+         * ★ 链接型：走既有的「按链接安装」（`install_plugin`）。
+         *
+         * ⚠️ 为什么不调 `savePluginSource`：那个是「编辑已有插件的源码」，
+         *    它会把 sidecar 文件覆盖成这段文本 —— 传一个 URL 进去，
+         *    插件文件就变成了一行网址，**插件直接坏掉**。
+         *    链接型的「改上游」在 Rust 侧就是重新安装（install_plugin 会
+         *    按 id 覆盖同名插件并记住新的安装链接）。
+         */
+        final res = await SourinApi.installPlugin(r.text);
+        await loadAll();
+        widget.onProvidersChanged?.call();
+        _flash('已更新「${res.name}」v${res.version}');
+      } else {
+        /*
+         * ⚠️ `savePluginSource` 是「编辑**已有**插件」——
+         *    文件不存在会报错。新建要用 `installPluginSource`。
+         */
+        await SourinApi.savePluginSource(e.file, r.text);
+        await loadAll();
+        widget.onProvidersChanged?.call();
+        _flash('已保存');
+      }
     } catch (err) {
       _flash('保存失败：$err');
     }
@@ -1349,8 +1387,18 @@ class SettingsPageState extends State<SettingsPage> {
   ///    去 `registry` 里找 manifest 的）—— 所以按 id 匹配是对的。
   ///    匹配不到（内置 / 声明式 / HTTP 源，或插件刚被删）返回 `null`，
   ///    卡片上就不显示文件名，**不编一个出来**。
-  String? _pluginFileOf(String id) =>
-      _plugins.plugins.where((e) => e.id == id).firstOrNull?.file;
+  /// ★ task-5（缺陷 5）：一次查到**整条** `PluginEntry`（不再只取文件名）
+  ///
+  /// 卡片要用它的三样东西：
+  /// ```text
+  /// file      插件文件名（`154.js`）—— 描述行显示，用户靠它对上磁盘文件
+  /// author    来源标识的**唯一判据**（tvbox-convert / dsh / sourin）
+  /// upstream  上游接口地址（头部注释或正文 `const API`）
+  /// ```
+  /// 原先是 `_pluginFileOf`（只返回 `file`）—— 加后两样时改成返回整条，
+  /// 免得同一张卡做三次 `where(...).firstOrNull` 查找。
+  PluginEntry? _pluginOf(String id) =>
+      _plugins.plugins.where((e) => e.id == id).firstOrNull;
 
   /// 这个源的「配置」按钮回调，**没有可配置的插件时返回 `null`**
   ///
@@ -1369,7 +1417,7 @@ class SettingsPageState extends State<SettingsPage> {
   ///
   /// ⚠️ 两个分支都走 `_configPlugin` / `_flash`，**不另写一套逻辑**。
   VoidCallback? _configOf(String id) {
-    final e = _plugins.plugins.where((x) => x.id == id).firstOrNull;
+    final e = _pluginOf(id);
     if (e == null) return null;
     return () => _configPlugin(e);
   }
@@ -2033,7 +2081,20 @@ class SettingsPageState extends State<SettingsPage> {
             //   区分的 —— 面板管字幕/音轨/倍速，这一页管下载与缓存。
             SettingsEntryRow(
               title: '播放与下载',
-              subtitle: '片段下载并发 · 缓存上限 · 分享日志',
+              /*
+               * ★ 2026-10-09：副标题跟着 log-dev 的改名走
+               *
+               * 他按 Owner 的要求把那一页的区块从「分享日志」重做成
+               * 「**日志与反馈**」（并加了场景引导句「出问题时请把这份日志
+               * 发给作者」+ 环境信息一键复制）——
+               * ⇒ 一级页这行副标题若不跟着改，用户在这里看到的是旧名，
+               *    点进去却找不到「分享日志」四个字（入口名与页内名不一致）。
+               *
+               * ⚠️ 只改**副标题**，标题「播放与下载」一个字不动 ——
+               *    `test/task18_entry_test.dart` 把「一级页恰好一个
+               *    『播放与下载』入口」钉成断言，不能新增同名入口。
+               */
+              subtitle: '片段下载并发 · 缓存上限 · 日志与反馈',
               onTap: () => _openSubPage(const PlaybackSettingsPage()),
             ),
             // ★ task-18 ①②：触摸手势的第二个入口（完整版）。
@@ -2325,6 +2386,39 @@ class SettingsPageState extends State<SettingsPage> {
   List<ProviderManifest> get _liveSources =>
       _providers.where((p) => p.capabilities.live).toList(growable: false);
 
+  /// 「JS 插件」tab 该列哪些源 —— **排除**直播源（Owner 2026-10-09）
+  ///
+  /// # Owner 原话
+  /// ```text
+  /// > 我在js插件还看到了直播源,这两个要分隔开啊,不要在js插件里面有直播源,
+  /// > 两块分开显示
+  /// ```
+  ///
+  /// # 与 2026-09-28 那次合并的关系（这是**推翻**，不是回归）
+  /// ```text
+  /// 当时 Owner 说「直播源还是跟js源合并吧,毕竟也是插件提供的,开关也方便」
+  /// ⇒ 合并成一块。但现在他发现**合并之后同一个源在两个 tab 都出现**，
+  ///   看不过来 ⇒ 要求按能力拆开。
+  ///
+  /// ★ 两次要求不矛盾：
+  ///   · 2026-09-28 反对的是"**两个独立区块**各画一遍同一批源"（消重）；
+  ///   · 2026-10-09 要求的是"**同一批源按能力分到两个 tab**"（分类）。
+  ///   现在两个 tab 已经存在（`_PluginsTab`），只是 plugins 那个没过滤。
+  /// ```
+  ///
+  /// # 为什么判据复用 `capabilities.live`
+  /// ```text
+  /// 与 `_liveSources` 同一个真源 ⇒ 两个 tab 的并集**恰好**等于全部源，
+  /// 交集为空。不新造第二份判据（那是"两边迟早不一致"的经典来源）。
+  /// ```
+  ///
+  /// ⚠️ 一个源**只声明** live（没有点播能力）时，它只出现在直播源 tab ——
+  ///    那是对的。而既有点播又有直播的源（例如某些聚合源）会**同时**
+  ///    出现在两个 tab：这是有意的 —— 两边都能配置它，
+  ///    但用户在任一个 tab 里都只会看到"这一类里该看到的那些"。
+  List<ProviderManifest> get _nonLiveProviders =>
+      _providers.where((p) => !p.capabilities.live).toList(growable: false);
+
   /// 直播源子序列的换位 —— **纯函数**（不碰 FFI / 不碰状态，可直接单测）
   ///
   /// # 为什么需要它（而不是直接用 `_onReorderProviders`）
@@ -2525,8 +2619,9 @@ class SettingsPageState extends State<SettingsPage> {
                   onToggle: () => _toggleProvider(live[i]),
                   onRemove: _removeOf(live[i]),
                   onEdit: () => _editProvider(live[i]),
-                  pluginFile: _pluginFileOf(live[i].id),
+                  pluginEntry: _pluginOf(live[i].id),
                   onConfig: _configOf(live[i].id),
+                  onCopy: _copy,
                   onPluginUpdate: _pluginSources.containsKey(live[i].id)
                       ? () => _openPluginUpdate(live[i].id, live[i].name)
                       // 同上：TVBox 源走订阅更新弹窗（判据同 `_providers` 那处）
@@ -2546,6 +2641,22 @@ class SettingsPageState extends State<SettingsPage> {
   ///    （同一个 `Theme.of(context).colorScheme`，值一致）。
   Widget _pluginsBlock(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
+    /*
+     * ★★★ 2026-10-09（Owner：「我在js插件还看到了直播源,这两个要分隔开啊」）
+     *
+     * # 这一份列表**不含**直播源
+     * ```text
+     * 判据与「直播源」tab 同一个真源（`capabilities.live`）⇒
+     * 两个 tab 的并集 = 全部源、交集 = 空。
+     * 详见 `_nonLiveProviders` 的文档（含为什么这是"推翻 09-28 的合并"
+     * 而不是回归）。
+     * ```
+     *
+     * ⚠️ 排序仍然作用于**全局** `_providers`（三条排序路径都没变）——
+     *    只是这里**画**的是子集。若改成对子集排序，
+     *    非直播源与直播源之间的相对顺序会被打乱（那是另一个 bug）。
+     */
+    final list = _nonLiveProviders;
     /*
      * ⚠️ 下面这段（102 行）是**原区块的设计说明** —— ⑤ 搬迁时
      *    差点把它连同注释一起删掉。它解释的是"这块为什么长这样"：
@@ -2610,7 +2721,8 @@ class SettingsPageState extends State<SettingsPage> {
      * · 「配置」按钮（plugin_config_get 的唯一界面入口）
      *       → `_ProviderCard.onConfig`
      * · 插件文件名（`154.js` 这种，用户靠它对上磁盘上的文件）
-     *       → `_ProviderCard.pluginFile`，拼进描述行
+     *       → `_ProviderCard.pluginEntry.file`，拼进描述行
+     *       （★ task-5 起改传整条 `PluginEntry`，见该字段的注释）
      * ```
      * 加载失败的插件仍**单独列出**（`_plugins.failed` +
      * `_plugins.plugins` 里 `loaded == false` 的）—— 不静默。
@@ -2749,6 +2861,20 @@ class SettingsPageState extends State<SettingsPage> {
                 onPressed: _sweeping ? null : _healthSweep,
                 icon: const Icon(Icons.monitor_heart_outlined, size: 16),
                 label: Text(_sweeping ? '检测中…' : '健康检测'),
+              ),
+              /*
+               * ★★★ 2026-10-09：插件**实测速率**入口（Owner：「js插件那里做一个探测功能,
+               *     强制的啊,就是看哪个视频网站速度快,然后这个测速的记录要持久化」）
+               *
+               * ⚠️ 这里的「速度」是**真实下载速率（MB/s）**，不是 ping 延迟 ——
+               *    Owner 专门澄清过（「随机挑一部影片实测速率有多少」）。
+               *    实现见 `widgets/plugin_speedtest.dart`（随机抽片 → 真下载 → 计时）。
+               */
+              PluginSpeedTestAllButton(
+                pluginIds: list
+                    .where((p) => p.enabled)
+                    .map((p) => p.id)
+                    .toList(growable: false),
               ),
               OutlinedButton.icon(
                 onPressed: _openImportDialog,
@@ -2936,16 +3062,17 @@ class SettingsPageState extends State<SettingsPage> {
          * **不再有第二份** `_PluginTile` 列表。
          */
         ReorderableCardGrid(
-          itemCount: _providers.length,
+          // ★ 只画非直播源（见本方法开头的说明）
+          itemCount: list.length,
           dragSlotWidth: _dragSlotW,
           // ★ TV 用更宽的列下限 —— 理由同上（live 列表那处有完整说明）。
           minItemWidth: Device.isTv ? 440 : kMinCardWidth,
           onReorder: _onReorderProviders,
           itemBuilder: (context, i, dragHandle, cellWidth) => Padding(
-            key: ValueKey(_providers[i].id),
+            key: ValueKey(list[i].id),
             padding: EdgeInsets.zero,
             child: _ProviderCard(
-              provider: _providers[i],
+              provider: list[i],
               /*
                * ★ 本格宽度由网格传进来（`ReorderableCardGrid` 算的列数
                * 本来就是按它分的）。卡片用它决定按钮横排还是换行。
@@ -2970,12 +3097,12 @@ class SettingsPageState extends State<SettingsPage> {
                *    置灰则整列按钮**竖直对齐**，好点也好认。
                */
               canMoveUp: i > 0,
-              canMoveDown: i < _providers.length - 1,
-              onMoveUp: () => _moveProviderBy(_providers[i].id, -1),
-              onMoveDown: () => _moveProviderBy(_providers[i].id, 1),
-              onToggle: () => _toggleProvider(_providers[i]),
-              onRemove: _removeOf(_providers[i]),
-              onEdit: () => _editProvider(_providers[i]),
+              canMoveDown: i < list.length - 1,
+              onMoveUp: () => _moveProviderBy(list[i].id, -1),
+              onMoveDown: () => _moveProviderBy(list[i].id, 1),
+              onToggle: () => _toggleProvider(list[i]),
+              onRemove: _removeOf(list[i]),
+              onEdit: () => _editProvider(list[i]),
               /*
                * ★★ 合并后从原 `_PluginTile` **并过来**的两样
                *
@@ -2992,8 +3119,11 @@ class SettingsPageState extends State<SettingsPage> {
                * 文件，两个都传 null → 卡片上不画「配置」按钮、
                * 描述行也不拼文件名。
                */
-              pluginFile: _pluginFileOf(_providers[i].id),
-              onConfig: _configOf(_providers[i].id),
+              pluginEntry: _pluginOf(list[i].id),
+              onConfig: _configOf(list[i].id),
+              // ★ task-5：标识 chip 可点复制上游链接 —— 复用宿主现成的 `_copy`
+              //（它带「已复制」toast，且 `_toastRev` 让二级页也看得到）
+              onCopy: _copy,
               /*
                * ★★ 只有**有安装链接**的插件才有这个入口（task-23）
                *
@@ -3005,9 +3135,9 @@ class SettingsPageState extends State<SettingsPage> {
                *（没有任何 meta）→ **26 张卡一个都不会有这个按钮**。
                * 这是**正确行为**，不是 bug —— 见字段注释的原则。
                */
-              onPluginUpdate: _pluginSources.containsKey(_providers[i].id)
+              onPluginUpdate: _pluginSources.containsKey(list[i].id)
                   ? () =>
-                        _openPluginUpdate(_providers[i].id, _providers[i].name)
+                        _openPluginUpdate(list[i].id, list[i].name)
                   /*
                    * TVBox 源走**另一个弹窗**（task-14 附加）
                    *
@@ -3021,8 +3151,8 @@ class SettingsPageState extends State<SettingsPage> {
                    * 两处都查不到 => 仍传 `null` => **不画按钮**
                    * （`test/plugin_update_ui_test.dart` 钉住了这个语义）。
                    */
-                  : _tvboxSources.containsKey(_providers[i].id)
-                  ? () => _openTvboxUpdate(_providers[i].id, _providers[i].name)
+                  : _tvboxSources.containsKey(list[i].id)
+                  ? () => _openTvboxUpdate(list[i].id, list[i].name)
                   : null,
             ),
           ),
@@ -3616,9 +3746,10 @@ class _ProviderCard extends StatelessWidget {
     this.canMoveDown = false,
     this.onMoveUp,
     this.onMoveDown,
-    this.pluginFile,
+    this.pluginEntry,
     this.onConfig,
     this.onPluginUpdate,
+    this.onCopy,
   });
 
   final ProviderManifest provider;
@@ -3673,7 +3804,33 @@ class _ProviderCard extends StatelessWidget {
   ///
   /// 拼在**描述行**（`_descLine`）后面，与 `id` 同级 ——
   /// 它俩都是"这个源在磁盘/注册表里叫什么"的标识信息。
-  final String? pluginFile;
+  ///
+  /// # ★ task-5（缺陷 5）：`String? pluginFile` → `PluginEntry? pluginEntry`
+  ///
+  /// Owner 缺陷 5 原文：
+  /// > 你既然已经支持了 tvbox，那么就应该把所有的 tvbox 插件都还原成原本的链接，
+  /// > 而不是现在转换后的插件，**而且要加上标识**，自己平台的插件还是 tvbox 的兼容
+  ///
+  /// 两件事都要卡片显示，而两件事的数据都**只在 `PluginEntry` 上**：
+  /// ```text
+  /// 标识      entry.author    （tvbox-convert / dsh / sourin）
+  /// 上游链接   entry.upstream  （**只**取头部注释里的「上游接口」；2026-10-09 起不再看正文 const API）
+  /// ```
+  /// ⇒ 从"只传文件名"改成"传整条 entry"，三个字段一次带进来。
+  ///
+  /// ⚠️ `null` = 这个源没有对应的插件文件（内置 / 声明式 / HTTP 源，
+  ///    或插件刚被删）→ 描述行不拼文件名、不画标识 chip。
+  final PluginEntry? pluginEntry;
+
+  /// ★ task-5（缺陷 5）：复制文本（上游链接）
+  ///
+  /// 复用**宿主**的 `_copy`（`lib/ui/settings_page.dart:1537`）—— 它已经做了
+  /// `Clipboard.setData` + `_flash('已复制')`，且 `_toastRev` 让**二级页**
+  ///（本卡片所在的「JS 插件」页）也能看到那条 toast（见 `_flash` 的注释）。
+  ///
+  /// ⚠️ `null` = 宿主没提供 → 上游 chip **退化成不可点**（仍显示链接文本，
+  ///    因为"看得见"才是缺陷 5 的主诉求，"能复制"是顺带）。
+  final void Function(String)? onCopy;
 
   /// 「配置」按钮（插件配置项，`plugin_config_get` 的唯一界面入口）
   ///
@@ -3935,6 +4092,22 @@ class _ProviderCard extends StatelessWidget {
                               const SizedBox(height: 3),
                               _descLine(colors),
                               /*
+                       * ★ task-5（缺陷 5）：来源标识 + 上游链接
+                       *
+                       * ⚠️ 单独一行、**不动描述行** —— 描述行是本卡最挤的
+                       *    一行（211px 里要装"描述 · v版本 · 文件名"三样），
+                       *    再往里塞必然把文件名挤没（见 `_descLine` 注释）。
+                       *
+                       * ⚠️ 两样都没有时**整行不画** —— 卡片高度与改动前
+                       *    逐像素相同（内置源里 `cctv` 有 @author 但没链接，
+                       *    只画标识 chip；只有"连作者都没写"的源才完全不画）。
+                       */
+                              if (_sourceLabel != null ||
+                                  _upstream.isNotEmpty) ...[
+                                const SizedBox(height: 4),
+                                _sourceLine(colors),
+                              ],
+                              /*
                        * ⚠️ `Capabilities` **没有** `hasAny` 之类的聚合 getter
                        *    （只有 8 个 bool 字段）—— 而 `models.dart` 不在
                        *    我这次允许改动的文件范围内，所以在这里本地算。
@@ -3975,6 +4148,25 @@ class _ProviderCard extends StatelessWidget {
                   ],
                 );
               },
+            ),
+
+            /*
+             * ★★★ 2026-10-09：插件测速面板（Owner：「js插件…做一个探测功能…
+             *     看哪个视频网站速度快，测速记录要持久化」）
+             *
+             * 位置：**源名同列**、且在代理/登录之上 ——
+             * ```text
+             * 测速结果是"这个源快不快"的属性，与源名/能力徽章同类；
+             * 而代理/登录是"怎么连这个源"的配置 ⇒ 前者在上更顺。
+             * ```
+             * ⚠️ 面板自带 `Padding(top: Sp.x1)`，宽版卡片布局逐像素不变。
+             *    卡片正文只有 ~211px，面板内部已用 Expanded + ellipsis 防溢出
+             *    （speed-dev 实测三个状态 overflow = 0）。
+             */
+            PluginSpeedTestPanel(
+              providerId: provider.id,
+              providerName: provider.name,
+              enabled: provider.enabled,
             ),
 
             // ── 源信息正下方：代理配置 + 账号登录（与源信息同一块，不再分隔）──
@@ -4226,7 +4418,8 @@ class _ProviderCard extends StatelessWidget {
     final parts = <String>[
       (d == null || d.isEmpty) ? provider.id : d,
       if (provider.version.isNotEmpty) 'v${provider.version}',
-      if (pluginFile != null && pluginFile!.isNotEmpty) pluginFile!,
+      if (pluginEntry != null && pluginEntry!.file.isNotEmpty)
+        pluginEntry!.file,
     ];
     return Text(
       parts.join(' · '),
@@ -4236,6 +4429,115 @@ class _ProviderCard extends StatelessWidget {
         fontSize: FontSizes.cap,
         color: colors.onSurfaceVariant,
         height: 1.4,
+      ),
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  //  ★ task-5（缺陷 5）：来源标识 + 上游链接
+  // ═══════════════════════════════════════════════════════════════════
+
+  /// 上游接口地址（没有则空串）
+  String get _upstream => pluginEntry?.upstream ?? '';
+
+  /// 来源标识文案 —— `null` = **不显示**（源码里没写 `@author`，不猜）
+  ///
+  /// Owner 缺陷 5 原文：
+  /// > ……而且要加上标识，**自己平台的插件**还是 **tvbox 的兼容**
+  ///
+  /// # 判据为什么是 `@author` 而不是 `kind`
+  ///
+  /// ```text
+  /// kind  == 'js'            TVBox **插件**转换来的源
+  ///                           和手写 JS 插件（内置 cctv.js / emby.js）
+  ///                           **完全无法区分** ⇒ kind 做不到这件事
+  /// @author == 'tvbox-convert'  ★ 转换器生成的（本机 22 个全是它）
+  /// @author == 'dsh'            ★ 内置源模板（本机 6 个，从原版继承的名字）
+  /// @author == 'sourin'         ★ 新增的 emby 模板（仓库 plugins/emby.js）
+  /// ```
+  ///
+  /// ⚠️ `dsh` 与 `sourin` **都是"自己平台"** —— 前者是本项目从原版继承的
+  ///    作者名（26 个内置源模板全用它），后者是新插件的品牌名。
+  ///    只认 `dsh` 会让 emby 插件显示成"第三方"，那是错的。
+  ///
+  /// ⚠️ 其它非空作者 → 「第三方」：源码里**真的**有第三方名字，
+  ///    显示"第三方"是如实描述，不是猜的。
+  String? get _sourceLabel {
+    final a = pluginEntry?.author ?? '';
+    if (a.isEmpty) return null;
+    if (a == 'tvbox-convert') return 'TVBox 兼容';
+    if (a == 'dsh' || a == 'sourin') return '源影自研';
+    return '第三方';
+  }
+
+  /// 来源行：`[标识 chip] [上游链接]` —— 两样都可缺，都不缺才是满配
+  ///
+  /// ⚠️ 复用 `_MiniChip` 的既有形态（**不新造控件、不加 tone**）——
+  ///    `test/provider_layout_test.dart:145` 钉住了 `_ChipTone` 的四个取值，
+  ///    加 tone 会动到那份契约。`brand`（primary 13% 底）在描述行的
+  ///    灰字里一眼可辨，且描述行**本来就允许省略**（与名称行的纪律不同）。
+  ///
+  /// ⚠️ 链接那一半用 `Expanded` 吃掉剩余宽度 —— 211px 里 chip 占约 76px
+  ///    （「TVBox 兼容」5 个全角字符 + 左右各 8px 内边距），剩下约 130px
+  ///    给链接，超出的部分由 `_upstreamLink` 自己 ellipsis，**不溢出**。
+  Widget _sourceLine(ColorScheme colors) {
+    final label = _sourceLabel;
+    return Row(
+      children: [
+        if (label != null) _MiniChip(text: label, tone: _ChipTone.brand),
+        if (label != null && _upstream.isNotEmpty)
+          const SizedBox(width: Sp.x2),
+        if (_upstream.isNotEmpty) Expanded(child: _upstreamLink(colors)),
+      ],
+    );
+  }
+
+  /// 上游链接 —— 文字可省略，但**链接本体始终完整**（Tooltip + 点击复制）
+  ///
+  /// # 为什么必须有 Tooltip / 可复制（缺陷 5 的诉求落点）
+  ///
+  /// > 就应该把所有的 tvbox 插件都**还原成原本的链接**
+  ///
+  /// 卡片只有 211px 正文宽（4 列 / 299px 格，见 `_nameRow` 的宽度预算），
+  /// 而真实接口长这样：
+  /// ```text
+  /// http://caiji.dyttzyapi.com/api.php/provide/vod/from/dyttm3u8/at/m3u8   （59 字符）
+  /// ```
+  /// ⇒ **物理上不可能**在卡片里显示全。于是：
+  /// ```text
+  /// 看得见   文字（可省略）—— 一眼知道"这个源的上游是哪个站"
+  /// 拿得到   Tooltip 悬停看全文 / 点击复制到剪贴板 —— 一个字节都不丢
+  /// ```
+  /// ⚠️ 没有 `onCopy` 时退化成**纯文本**（不画链接图标、不可点）——
+  ///    绝不画一个点了没反应的图标。
+  Widget _upstreamLink(ColorScheme colors) {
+    final text = Text(
+      _upstream,
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: TextStyle(
+        fontSize: FontSizes.cap,
+        color: colors.primary,
+        height: 1.4,
+      ),
+    );
+    if (onCopy == null) return text;
+    return Tooltip(
+      message: '上游接口\n$_upstream\n\n点击复制',
+      child: GestureDetector(
+        onTap: () => onCopy!(_upstream),
+        child: MouseRegion(
+          cursor: SystemMouseCursors.click,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // 图标已在本文件用过（`:5377`）—— 不引入新图标
+              Icon(Icons.link, size: 14, color: colors.primary),
+              const SizedBox(width: 3),
+              Flexible(child: text),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -4863,18 +5165,48 @@ class _RemotePanel extends StatelessWidget {
         ),
 
         const SizedBox(height: Sp.x4),
+        /*
+         * ★★★ 图标换成**包自带的标准字形**（Owner 二批第 4 条）
+         *
+         * # Owner 原话
+         * ```text
+         * > 关闭遥控 设固定码 icon,不好看,换一个正规一点的,不要你自己绘制
+         * ```
+         *
+         * # 原先两个错在哪
+         * ```text
+         * · 「设固定码」用的 `Icons.pin_outlined` 是**图钉**（地图打点那种）
+         *   —— 与「固定**码**」没有任何关系，字形本身也不对称，看着别扭。
+         * · 「关闭遥控」用的 `Icons.stop` 是**实心方块**，夹在一排
+         *   `OutlinedButton`（线性描边）里，粗细语言不一致 ⇒ 更显得
+         *   "不好看"。Owner 点名的是前一个，这个顺带一起对齐。
+         * ```
+         *
+         * # 为什么选这两个
+         * ```text
+         * · `Icons.password` —— Material 自带的「密码」字形（钥匙 + 圆点），
+         *   语义就是「一串要手输的码」，与「设固定码 / 改固定码」逐字对上。
+         * · `Icons.link_off` —— 断开的链环，标准「断开连接」字形，
+         *   与「关闭遥控」逐字对上，且是**描边**风格，和 OutlinedButton 同族。
+         * ```
+         *
+         * ⚠️ 两者都来自 `material_ui` 包（`fontFamily: 'MaterialIcons'`），
+         *    **没有一个字节是自绘的** —— 正是 Owner 要的「正规一点」。
+         * ⚠️ 尺寸仍保持 `size: 16`，与 `OutlinedButton` 的 16px 内边距配套；
+         *    调大会把按钮撑高、与左边一排按钮不齐。
+         */
         Wrap(
           spacing: Sp.x2,
           runSpacing: Sp.x2,
           children: [
             OutlinedButton.icon(
               onPressed: busy ? null : onStop,
-              icon: const Icon(Icons.stop, size: 16),
+              icon: const Icon(Icons.link_off, size: 16),
               label: const Text('关闭遥控'),
             ),
             OutlinedButton.icon(
               onPressed: onSetFixedPin,
-              icon: const Icon(Icons.pin_outlined, size: 16),
+              icon: const Icon(Icons.password, size: 16),
               label: Text(status.fixedPin == null ? '设固定码' : '改固定码'),
             ),
           ],

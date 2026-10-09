@@ -322,8 +322,18 @@ void main() {
 
     test('★ 每张卡有 ValueKey(id) —— 重排要靠它认条目', () {
       final block = mergedBlock();
+      /*
+       * ★★★ 2026-10-09 修正（Owner：「不要在js插件里面有直播源,两块分开显示」）
+       *
+       * 断言从 `_providers[i]` 改成 `list[i]` —— 那个 `list` 是
+       * `_nonLiveProviders`（直播源被分到另一个 tab）。
+       *
+       * ⚠️ **契约本身一个字没变**：仍然是"每张卡一个 ValueKey(源id)"，
+       *    只是遍历的那个列表变成了不含直播源的子集。
+       *    这里断言的是"有 Key"，不是"变量叫什么"。
+       */
       expect(
-        block.contains('key: ValueKey(_providers[i].id)'),
+        block.contains('key: ValueKey(list[i].id)'),
         isTrue,
         reason: '★ 没有 Key 会把"移动"当成"整块重建"，拖动动画会跳',
       );
@@ -391,12 +401,26 @@ void main() {
 
     test('★ 调用点正确传边界（第一张不能上移、最后一张不能下移）', () {
       final block = mergedBlock();
+      /*
+       * ★★★ 2026-10-09 修正（Owner：直播源要与 JS 插件分开显示）
+       *
+       * 边界现在按 `list`（= 本 tab 画的那批）算，而不是全局 `_providers`：
+       * ```text
+       * 改前：canMoveDown = i < _providers.length - 1
+       * 改后：canMoveDown = i < list.length - 1
+       * ```
+       * ⚠️ 这不是"顺手改的"：若仍按全局长度算，**本 tab 的最后一张卡**
+       *    会显示成"还能下移"（因为全局还有直播源在它后面）——
+       *    点了却没反应（它已经在本 tab 末尾），用户读作"按钮坏了"。
+       *
+       * 契约（第一张不能上移、最后一张不能下移）**完全没变**。
+       */
       expect(block.contains('canMoveUp: i > 0'), isTrue,
           reason: '★ 第一张（i=0）不能上移');
       expect(
-        block.contains('canMoveDown: i < _providers.length - 1'),
+        block.contains('canMoveDown: i < list.length - 1'),
         isTrue,
-        reason: '★ 最后一张不能下移',
+        reason: '★ 最后一张不能下移（按**本 tab 的**长度算，不是全局）',
       );
     });
   });

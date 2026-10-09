@@ -676,7 +676,8 @@ flutter build macos --release -t lib/shell.dart
 
 > **配套仓库**：[sourin-app/sourin-plugins](https://github.com/sourin-app/sourin-plugins) ——
 > 作者自用的源、完整的插件 API 契约（`docs/API.md`）与可运行示例（`examples/demo.js`）。
-> 本节的契约以**那个仓库的 `docs/API.md`** 为最新准；它是私有仓库，需要访问权限。
+> 本节的契约以**那个仓库的 `docs/API.md`** 为最新准。
+> 那个仓库是**公开仓库**（无需任何权限即可访问与克隆）。
 
 ### 最小插件
 

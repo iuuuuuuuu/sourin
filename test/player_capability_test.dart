@@ -930,8 +930,32 @@ void real() {}
       final i = page.indexOf('void _loadPlayPrefs() {');
       expect(i, greaterThan(0));
       final body = page.substring(i, i + 1600);
-      expect(body.contains('_player.setVolume(_lastVolume * 100)'), isTrue,
-          reason: '★ 起播前就要套用音量');
+      /*
+       * ★★ 2026-10-09 改口径（task-1 缺陷 1/11 的**必要**连带）
+       *
+       * # 为什么原来那句字面量没了
+       * ```text
+       * 改前：`_loadPlayPrefs()` 直接 `_player.setVolume(_lastVolume * 100)`。
+       * 缺陷 1（静音后仍有声音）/ 11（静音按钮二次点击）的根因正是
+       * 「音量下发散落在多处、没有统一出口」——修法是把下发收敛成
+       * 唯一出口 `_sendVolume()`（player_page.dart:1542），它同时做探针打点
+       * 与静音状态机。于是这里变成 `_sendVolume(_lastVolume * 100)`。
+       * ⇒ 断言旧字面量会**假红**：`_sendVolume` 生产分支逐字等价于
+       *    `_player.setVolume(v)`（见那里的 `_probeNoAudio` 注释，生产恒 false）。
+       * ```
+       *
+       * ★ 判据的**实质没变**：起播前必须把音量套上去。而且这里**加严**了 ——
+       *   不但要求 `_loadPlayPrefs` 走唯一出口，还要求那个出口在生产分支上
+       *   确实是 `_player.setVolume` 的纯转发（否则「套用音量」是空转）。
+       */
+      expect(body.contains('_sendVolume(_lastVolume * 100)'), isTrue,
+          reason: '★ 起播前就要套用音量（走唯一出口 `_sendVolume`）');
+      final si = page.indexOf('void _sendVolume(double v) {');
+      expect(si, greaterThan(0), reason: '★ 音量唯一出口 `_sendVolume` 不见了');
+      final sendBody = page.substring(si, si + 400);
+      expect(sendBody.contains('_player.setVolume(v)'), isTrue,
+          reason: '★★ `_sendVolume` 必须在生产分支上真的下发到播放器 ——'
+              '只打点不下发的话「起播前套用音量」就是空转');
     });
 
     test('★ 静音时**不**记音量（原版 `if (v && !v.muted)`）', () {

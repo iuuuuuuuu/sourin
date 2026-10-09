@@ -847,7 +847,25 @@ class _ResultGroup extends StatelessWidget {
                 Text(
                   group.name,
                   style: TextStyle(
-                    fontSize: FontSizes.base,
+                    /*
+                     * ★★★ 2026-10-09（Owner 第 12 条「文字大小/粗细不一致」）
+                     *     这里原本是 `FontSizes.base`(16)，已统一为 `lg`(20)。
+                     * ```text
+                     * 判据（同语义同刻度，不是审美偏好）：
+                     *   本行与本页 home 首页的 rail 标题（home_page.dart:1069）
+                     *   是**同一个视觉角色**——「一屏里可重复出现的区块标题」，
+                     *   且两处除字号外的三个属性**逐项相同**：
+                     *     home_page.dart:1069  lg + w600 + colors.onSurface
+                     *     search_page.dart:850  base + w600 + colors.onSurface
+                     *   ⇒ 只有字号漂移过，属于需要修的「不一致」。
+                     *   同类区块标题（设置页:2439 / 我的片库 / 快捷键 / 字幕面板）
+                     *   全体都是 lg ⇒ 这一处是唯一的例外。
+                     * ```
+                     * ⚠️ 这是**已裁决的统一**（lead 已独立核实两处源码），
+                     *    不要因为「搜索页字小一点更紧凑」再把它改回 base ——
+                     *    那会让同角色刻度再次分裂。
+                     */
+                    fontSize: FontSizes.lg,
                     fontWeight: FontWeight.w600,
                     color: colors.onSurface,
                   ),

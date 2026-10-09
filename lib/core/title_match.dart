@@ -78,6 +78,67 @@ double titleSimilarity(String a, String b) {
   return union == 0 ? 0 : inter / union;
 }
 
+/// 候选标题**覆盖**了多少查询词（0~1）—— 非对称度量
+///
+/// # 与 [titleSimilarity] 的区别（这是关键，别混用）
+///
+/// ```text
+/// titleSimilarity = |A∩B| / |A∪B|   ← 对称（Jaccard），并集含**两边**的长度
+/// titleCoverage   = |A∩B| / |A|     ← 非对称，只除**查询**的长度
+/// ```
+///
+/// # 为什么需要它（实测踩到的坑）
+/// ```text
+/// 在 B 站搜索结果里挑"最像的那条"时，用 Jaccard 会**系统性偏低**：
+/// 候选标题很长（栏目名/画质/集数/字幕组），把并集撑大 ⇒ 分数被压低。
+///
+/// 实测（查询「无职转生 第三季」）：
+///   正片『无职转生 第三季 到了异世界就拿出真本事』全14话
+///     Jaccard 0.286   ← 低于任何合理阈值，**正片被判成不匹配**
+///     Coverage 1.000  ← 正确
+///   OP「【编曲向】旅人の唄 - 无职转生 OP」
+///     Jaccard 0.200
+///     Coverage 0.500  ← 正确（只覆盖一半，且不是正片）
+/// ```
+///
+/// # 什么时候用哪个
+/// ```text
+/// · 比较**两个标题像不像**（换源弹层、搜索排序）⇒ titleSimilarity
+///   那里两边都是"作品的标题"，长度量级相当，对称是合理的。
+/// · 「这个候选是不是我要找的那部」⇒ titleCoverage
+///   这里候选是**网页标题**（天然更长），只该问"它含不含我要的词"。
+/// ```
+///
+/// ⚠️ 大的一侧是**查询**时才用这个函数 —— 若查询比候选长很多，
+///    coverage 会偏低（那是"候选覆盖不了查询"，语义上正确）。
+double titleCoverage(String query, String candidate) {
+  String norm(String s) =>
+      s.replaceAll(RegExp(r'[\s\p{P}\p{S}]+', unicode: true), '').toLowerCase();
+  final a = norm(query);
+  final b = norm(candidate);
+  if (a.isEmpty || b.isEmpty) return 0;
+  if (a == b) return 1;
+
+  Set<String> grams(String s) {
+    final out = <String>{};
+    if (s.length == 1) out.add(s);
+    for (var i = 0; i + 1 < s.length; i++) {
+      out.add(s.substring(i, i + 2));
+    }
+    return out;
+  }
+
+  final ga = grams(a);
+  final gb = grams(b);
+  if (ga.isEmpty) return 0;
+  var inter = 0;
+  for (final g in ga) {
+    if (gb.contains(g)) inter++;
+  }
+  // ★ 分母是**查询**的词数（不是并集）—— 这就是"覆盖"的含义
+  return inter / ga.length;
+}
+
 /// 一组结果里**最像**的那条的相似度 —— 用整组的代表分
 ///
 /// # 为什么用 max 而不是平均

@@ -513,9 +513,59 @@ globalThis.plugin = {
     const available = episodes.length
     const completed = data.completed === true
 
+    /*
+     * ★★★ 2026-10-09（Owner 第三批 ①）：已完结却标「正在更新」
+     *
+     * Owner 原话：
+     * > 次元城这个明明是已完结,但是这里还是标示 正在更新
+     * （截图副标题「更新至 14 集」，角标「更新至 14 集 / 8 分 / 14 集」）
+     *
+     * # 真网络取证（.probe/cycani_auth_probe.cjs，登录态，2026-10-09）
+     * ```text
+     * id=3862「无职转生 第三季」  total=14 available=14 completed=false  => 更新至 14 集  ← 用户看到的现象
+     * id=1013「小书痴的下克上」  total=14 available=14 completed=true   => 全 14 集
+     * id=242 「CLANNAD AS」     total=24 available=25 completed=true   => 全 24 集
+     * ```
+     * ⇒ 接口的 `completed` **本身是可靠的**（抽样 32 条里 30 条给了 true，
+     *   且 true/false 与 remarks 是否为空一致）。问题出在**判据只看它一个**：
+     * ```text
+     * 3862 是**当季在播**（weekday=7，2026 年 10 月）且 `total` 是**预先声明的全季集数**，
+     * 而源站已把 14 集**全部**放出来了。此时 declared(14) === available(14)
+     * 却因为还在播 ⇒ 站方不会把 completed 置 true。
+     * 旧判据落到最后一支 `available > 0` ⇒ 「更新至 14 集」——
+     * 但既然 14 集全都在了，对用户而言**这一季就是齐的**。
+     * ```
+     *
+     * # 两级判定（completed 优先，自洽信号兜底）
+     * ```text
+     * ① completed === true            ⇒ 一定完结（站方权威）
+     * ② declared > 0 && available >= declared ⇒ **自洽推断**完结
+     *    （「声明的集数都已经拿到了」——这不依赖站方是否更新 completed 字段）
+     * ```
+     * ⚠️ `available >= declared` 而不是 `===`：实测 id=242 的 available(25)
+     *    比 declared(24) 还多（多了 OVA），用 `===` 会漏判。
+     */
+    const selfConsistentComplete = declared > 0 && available >= declared
+    const isComplete = completed || selfConsistentComplete
+
+    /*
+     * ⚠️ 两个信号结论不同时必须**留下日志**（task-10 明确要求「不要静默改」）
+     *
+     * 为什么：下次接口又变时（字段改名 / 不再给 total / completed 语义漂移），
+     * 只看最终角标是看不出**是哪个信号变了**的。把两个读数都印出来，
+     * 一眼就能定位。级别用 debug —— 它只在排查时开。
+     */
+    if (completed !== selfConsistentComplete) {
+      host.log.debug(
+        `[cycani] ${id} 完结判据不一致：completed=${completed} ` +
+          `declared=${declared} available=${available} ` +
+          `=> 采用 ${isComplete ? '完结' : '连载'}（自洽信号${selfConsistentComplete ? '成立' : '不成立'}）`,
+      )
+    }
+
     const badges = []
     if (declared > 0) {
-      if (completed) {
+      if (isComplete) {
         badges.push(`全 ${declared} 集`)
       } else if (available > 0 && available !== declared) {
         badges.push(`更新至 ${available} 集（预定 ${declared} 集）`)

@@ -475,6 +475,7 @@ function parseM3u(text) {
   return out
 }
 
+
 /** 从 #EXTINF 行里取 `key="value"` */
 function pick(line, key) {
   const m = line.match(new RegExp(key + '="([^"]*)"'))
@@ -703,6 +704,51 @@ globalThis.plugin = {
         kind: 'hls',
         // ★ v1.1.0：线路标签也用中文分组（与 liveChannels 一致）
         label: displayGroup(c),
+        /*
+         * ★★★ 缺陷 5（Owner 第 5 条）：这里**必须**回到「原始链接 + tag」。
+         *
+         * # Owner 原话
+         * ```text
+         * > tvbox 插件恢复为原始链接 + tag（自有平台 vs tvbox 兼容）
+         * ```
+         *
+         * # 错在哪（改前长什么样）
+         * ```text
+         * 改前这一行是：label: displayGroup(c)
+         * ⇒ 返回 [{url, kind: hls, label: 综合}]
+         * ⇒ 只剩一个网址 + 一个中文分组词，tag 整条丢了。
+         * ```
+         *
+         * # 为什么这回必须显式带上 tag（实测而不是推测）
+         * ```text
+         * parseM3u() 早在 :462-467 把 tvg-id / tvg-logo / group-title 三段 tag
+         * 都解析进 c 了；loadChannels() :603-626 也都存进列表了。
+         * ★ 可 liveStream() 一个都没往外带 ⇒ 从插件边界往客户端看，
+         *   「原始链接」在，tag 却**不可达**：客户端只能拿到中文分组词，
+         *   拿不到 tvg-id / 台标 / 英文原始分组。
+         * ⇒ 缺陷不是解析漏了，而是**出口丢了**；修法就是让它离开边界时带上
+         *   证据，而不是只带一个被本地化成中文的 label。
+         * ```
+         *
+         * # 为什么是「原始链接」
+         * ```text
+         * c.url 是 m3u 里的原样地址（我们**不改写、不代理、不拼参数**，
+         * 见上面 v1.1.0 那条 Referer/UA 注释）。
+         * ⇒ 自有平台照旧 kind:hls 直接放；
+         *   TVBox 兼容层也拿得到未改写的地址 + tag 去匹配自己的线路规则。
+         * ```
+         *
+         * ⚠️ 保留 label（而不是删掉它）：label 是这一路的**中文显示名**。
+         *    它缺失会让底栏/线路列表显示成空白；tag 是**机器可读**的另一面。
+         *    两者不冲突，一个给人看，一个给兼容层看。
+         */
+        tags: {
+          // ★ 原始 tvg-id（带 @SD/@HD 后缀，**未剥**）—— TVBox 的白名单匹配就用它
+          'tvg-id': c.tvgId || '',
+          // ★ 原始英文分组（**未中文化**）—— displayGroup() 会把它变成中文，这里留原文
+          'group-title': c.group || '',
+          'tvg-logo': c.logo || '',
+        },
         /*
          * ⚠️ 不加 Referer/UA —— 这些公共源**不是**靠防盗链的，
          *    加了反而可能被某些 CDN 拒（实测 38.75.136.137 那批

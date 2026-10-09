@@ -63,12 +63,24 @@ import 'dart:async';
 import 'package:material_ui/material_ui.dart';
 import 'package:window_manager/window_manager.dart';
 
+// ★ task-11 ②：右侧下载面板的数据源与组件
+import '../core/app_log.dart' show AppLog;
+import '../core/download_queue.dart' show DownloadQueue, DownloadTask;
 import '../core/models.dart' show Episode, MediaDetail;
 import '../core/sourin_api.dart' show SourinApi;
+// ★ task-12 缺陷 A：右侧按**磁盘状态**判（扫盘结果 + 本地会话组织）
+import 'cache_page.dart'
+    show
+        CachedEpisode,
+        CachedWork,
+        buildLocalPlayRequest,
+        canonicalLocalPath,
+        scanCacheWorksAtRoot;
 import 'detail_page.dart';
 import 'media_session.dart';
 import 'player_page.dart';
 import 'tokens.dart';
+import 'widgets/download_panel.dart';
 import 'widgets/window_frame.dart' show isWindowFullscreen;
 
 /// 合并页 —— 上播放器 + 下详情
@@ -86,6 +98,34 @@ class MediaPage extends StatefulWidget {
     this.episodeIndex,
     this.isTv = false,
     this.isTouchOnly = false,
+    /*
+     * ★★★ task-12 ④（2026-10-09）：本地文件路径（绝对路径）。
+     *
+     * null = 走原来的网络解析 —— **逐字节不变**（所有既有构造点都不用改）。
+     * 非 null = 转发给 `PlayerPage.localPath`，由它 `initState` 短路成 file:// 起播。
+     *
+     * # 为什么必须**也**加在这一层（lead 勘察出的链条断点）
+     * ```text
+     * 调用链：shell._openCachedWork -> MediaPage(...) -> :874 构造 PlayerPage(...)
+     * PlayerPage 是**本页造的**，不是 shell 造的。
+     * 只给 PlayerPage 加参数而本页不转发 => 恒为 null => 短路永不触发。
+     * ```
+     *
+     * # 为什么不改成「shell 直接 push PlayerPage」绕开本页（三条硬理由）
+     * ```text
+     * ① 会丢合并页：本页是「上播放器 + 下详情」（task-58 Owner 裁决），
+     *    而 Owner 明说本地播放「点击进去也还是播放页，右侧变成下载/已下载」
+     *    => 直连会让本地播放没有右侧面板，还把 task-11 的下载面板一起废掉；
+     * ② 会丢 isTouchOnly（:886 透传，t456 守卫钉着「每个 MediaPage 构造点必须显式传」）
+     *    —— 另开一条 PlayerPage 直连路径 = 多一个漏传点；
+     * ③ 会丢 hasRightDetailBar（:888）与 _playerKey（:875）——
+     *    全屏/详情收起那套逻辑都在本页。
+     * ```
+     *
+     * ⚠️ 本页被「我的 / 详情页 / 已缓存页」三个入口共用 ⇒
+     *    这次改动**只是纯新增一个可选参数 + 一行透传**，不碰任何既有字段与逻辑。
+     */
+    this.localPath,
   });
 
   final String provider;
@@ -99,6 +139,11 @@ class MediaPage extends StatefulWidget {
   final int? episodeIndex;
   final bool isTv;
   final bool isTouchOnly;
+
+  /// ★ task-12 ④：本地文件绝对路径（见构造参数处的完整说明）
+  ///
+  /// ⚠️ 与 `isTouchOnly` 一样是**可选**的 —— 不传即 null，三处入口行为完全不变。
+  final String? localPath;
 
   @override
   State<MediaPage> createState() => _MediaPageState();
@@ -180,6 +225,17 @@ class _MediaPageState extends State<MediaPage> with WindowListener {
      *    在 `initState` 里直接读会拿到 null（子节点还没 build）。
      */
     WidgetsBinding.instance.addPostFrameCallback((_) => _bindPlayerCallbacks());
+    /*
+     * ★★★ task-12 缺陷 A：**进来就扫一次下载目录**。
+     * ```text
+     * 右侧面板要在「重启后内存队列已空」的情况下仍能列出磁盘上已下好的集
+     * ⇒ 数据源必须是磁盘，不能是队列。
+     * ⚠️ 扫盘是真 IO（几毫秒~几十毫秒）⇒ 用 unawaited 异步做，
+     *    完成后再 setState；**绝不能**放进 build。
+     *    扫完前 _diskWorks 仍是 null ⇒ 右侧先按老逻辑（详情页），扫到后自动切。
+     * ```
+     */
+    unawaited(_scanDiskWorks());
   }
 
   /// 把"全屏变化"回调注册到播放器上（幂等）
@@ -437,6 +493,46 @@ class _MediaPageState extends State<MediaPage> with WindowListener {
   /// 见 `media_session.dart` 的 `MediaSession` 文档：重建 = 新 State =
   /// 重建播放器 ⇒ 黑屏 + 丢进度。这里走的正是"对同一个 State 下命令"。
   Future<void> _onDetailPlay(PlayRequestData req) async {
+    /*
+     * ★★★ task-12 缺陷 A/B 接缝：**本地会话下发出的换集请求必须带 localPath**
+     * ```text
+     * 不带的后果（真机必现）：
+     *   点右侧第 2 集 ⇒ req.localPath == null ⇒ applySession 走 _resolveAndPlay
+     *   ⇒ Rust registry.route() 没有 local 这个 provider
+     *   ⇒ 又报「无法路由: local:…」。
+     *
+     * # 三种情况分清楚（ui-dev 点名的那两条区别就在这里）
+     * ① req 自己**已经带了** localPath（右侧面板从磁盘选的第 N 集，
+     *    `_onPlayDownloaded` 里传的是**选中那一集**的绝对路径）⇒ 原样用，
+     *    ★ 绝不能覆盖成 widget.localPath —— 那会让「点第 2 集」回到第 1 集。
+     * ② 没带 + 本页是本地会话（widget.localPath != null）⇒
+     *    详情区的选集走这里 ⇒ 用 widget.localPath。
+     *    ⚠️ 这里只兜「同一部剧内换集」，所以 widget.localPath 是对的。
+     * ③ 没带 + 在线会话 ⇒ 保持 null。
+     *    ★ 硬编码成 widget.localPath 会把**在线作品**误当本地文件播
+     *      （shell.dart:4769-4771 那段警告就是讲这个）。
+     * ```
+     */
+    if (req.localPath == null && widget.localPath != null) {
+      /*
+       * ⚠️ `PlayRequestData` **没有** copyWith，而它归 ui-dev（改动 B）——
+       *    我不去给别人的类加方法 ⇒ 这里**新建**一个（字段逐个搬，不猜）。
+       *    等将来那边加了 copyWith 可以换掉，但功能上完全等价。
+       */
+      req = PlayRequestData(
+        provider: req.provider,
+        id: req.id,
+        title: req.title,
+        cover: req.cover,
+        episodeId: req.episodeId,
+        episodeTitle: req.episodeTitle,
+        sourceCode: req.sourceCode,
+        episodes: req.episodes,
+        episodeIndex: req.episodeIndex,
+        localPath: widget.localPath,
+      );
+    }
+
     final s = _session;
     if (s == null) {
       /*
@@ -635,6 +731,275 @@ class _MediaPageState extends State<MediaPage> with WindowListener {
      *    后者会重新解析流（黑屏 + 丢进度），而这里只是"补列表"。
      */
     _session?.updateEpisodes(d.episodes);
+
+    /*
+     * ★★★ task-11 ②：记下**详情加载回来的真标题** —— 下载面板靠它认「这部剧」。
+     *
+     * 为什么不能直接用 widget.title：
+     * ```text
+     * 首页入口 push 时常常只有 id（title 是占位/空），
+     * 而 DownloadTask.title 是详情页入队时传的**真标题**（detail_page.dart:1419）
+     * ⇒ 两者不相等 ⇒ 面板一条任务都匹配不到 ⇒ 用户点了下载却看不到面板。
+     * ```
+     * ⚠️ setState：_detailTitleForDownloads 参与 build，改了必须重建一次。
+     */
+    if (mounted && _detailTitle != d.title) {
+      setState(() => _detailTitle = d.title);
+    }
+  }
+
+  /// ★★★ task-11 ②：右侧下载面板认的「这部剧」的标题。
+  ///
+  /// # 为什么要单独一个 getter，而不是直接用 widget.title
+  /// ```text
+  /// 下载任务的 `DownloadTask.title` 是**详情页加载后的真标题**
+  /// （detail_page.dart:1419 传的是 `d.title`，来自 MediaDetail），
+  /// 而 `widget.title` 可能是**入口给的占位**（首页 push 时常常只有 id）。
+  /// 两者不相等 ⇒ 面板会一条任务都匹配不到 ⇒ 用户点了下载却看不到面板。
+  /// ⇒ 优先用**详情加载回来的**真标题（_detailTitle），回退到 widget.title。
+  /// ```
+  String? _detailTitle;
+  String get _detailTitleForDownloads => _detailTitle ?? widget.title;
+
+  /*
+   * ══════════════════════════════════════════════════════════════════════
+   * ★★★ task-12 缺陷 A：右侧面板的**第二份数据源** —— 磁盘扫盘
+   * ══════════════════════════════════════════════════════════════════════
+   *
+   * # Owner 真机截图暴露的必现缺陷
+   * ```text
+   * 真实下载的《无职转生 第三季》第01集（798 MB）在播，顶栏显示 local，右侧一片：
+   *   SourinCoreException(other):
+   *     无法路由: local:c:/users/.../无职转生.../第01集 第01集.mp4
+   * ```
+   *
+   * # 三段根因（行号已核）
+   * ```text
+   * ① media_page.dart:987-999 右侧按**内存队列**判：
+   *      valueListenable: DownloadQueue.tasks   ← 重启就空
+   *      if (mine.isEmpty) return detail;       ← 队列空 ⇒ 退回 DetailPage
+   * ② media_page.dart:937-940 DetailPage 拿 (local, 绝对路径) 去拉详情 ⇒
+   *      Rust playback.rs:160-164 registry.route() 没有叫 local 的 provider
+   *      ⇒ 抛「无法路由: local:…」
+   * ③ 存量文件**没有旁文件**（旁文件是 task-12 才加的）⇒
+   *      「没旁文件 ⇒ 本地播放」是**必经之路**，不是边缘情况。
+   * ```
+   *
+   * # 修法（改动 A：右侧按**磁盘状态**判，而不是内存队列）
+   * ```text
+   * 扫一次下载目录 ⇒ 若 (provider, contentId) 能在结果里找到对应作品 ⇒
+   *   右侧 = DownloadPanel（列出磁盘上已下好的集）。
+   * ⚠️ mediaId 是 `canonicalLocalPath(绝对路径)` ⇒ 比对时**两边都要规范化**，
+   *    否则大小写/斜杠写法不同就匹配不上。
+   * ```
+   *
+   * ⚠️ 只在 init（和详情加载完知道真标题时）扫一次 —— 扫盘是真 IO，
+   *    不能放进 build。下载完成导致目录变化由 cache_page 那边负责，
+   *    这里只保证「进页面时看到的是磁盘真相」。
+   */
+  List<CachedWork>? _diskWorks;
+
+  /// 扫一次下载目录（失败就当没有 —— 绝不让扫盘把播放页搞崩）
+  Future<void> _scanDiskWorks() async {
+    try {
+      /*
+       * ★★ 用 cache_page 的 **公共**入口 `scanCacheWorksAtRoot()` —— 不要在这里
+       *    自己拼 `CachePage.debugScanRootOverride ?? DownloadDir.root()`：
+       *      · 那会让 media_page 碰到 `@visibleForTesting` 字段
+       *        （analyzer: invalid_use_of_visible_for_testing_member）；
+       *      · 更要紧的是**两份实现** ⇒ 探针注入点只改得动一处。
+       */
+      final works = await scanCacheWorksAtRoot();
+      if (!mounted) return;
+      setState(() => _diskWorks = works);
+    } catch (e) {
+      AppLog.write('MEDIA', '扫下载目录失败（右侧退回详情页）：$e');
+    }
+  }
+
+  /// ★ 当前作品在磁盘上的那一个（找不到 ⇒ null ⇒ 右侧走原来的 DetailPage）
+  ///
+  /// 判据：把**双方**都规范化后再比。
+  /// ```text
+  /// · 我方：`canonicalLocalPath(_contentId)` —— 它可能就是绝对路径；
+  ///   但**也可能是在线 id**（比如 cctv1）⇒ 那种情况规范化后仍不匹配目录名，
+  ///   于是回退到「按标题匹配」（旁文件里的 title == 详情真标题）。
+  /// · 磁盘那侧：用**目录绝对路径**规范化（works[i].path）。
+  /// ```
+  CachedWork? get _diskWorkForThis {
+    final works = _diskWorks;
+    if (works == null || works.isEmpty) return null;
+
+    final want = canonicalLocalPath(_contentId);
+    for (final w in works) {
+      if (canonicalLocalPath(w.path) == want) return w;
+    }
+
+    // 回退：按标题认（在线 id 的情况下只能靠标题）
+    // ⚠️ `_detailTitleForDownloads` 的类型是**非空** String（见它的 getter），
+    //    所以这里只能判 isEmpty，不能判 `!= null`（那会被 analyzer 判为死代码）。
+    final t = _detailTitleForDownloads;
+    if (t.isNotEmpty) {
+      for (final w in works) {
+        if (w.displayTitle == t) return w;
+      }
+    }
+    return null;
+  }
+
+  /// ★ 磁盘上**已经下好**的集（喂给 DownloadPanel 的第二份数据源）
+  List<DownloadedItem> get _downloadedItems {
+    final w = _diskWorkForThis;
+    if (w == null) return const <DownloadedItem>[];
+    return <DownloadedItem>[
+      for (final e in w.episodes)
+        // ★ 只列**完整的**集 —— .part（没下完）不算「已下载好」
+        if (e.isComplete)
+          DownloadedItem(
+            fileName: e.fileName,
+            title: w.displayTitle,
+            episodeTitle: e.displayName,
+            bytes: e.bytes,
+            cover: w.cover,
+          ),
+    ];
+  }
+
+  /// ★ task-12 缺陷 A：面板上点「播放」一个**磁盘上已下好**的集 ⇒ 本地播放
+  ///
+  /// 与「已缓存页点一集」走**同一条**契约（cache_page.dart 的 buildLocalPlayRequest）：
+  /// ```text
+  /// provider  = 'local'（kLocalProvider）
+  /// contentId = canonicalLocalPath(文件绝对路径)
+  /// localPath = 文件绝对路径
+  /// ```
+  /// ⇒ 换集/续播/进度命名空间全部与本地播放一致。
+  void _onPlayDownloaded(DownloadedItem item) {
+    final w = _diskWorkForThis;
+    if (w == null) return;
+
+    /*
+     * ★★ 复用**生产**那个组织会话的函数（不要手拼 provider/mediaId）——
+     * ```text
+     * `buildLocalPlayRequest`（cache_page.dart:465-485）已经做对了三件事：
+     *   · provider = kLocalProvider('local')
+     *   · mediaId  = canonicalLocalPath(绝对路径)
+     *   · 只挑 isComplete 的集
+     * 在这里重写一遍 = 第二个契约实现 ⇒ 迟早漂移。
+     * ```
+     */
+    final ep = CachedEpisode(
+      fileName: item.fileName,
+      bytes: item.bytes,
+      isComplete: true,
+    );
+    final req = buildLocalPlayRequest(w, prefer: ep);
+    if (req == null) return;
+
+    _onDetailPlay(PlayRequestData(
+      provider: req.provider,
+      id: req.mediaId,
+      title: req.title,
+      episodeId: item.fileName,
+      episodeTitle: item.episodeTitle,
+      // ★ 本地播放：把绝对路径带给播放器（ui-dev 的 localPath 短路）
+      localPath: req.episodeAbsolutePath,
+    ));
+  }
+
+  /// ★★★ task-11 ④：面板上点「播放」已下载的一集
+  ///
+  /// # 为什么走「换集」而不是「打开本地文件」
+  /// ```text
+  /// Owner 要的是「点击进去也还是播放页」——他期待的是**接着看这部剧**，
+  /// 不是在资源管理器里开一个文件。而这一集的流如果还在线，
+  /// 直接换集最顺（还能顺带看到弹幕/进度记录）。
+  /// 本地 .part/.ts 的离线播放属于「边下边播」范畴（⑤，本轮不做）。
+  /// ⇒ 这里用**和详情页选集完全同一条**路径：`_onDetailPlay`。
+  /// ```
+  void _onDownloadPanelPlay(DownloadTask t) {
+    _onDetailPlay(PlayRequestData(
+      provider: t.provider,
+      id: t.mediaId,
+      title: t.title,
+      episodeId: t.episodeId,
+      episodeTitle: t.episodeTitle,
+      sourceCode: t.sourceCode,
+    ));
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  //  ★★★ task-12 ⑤（2026-10-09）：本地播放时右侧**详情区**的数据源
+  // ══════════════════════════════════════════════════════════════════════
+  //
+  // Owner 原话（逐字）：
+  // > 本地播放详情页 **来源** 也还是要用下载的，**封面也要展示**，
+  // > 其他都要跟在线播放页一致，除了**集数的展示**，还有那些**操作按钮不显示**，
+  // > 其他都要一样的
+  //
+  // # 右侧原来是什么（真机截图）
+  // ```text
+  // 「下载 · 0 集」+ 已下载的一集一行 —— 那是 task-11 的 DownloadPanel。
+  // 它能回答"我下过哪几集"，但**没有封面、没有来源、没有简介/评分/演员/类型**。
+  // ```
+  //
+  // # 现在是什么（Owner 裁决 (B)）
+  // ```text
+  // 仍是 DetailPage，但带 localFile ⇒ 它走"本地模式"：
+  //   · 不向核心要详情（本地没有可查的详情，硬要必抛「无法路由」）
+  //   · 头部：封面 + 标题 + 来源 + 简介/评分/演员/类型（能从标题认回站点时）
+  //   · 操作按钮（收藏/追更/换源/下载）与「播放源」区 **不画**
+  //   · 下方：**「已下载」一集一行**（原来在 DownloadPanel 里的那份数据）
+  // ```
+  // ⚠️ 为什么把"已下载"搬进详情区、而不是继续用 DownloadPanel：
+  //    Owner 要的是"其他都要跟在线播放页一致" —— 一个页面上**两套右栏**做不到这件事；
+  //    而 DownloadPanel 那行「已下载 · 761.1 MiB」的信息在详情区的列表里也保留了。
+
+  /// 本地模式喂给详情区的「已下载的集」（一集一行）
+  ///
+  /// ⚠️ 只列 **isComplete** 的集（未完成的是 .part，点了必然失败）——
+  ///    判据与 [_downloadedItems] 完全一致，不另写一套。
+  /// ⚠️ 绝对路径**复用生产那个组织会话的函数**（[buildLocalPlayRequest]），
+  ///    不在这里手拼 work.path + 分隔符 + fileName —— 那是第二个实现，
+  ///    迟早与 cache_page 的规则漂移（本仓反复踩过这个形态）。
+  List<LocalEpisodeRef> get _localEpisodeRefs {
+    final w = _diskWorkForThis;
+    if (w == null) return const <LocalEpisodeRef>[];
+    final out = <LocalEpisodeRef>[];
+    for (final e in w.episodes) {
+      if (!e.isComplete) continue;
+      final req = buildLocalPlayRequest(w, prefer: e);
+      if (req == null) continue;
+      out.add(LocalEpisodeRef(
+        fileName: e.fileName,
+        episodeTitle: e.displayName,
+        absolutePath: req.episodeAbsolutePath,
+        // ★ task-17 ③：把扫盘量到的字节数带过去（批量删除的正文要用它，
+        //   避免在弹窗前再 stat 一遍 —— 见 LocalEpisodeRef.bytes 的注释）
+        bytes: e.bytes,
+      ));
+    }
+    return out;
+  }
+
+  /// 详情区点「已下载」里的一集 ⇒ 换到**那个文件**
+  ///
+  /// 与 [_onPlayDownloaded]（面板那条路）走同一个契约，只是入口不同：
+  /// ```text
+  /// 面板   ⇒ _onPlayDownloaded(DownloadedItem)   → buildLocalPlayRequest → _onDetailPlay
+  /// 详情区 ⇒ _onPlayLocalEpisode(LocalEpisodeRef) ─────────────────────→ _onDetailPlay
+  /// ```
+  /// ⚠️ localPath 传的是**这一集**的绝对路径（不是 widget.localPath）——
+  ///    否则"点第 2 集"会回到进来时那一集（见 [_onDetailPlay] 里那条警告）。
+  void _onPlayLocalEpisode(LocalEpisodeRef ref) {
+    _onDetailPlay(PlayRequestData(
+      provider: _provider,
+      id: _contentId,
+      title: _detailTitleForDownloads,
+      episodeId: ref.fileName,
+      episodeTitle: ref.episodeTitle,
+      localPath: ref.absolutePath,
+    ));
   }
 
   @override
@@ -701,6 +1066,32 @@ class _MediaPageState extends State<MediaPage> with WindowListener {
      *   不是随手取的。
      */
     final wide = mq.size.width >= 900;
+    /*
+     * ★★★ task-2【④】「非全屏状态下，选集的按钮不应该出现占位置」
+     *
+     * ══════════════════════════════════════════════════════════════════
+     * 这条判据是**跨文件单一数据源**，不要在别处再算一遍
+     * ══════════════════════════════════════════════════════════════════
+     *
+     * 右侧详情栏**什么时候真的可见**，只有本页知道（它是本页拼的 Row）：
+     * ```text
+     * :1005   body: (fullscreen || wide) ? Row(...) : Column(...)
+     * :1015   if (!fullscreen) SizedBox(width: detailW, child: detailPanel)
+     * ```
+     * ⇒ 右侧详情栏可见 ⇔ **!fullscreen && wide**
+     *
+     * 而详情栏里**本来就有**剧集列表（`detail_page.dart:2266` 的
+     * `_BlockTitle(text: '选集')` + 剧集网格）⇒ 播放页底栏那枚「选集」
+     * 是**重复入口**，在白占底栏位置（底栏宽度预算见
+     * `player_page.dart:13081`：线路 82 + 换源 82 + 选集 82 ≤ 528）。
+     *
+     * ⚠️ **不能**写成"非全屏就隐藏"：窄屏（<900）走的是 Column 分支，
+     *    详情区跑到播放器**下方**，右侧没有栏 —— 那时底栏的「选集」
+     *    是**唯一**能就近切集的入口，隐藏它 = 丢功能。
+     *    （从历史记录 push 进播放页的场景同样是窄屏/无详情栏，
+     *      必须在那种路径上保持可见。）
+     */
+    final bool hasRightDetail = wide && !fullscreen;
     /*
      * ★ 右侧信息栏宽度：30% 视口，夹在 [340, 440]
      *   · 下限 340 ⇒ 保证卡片/按钮不被压变形（详情区最小可用宽度）
@@ -790,6 +1181,7 @@ class _MediaPageState extends State<MediaPage> with WindowListener {
     debugPrint('[MEDIA] build: mq=${mq.size.width}x${mq.size.height} '
         'playerFullscreen=${_session?.isFullscreen} '
         'wide=$wide detailW=${detailW.toStringAsFixed(0)} '
+        'hasRightDetail=$hasRightDetail '
         '⇒ 详情区${fullscreen ? "收起（只剩视频）" : "显示"}');
 
     final player = PlayerPage(
@@ -805,6 +1197,20 @@ class _MediaPageState extends State<MediaPage> with WindowListener {
       episodeIndex: widget.episodeIndex,
       isTv: widget.isTv,
       isTouchOnly: widget.isTouchOnly,
+      /*
+       * ★★★ task-12 ④：本地文件路径**原样转发**给播放器（见构造参数处的说明）。
+       *
+       * ⚠️ 必须**逐字转发**而不是在这里做判断 ——
+       *    「有没有旁文件 ⇒ 走在线还是走本地」这个裁决在 `shell.dart:4773` 已经做完，
+       *    本页只负责把值带下去。在这里再判一次就是重复实现，两边迟早不一致。
+       *
+       * ★ 加完之后，本构造点带 `widget.*` 直传的字段 = **12 个**
+       *   （原本 11 个：provider/id/title/cover/episodeId/episodeTitle/sourceCode/
+       *     episodes/episodeIndex/isTv/isTouchOnly；另加本页自算的 key 与 hasRightDetailBar）。
+       */
+      localPath: widget.localPath,
+      // ★ task-2【④】：右侧详情栏此刻是否真的可见（见 hasRightDetail 的注释）
+      hasRightDetailBar: hasRightDetail,
     );
 
     // ★ 换源后重建**详情区**（只重建这一半）—— key 与 task-58 逐字相同
@@ -833,6 +1239,95 @@ class _MediaPageState extends State<MediaPage> with WindowListener {
        *    （`_activeEpisodeId`），**不能**当成"没有当前集"。
        */
       currentEpisodeId: _currentEpisodeId,
+      /*
+       * ★★★ task-12 ⑤：本地播放时把详情区切成**本地模式**（见 _localEpisodeRefs 上面那段）。
+       * ⚠️ localFile 直接取 widget.localPath —— 它是 shell.dart:4773 一次性裁决的结果，
+       *    本页**不重判**（重判就是第二个判据来源）。
+       */
+      localFile: widget.localPath,
+      localTitle: widget.title,
+      localCover: widget.cover,
+      localEpisodeCount: widget.localPath == null ? 0 : _localEpisodeRefs.length,
+      localEpisodes: widget.localPath == null
+          ? const <LocalEpisodeRef>[]
+          : _localEpisodeRefs,
+      onPlayLocalEpisode: widget.localPath == null ? null : _onPlayLocalEpisode,
+      /*
+       * ★ task-17 ③：删完**真刷新** —— 由本页重新扫盘（扫盘是本页的职责，
+       *    详情区不自己扫，见 DetailPage.localEpisodes 的注释）。
+       *    ⚠️ 不刷新的话列表会一直挂着已经不存在的行。
+       */
+      onLocalEpisodesChanged: _scanDiskWorks,
+    );
+
+    /*
+     * ★★★ task-11 ②：右侧在「这部剧有下载任务」时切成**下载面板**。
+     *
+     * # Owner 原话（逐字）
+     * ```text
+     * > 我的想法是,点击进去也还是播放页,只不过右侧的变成下载 或者 已经下载好的,
+     * > 一集一集的,一集占一行
+     * ```
+     * ⇒ 同一个右侧位置，两种内容二选一：
+     *    有这部剧的下载任务 ⇒ DownloadPanel
+     *    否则               ⇒ 原样 DetailPage（**逐像素不变**）
+     *
+     * # ★ 为什么用 ValueListenableBuilder **包住选择**，而不是包住整个 detail
+     * ```text
+     * DetailPage 很重（它自己拉详情、建整棵选集树）。
+     * 若把 ValueListenableBuilder 包在外面，每 8 片一次的进度广播都会重建它
+     * ⇒ 正是 task-11 ① 实测到的 H4 阻塞（挂监听者后掉帧 54 次 / 最长 38 ms）。
+     * ⇒ 只在**外层选一次**：有任务时进面板，没任务时进 DetailPage。
+     *    DetailPage 只在 `hasDownloads` 真的翻转时才重建。
+     * ```
+     *
+     * ★ 空列表时 `hasDownloads == false` ⇒ 回到详情页（与改动前逐像素相同）。
+     */
+    /*
+     * ★★★ task-12 缺陷 A：判据从「内存队列有没有这条任务」
+     *     改成「内存队列 **或** 磁盘上有没有这部剧」。
+     * ```text
+     * 改前：`if (mine.isEmpty) return detail;`
+     *       重启后队列必空 ⇒ 永远走 detail ⇒ DetailPage 用
+     *       (local, 绝对路径) 拉详情 ⇒ 「无法路由: local:…」
+     *       ★ 那正是 Owner 真机截图里那条报错。
+     * 改后：磁盘上扫到这部剧（`_diskWorkForThis != null`）也进面板，
+     *       面板把「已下好的集」一集一行列出来。
+     * ```
+     * ⚠️ 磁盘判据走 `_diskWorkForThis`（**双方都规范化**后再比），
+     *    因为 mediaId 是 `canonicalLocalPath(绝对路径)`，写法可能与目录路径不同。
+     */
+    final detailOrDownloads = ValueListenableBuilder<List<DownloadTask>>(
+      valueListenable: DownloadQueue.tasks,
+      builder: (context, all, _) {
+        /*
+         * ★★★ task-12 ⑤：**本地播放时右侧永远是详情区**（Owner 裁决 (B)）。
+         *
+         * 改前：本地播放 + 磁盘上有这部剧 ⇒ 右侧 = DownloadPanel
+         *       ⇒ 只有「下载 · 0 集」+ 一集一行，没有封面/来源/简介。
+         * 改后：本地播放 ⇒ 右侧 = 详情区（本地模式），
+         *       「已下载」那份数据由详情区自己渲染（见 _localEpisodeRefs）。
+         *
+         * ⚠️ 这不是把功能删了：一集一行**还在**，只是搬进了详情区 ——
+         *    因为 Owner 要的是「其他都要跟在线播放页一致」，
+         *    而一个页面上放两套右栏做不到这件事。
+         * ⚠️ 判据用 widget.localPath（本地会话），**不**用 provider 等于 local：
+         *    后者是一个字符串字面量，改名就静默失效。
+         */
+        if (widget.localPath != null) return detail;
+
+        final mine = all.where((t) => t.title == _detailTitleForDownloads).toList();
+        final onDisk = _downloadedItems;
+        if (mine.isEmpty && onDisk.isEmpty) return detail;
+        return DownloadPanel(
+          title: _detailTitleForDownloads,
+          downloaded: onDisk,
+          callbacks: DownloadPanelCallbacks(
+            onPlay: _onDownloadPanelPlay,
+            onPlayDownloaded: _onPlayDownloaded,
+          ),
+        );
+      },
     );
 
     /*
@@ -978,7 +1473,7 @@ class _MediaPageState extends State<MediaPage> with WindowListener {
               //   在那里加圆角会变成"窗口边缘上的一个黑色缺口"（像渲染瑕疵）
               bottomRight: const Radius.circular(0),
             ),
-            child: detail,
+            child: detailOrDownloads,
           ),
         ],
       ),

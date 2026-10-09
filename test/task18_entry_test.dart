@@ -55,6 +55,7 @@ import 'package:sourin_spike/core/ui_prefs.dart';
 import 'package:sourin_spike/ui/settings/playback_page.dart';
 import 'package:sourin_spike/ui/settings/touch_gestures_page.dart';
 import 'package:sourin_spike/ui/settings_page.dart';
+import 'package:sourin_spike/ui/widgets/settings_kit.dart';
 
 const String kTag = '[T18E]';
 void log(String s) => debugPrint('$kTag $s');
@@ -369,8 +370,32 @@ void main() {
               '（settings_sub_page.dart:423-431 的 OutlinedButton）');
       expect(_count(find.text('并发数')), 1,
           reason: '$tag| 二级页必须真的画出并发数滑杆那一行');
-      expect(_count(find.byType(Slider)), 1,
-          reason: '$tag| 并发滑杆必须恰有一个');
+      /*
+       * ★ 2026-10-09 改（Owner 第 20 条引入第二个滑杆之后）
+       *
+       * 原断言是 `expect(_count(find.byType(Slider)), 1)`，本意是
+       * 「**片段**并发滑杆恰有一个」（防止误画成两个同类滑杆）。
+       * 第 20 条给这一页**有意**加了第二个「整片下载并发」滑杆 ⇒
+       * 全局计数天然变 2，这条会红 —— 但**红的不是行为，是断言的粒度**。
+       *
+       * 所以改成按语义定位：先锚到「片段下载并发」块，再断言它里面
+       * 恰有一个 Slider，且这个 Slider 的档位就是 ClipDownloader 的档位。
+       * ⇒ 原意（不多不少一个片段并发滑杆）**完整保留**，且不再被
+       *   别的滑杆的增减误伤。
+       */
+      final clipSlider = find.descendant(
+        of: find.ancestor(
+          of: find.text('片段下载并发'),
+          matching: find.byType(SettingsBlock),
+        ),
+        matching: find.byType(Slider),
+      );
+      expect(_count(clipSlider), 1,
+          reason: '$tag| ★ 片段下载并发块里必须恰有一个滑杆'
+              '（页面整体现在有两个滑杆：片段 + 整片，见 Owner 第 20 条）');
+      final clipW = tester.widget<Slider>(clipSlider);
+      expect(clipW.max, 8,
+          reason: '$tag| ★ 这个滑杆必须真的是片段那个（档位 0..8）');
 
       // 返回一级页（闭环：入口可达 ⇒ 也能回来）
       await _tapAndSettle(tester, find.text('返回设置'), '$tag|back1');
@@ -456,8 +481,21 @@ void main() {
     expect(_count(find.text('播放与下载')), 1, reason: 'B| 二级页标题');
     expect(_count(find.text('返回设置')), 1, reason: 'B| 返回入口');
 
-    final sliderF = find.byType(Slider);
-    expect(_count(sliderF), 1, reason: 'B| 并发滑杆必须恰有一个');
+    /*
+     * ★ 2026-10-09 改（Owner 第 20 条）：定位方式与 A 组同一个理由 ——
+     *   这一页现在有**两个**滑杆（片段下载并发 / 整片下载并发），
+     *   所以按语义锚到「片段下载并发」块里那一个，而不是数全局个数。
+     *   本用例要验的是**片段**滑杆的档位与落盘，锚点必须精确到它。
+     */
+    final sliderF = find.descendant(
+      of: find.ancestor(
+        of: find.text('片段下载并发'),
+        matching: find.byType(SettingsBlock),
+      ),
+      matching: find.byType(Slider),
+    );
+    expect(_count(sliderF), 1,
+        reason: 'B| ★ 片段下载并发块里必须恰有一个滑杆');
     await _scrollTo(tester, sliderF);
 
     final sl = tester.widget<Slider>(sliderF);

@@ -23,15 +23,33 @@
 //
 // # 落点（Windows）
 // ```text
+// ① 用户在【设置 → 播放 → 下载目录】里显式指定过 ⇒ 就用它（本次新增）
 // 优先   %USERPROFILE%\Videos\源影\<剧名>\
 // 退路   数据目录\downloads\<剧名>\（拿不到 Videos 时）
 // ```
+//
+// # ★★★ 2026-10-09（Owner 第 20 条）下载目录要**可配置**
+//
+// 用户原话（逐字）：
+// > 下载目录可配置
+//
+// ```text
+// 改前：root() 只有一条路 —— 硬解析 _resolveRoot()，
+//       %USERPROFILE%\Videos 拿不到就退数据目录，用户**没有任何话语权**。
+//       用户的 C 盘可能只剩几个 G，而下载一部剧要 2~4 GB。
+// 改后：_resolveRoot() **先读** pref 键 dsh.download.dir，
+//       用户填了且可用 ⇒ 直接用；没填/失效 ⇒ 逐字回到改动前那两条路。
+// ```
+//
+// ⚠️ 判据是「**目录真的能被创建**」而不是「字符串非空」——
+//    用户可能填了个已经拔掉的 U 盘盘符，那种情况必须**退回去**而不是让下载全失败。
 library;
 
 import 'dart:io';
 
 import 'app_log.dart';
 import 'clip_download.dart';
+import 'ui_prefs.dart';
 
 /// 下载目录的解析与「一部剧一个文件夹」的落地
 class DownloadDir {
@@ -39,6 +57,41 @@ class DownloadDir {
 
   /// 根目录名（用户可见的那个）
   static const String appFolderName = '源影';
+
+  /// ★★★ 2026-10-09（Owner 第 20 条）：用户指定的下载根目录
+  ///
+  /// 键名对齐既有的 `dsh.download.concurrency`（`clip_download.dart:279`），
+  /// 同一个「下载」前缀，用户/后人一眼能看出是同一组偏好。
+  static const String kDirKey = 'dsh.download.dir';
+
+  /// 读用户填的目录；未填 / 全空白 ⇒ null（调用方走默认两条路）
+  ///
+  /// ⚠️ 这里**不判目录是否存在** —— 那是 [resolveRoot] 的事（要看文件系统，
+  ///    是异步的），本 getter 只回答"用户填没填"。
+  static String? get configuredDir {
+    final raw = UiPrefs.get(kDirKey);
+    if (raw == null) return null;
+    final t = raw.trim();
+    return t.isEmpty ? null : t;
+  }
+
+  /// 用户是否显式指定过下载目录（UI 用来显示"已自定义"）
+  static bool get hasConfiguredDir => configuredDir != null;
+
+  /// 写用户指定的目录；传 null / 空白 ⇒ 清除（回到默认两条路）
+  ///
+  /// ★ 要不要清 `_cached`：**要**。它缓存的是上一次解析出来的路径，
+  ///   用户改了目录却还用旧缓存 ⇒ 「改了没反应」，那是最难查的一类 bug。
+  static void setConfiguredDir(String? dir) {
+    final t = dir?.trim() ?? '';
+    if (t.isEmpty) {
+      UiPrefs.set(kDirKey, '');
+    } else {
+      UiPrefs.set(kDirKey, t);
+    }
+    _cached = null;
+    AppLog.write('DL', t.isEmpty ? '下载目录 -> 默认（跟随系统视频库）' : '下载目录 -> $t');
+  }
 
   /// 缓存进内存 —— 解析要碰文件系统，而每个文件名都要用它
   static String? _cached;
@@ -55,9 +108,37 @@ class DownloadDir {
   /// 测试用：清掉内存里的缓存（下次重新解析）
   static void debugReset() => _cached = null;
 
+  /// 把「用户指定目录」解析出来（可用才返回，否则 null）
+  ///
+  /// ★ 判据是**真的能建出来**（`create(recursive: true)` 不抛），不是字符串非空：
+  ///   用户可能填了已拔掉的 U 盘、没权限的 `C:\\Windows\\`、或者一个手滑打错的路径。
+  ///   那些情况**必须**退回默认两条路 —— 让下载整体失败是最坏的结果。
+  ///
+  /// ⚠️ 不回写 pref：用户填错的路径要**留着**让他自己看到并改，
+  ///   悄悄清掉会变成「我明明填过，怎么没了」。
+  static Future<Directory?> _resolveConfigured() async {
+    final raw = configuredDir;
+    if (raw == null) return null;
+    try {
+      final d = Directory(raw);
+      await d.create(recursive: true);
+      return d;
+    } catch (e) {
+      AppLog.write('DL', '指定的下载目录不可用（$e）⇒ 退回默认目录');
+      return null;
+    }
+  }
+
   static Future<Directory> _resolveRoot() async {
     /*
-     * ★ 优先 `%USERPROFILE%\Videos\源影`：
+     * ★★★ 2026-10-09（Owner 第 20 条）：**先看用户指定**。
+     * 这是本次唯一新增的分支；下面两条与改动前**逐字相同**。
+     */
+    final custom = await _resolveConfigured();
+    if (custom != null) return custom;
+
+    /*
+     * ★ 优先 `%USERPROFILE%\\Videos\\源影`：
      *   · 那是 Windows「视频」库，用户在资源管理器左侧栏一点就到
      *   · 与系统「已知文件夹」一致 ⇒ 备份/迁移工具会一起带上
      * 退路是数据目录下的 downloads —— 只在拿不到 USERPROFILE 时用。

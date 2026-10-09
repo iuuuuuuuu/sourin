@@ -37,6 +37,7 @@ class PlayRequestData {
     this.sourceCode,
     this.episodes = const [],
     this.episodeIndex,
+    this.localPath,
   });
 
   final String provider;
@@ -48,6 +49,21 @@ class PlayRequestData {
   final String? sourceCode;
   final List<Episode> episodes;
   final int? episodeIndex;
+
+  /// ★★★ task-12 ④ 改动 B（2026-10-09）：本地文件**绝对路径**（`null` = 走网络解析）
+  ///
+  /// # 为什么必须进这个「请求」对象（真机缺陷，不是设计洁癖）
+  /// ```text
+  /// `PlayerPage.localPath` 是**页面级不可变**的：`shell.dart:4773` 一次性决定，
+  /// 作构造参数传入。而**换集**走的是「对同一个 State 下命令」：
+  ///   media_page._onDetailPlay -> applySession(req)   （不重建页面）
+  /// ⇒ 只把路径放在构造参数里，本地会话就只能播「进页面时那一集」；
+  ///   用户点右侧第 2 集 => applySession 走网络解析 => 对本地会话报
+  ///   「无法路由: local:<路径>」（真机证据，Owner 截图）。
+  /// ```
+  ///
+  /// ⚠️ 只有**本地会话**才非 null：在线作品的换集仍然走 `resolveStream`。
+  final String? localPath;
 
   /// ★ task-58：**会话等价**判据 —— 两个请求是否指向"同一集同一条线路"
   ///
@@ -77,7 +93,37 @@ class PlayRequestData {
     return provider == other.provider &&
         id == other.id &&
         norm(episodeId) == norm(other.episodeId) &&
-        norm(sourceCode) == norm(other.sourceCode);
+        norm(sourceCode) == norm(other.sourceCode) &&
+        /*
+         * ★★★ task-12 ④ 改动 B（2026-10-09）：`localPath` 也纳入判据。
+         *
+         * # 为什么**必须**纳入（我按 lead 的意见逐条推导过）
+         * ```text
+         * 判据的语义是「这两个请求会不会**解析出同一条流**」。
+         * 而本地会话的流**完全由 localPath 决定**：
+         *   本地文件 A 与 本地文件 B => 两条完全不同的流 => 两个不同会话。
+         * 把它们判成「同一会话」的后果与本节开头那三条一样恶劣：
+         * 用户点另一个本地文件 => 早退 => **画面根本不变**（连黑屏都没有，纯不动）
+         * => 看起来像「点了没反应」。
+         * ```
+         *
+         * # ★ 为什么不与 `episodeId` 混判（lead 特别提醒的点）
+         * ```text
+         * 「同一个文件换集号」是**合法**的：本地目录里同一集可能有
+         *   `第01集.mp4` / `第01集.part` 两个候选（cache_page.dart:141-143
+         *   剥 `.part` 后缀时就是这么处理的）=> 路径不同、集号相同。
+         * 反过来，**已确认**的两种映射是：
+         *   同一文件  => 同一集号（episodeId 由调用方给 fileName）
+         *   不同文件  => 不同路径
+         * => 两者本来就一致，**不需要**交叉判断（交叉判断只会多一处会漂的逻辑）。
+         *    所以这里是**并列**加一个字段，不是把它们合并成一个复合键。
+         * ```
+         *
+         * ⚠️ 用与 `sourceCode` **同款**的宽松比较（null 与空串等价）：
+         *   在线会话两边的 localPath 都是 null/'' => 归一后相等 => 判据对
+         *   **既有在线路径逐字节不变**（这是零影响的关键）。
+         */
+        norm(localPath) == norm(other.localPath);
   }
 }
 

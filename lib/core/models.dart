@@ -1912,6 +1912,8 @@ class PluginEntry {
     required this.id,
     required this.name,
     this.version = '',
+    this.author = '',
+    this.upstream = '',
     this.loaded = false,
     this.error,
     this.config = const [],
@@ -1921,6 +1923,29 @@ class PluginEntry {
   final String id;
   final String name;
   final String version;
+
+  /// ★ 插件声明的作者（`@author`）—— 卡片据此显示**来源标识**（task-5 / 缺陷 5）
+  ///
+  /// 实测本机 28 个插件的取值只有两种：
+  /// ```text
+  /// tvbox-convert  ×22   TVBox 转换器生成的
+  /// dsh            ×6    内置源模板（从原版继承的作者名）
+  /// ```
+  /// 仓库里新增的 emby 模板写的是 `sourin`。
+  ///
+  /// ⚠️ 空串 = 源码里**没写** `@author`（不是"第三方"）——
+  ///    界面据此不显示标识，而不是猜一个。
+  final String author;
+
+  /// ★ 插件声明的**上游接口地址**（task-5 / 缺陷 5）
+  ///
+  /// ★★ 关键事实：TVBox 转换插件**没有丢掉原链接** —— 转换器把原始接口
+  ///    逐字写进了生成的 `.js`（头部注释 ` * 上游接口（苹果CMS v10）：http://...`），
+  ///    只是界面从来没显示过。Rust 侧 [PluginEntry.upstream] 解析它。
+  ///
+  /// ⚠️ 空串 = 没有可用的上游地址（内置源 `cctv` 等就是这种）——
+  ///    界面据此不显示「上游」入口，而不是显示一个点不开的链接。
+  final String upstream;
 
   /// 是否成功加载（false 时 `error` 有原因）
   final bool loaded;
@@ -1935,6 +1960,9 @@ class PluginEntry {
         id: j['id'] as String? ?? '',
         name: j['name'] as String? ?? '',
         version: j['version'] as String? ?? '',
+        // ★ task-5：老版本 Rust 返回里没有这两个键 → `?? ''` 兜住
+        author: j['author'] as String? ?? '',
+        upstream: j['upstream'] as String? ?? '',
         loaded: j['loaded'] as bool? ?? false,
         error: j['error'] as String?,
         config: jlist<ConfigField>(j['config'], ConfigField.fromJson),

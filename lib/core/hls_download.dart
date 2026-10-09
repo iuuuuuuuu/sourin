@@ -206,12 +206,27 @@ class HlsDownloadResult {
     required this.bytes,
     required this.segments,
     required this.elapsed,
+    this.paused = false,
+    this.partPath,
   });
 
   final String path;
   final int bytes;
   final int segments;
   final Duration elapsed;
+
+  /// ★★★ task-11 ③：true = **因为用户暂停而收尾**（不是完成，也不是失败）
+  ///
+  /// # 为什么暂停要「正常返回」而不是抛异常
+  /// ```text
+  /// 本类的 catch 分支有一条硬纪律：「失败绝不留半截文件」⇒ 删 .part。
+  /// 而暂停**必须**保留 .part（已下好的分片一片不丢，继续时从下一片接上）。
+  /// ⇒ 暂停不能走异常路径，只能走「正常返回 + 一个标志位」。
+  /// ```
+  final bool paused;
+
+  /// 暂停时**半成品**的路径（`<目标>.part`）—— 继续下载时从它接着写
+  final String? partPath;
 
   double get mb => bytes / 1048576;
 }
@@ -243,6 +258,18 @@ class HlsDownloader {
     List<(String, String)> headers = const [],
     void Function(int done, int total)? onProgress,
     bool Function()? isCancelled,
+
+    /// ★★★ task-11 ③：**暂停**判据 —— 在**分片边界**被问。
+    ///
+    /// 返回 true ⇒ 立即停止拉新分片，但**正常返回**（保留 .part）。
+    /// ⚠️ 与 [isCancelled] 语义**不同**：后者抛异常 ⇒ .part 被删。
+    bool Function()? isPaused,
+
+    /// ★★★ task-11 ③ 续传：.part 里**已经写完**的分片数（跳过它们）
+    ///
+    /// 由调用方从任务状态带来（暂停时 `HlsDownloadResult.segments` 回报的值）。
+    /// null / 0 = 全新下载。
+    int? initialDone,
   }) async {
     final sw = Stopwatch()..start();
     final client = HttpClient()
@@ -283,18 +310,82 @@ class HlsDownloader {
         throw HlsDownloadException('播放列表里没有分片地址。');
       }
 
-      // ② 顺序拉分片，边拉边拼（顺序写 = 拼出来的文件天然可播）
-      final sink = part.openWrite();
-      var bytes = 0;
+      /*
+       * ★★★ task-11 ③：**续传** —— 已存在的 .part 不覆盖，从它后面接着写。
+       *
+       * # 为什么续传是安全的（不需要分片级断点文件）
+       * ```text
+       * HLS 是**定序**的：分片 0,1,2,…,N 必须按序拼接才有意义。
+       * .part 的长度 = 已完整写入的分片字节数之和（暂停点永远在分片边界）。
+       * ⇒ 只要记下"写到第几片"就能接上。
+       *
+       * ★ 不记分片号、改用**按字节数反推**：每片长度已知（先 HEAD/GET 拿到），
+       *   但那要额外请求。更稳的做法是续传时**重放前 k 片**的判定 ——
+       *   见 download() 的 initialDone 参数：调用方从任务状态里带来。
+       * ```
+       */
+      final append = part.existsSync() && part.lengthSync() > 0;
+      final sink = append
+          ? part.openWrite(mode: FileMode.append)
+          : part.openWrite();
+      var bytes = append ? part.lengthSync() : 0;
       try {
         final ordered = <HlsSegment>[
           if (pl.initUri != null) HlsSegment(uri: pl.initUri!),
           ...pl.segments,
         ];
         total = ordered.length;
+        /*
+         * ★★★ task-11 ③ 续传：跳过已经写进 .part 的分片。
+         *
+         * `initialDone` 由调用方从任务状态带来（= 暂停时下载器回报的 segments）。
+         * ⚠️ 为什么必须**跳过而不是重下**：重下会让 .part 里出现重复分片
+         *    ⇒ 拼出来的文件在拼接点坏掉（播放器会卡在那个时间点）。
+         */
+        final skip = (initialDone ?? 0).clamp(0, total);
         for (var i = 0; i < ordered.length; i++) {
+          if (i < skip) continue; // ★ 续传：这一片已在 .part 里了
           if (isCancelled?.call() ?? false) {
             throw HlsDownloadException('已取消');
+          }
+          /*
+           * ★★★ task-11 ③：**分片边界**检查暂停。
+           *
+           * 位置在这里（拿下一片**之前**）是有意的：
+           * · 已写进 sink 的分片全部落盘，一片不丢；
+           * · 不会出现"半片"—— 分片是不可分割的写入单位。
+           * ★ 正常收尾（flush + close）后**返回**，走 return 而不是 throw，
+           *   这样下面那条"失败删 .part"的 catch 就不会碰到它。
+           */
+          if (isPaused?.call() ?? false) {
+            /*
+             * ★★ 关键：这里**只 flush，不 close**。
+             *
+             * 踩过的坑（探针实测报的错）：
+             * ```text
+             * PathAccessException: Cannot rename file to '…第01集 探针.ts',
+             *   path = '…第01集 探针.ts.part'
+             *   (OS Error: 另一个程序正在使用此文件…, errno = 32)
+             * ```
+             * 原因：这里 close 一次、外面 finally 又 close 一次 ⇒
+             *   **同一个 sink 被关两次**，句柄状态错乱 ⇒ 续传那一轮
+             *   写完 rename 时 Windows 报「文件被占用」。
+             * ⇒ 收尾统一交给 finally 的 close（它只跑一次，成功/暂停/失败都覆盖）。
+             */
+            await sink.flush();
+            AppLog.write(
+              'DL',
+              '整片暂停 ${target.path}.part（已下 i=$i/$total 片、'
+                  '${(bytes / 1048576).toStringAsFixed(1)} MB 已落盘）',
+            );
+            return HlsDownloadResult(
+              path: target.path,
+              bytes: bytes,
+              segments: i,
+              elapsed: sw.elapsed,
+              paused: true,
+              partPath: part.path,
+            );
           }
           final seg = await _getBytes(client, ordered[i].uri, headers);
           sink.add(seg);

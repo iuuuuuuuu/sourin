@@ -320,9 +320,35 @@ impl CycaniProvider {
             .and_then(|v| v.as_i64())?;
 
         let mut badges = Vec::new();
+        /*
+         * ★★★ 缺陷 21（2026-10-09 实测）：列表/搜索接口**根本不返回** `completed`
+         *
+         * 逐字读数（`.probe/zz_t21_probe.js` 直连 www.cycani.org/api）：
+         * ```text
+         * SEARCH  id=3862 无职转生 第三季  total=14  completed=undefined
+         * DETAIL  id=3862 无职转生 第三季  total=14  completed=false
+         * DETAIL  id=3147 无职转生 第二季  total=12  completed=true
+         * DETAIL  id=37   无职转生 第一季  total=11  completed=true（sections len=24）
+         * ```
+         * ⇒ 同一个 id，走 search 拿不到 `completed`，走 detail 才有。
+         *
+         * 错在哪（改前）：这里只看 `total` 就 push `全 {total} 集`。
+         *   「全」字是在替接口**下结论**（宣称“就这些了、完结了”），
+         *   而连载番的 `total` 是**全季预定集数**（cycani.rs:900-903 的实测坑），
+         *   于是连载中的番在追更页/列表页被写成「全 14 集」。
+         *   用户据此读成“已完结”，但它其实还在连载 —— 这就是
+         *   「显示『更新』但实际已完结/明明没完结却说全 N 集」那条反馈的根。
+         *
+         * 为什么这么改：没有 `completed` 就**不许**说完结/连载/更新任何一词，
+         *   退化成中性陈述「共 N 集」—— 只陈述接口给出的客观数字，不做推断。
+         *   ⚠️ 不许改回「全 N 集」：列表路径拿不到判据，是硬约束不是口味问题。
+         *
+         * ⚠️ 详情路径（cycani.rs:903-919）**不动**：那里有真实 `completed`，
+         *   是唯一有资格说「已完结 / 连载中」的地方（测试见 :1367-1376）。
+         */
         if let Some(total) = it.get("total").and_then(|v| v.as_u64()) {
             if total > 0 {
-                badges.push(format!("全 {total} 集"));
+                badges.push(format!("共 {total} 集"));
             }
         }
         if let Some(score) = it.get("score").and_then(|v| v.as_f64()) {

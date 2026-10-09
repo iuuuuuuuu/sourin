@@ -26,6 +26,9 @@ import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 
 import 'package:sourin_spike/shell.dart';
+// ★ task-3 ⑲：新增「已缓存」tab 后，下面这张 pages 表必须一并补上，
+//   否则新页**不会被检查**（遗漏即静默失去保活覆盖）。
+import 'package:sourin_spike/ui/cache_page.dart';
 import 'package:sourin_spike/ui/follow_page.dart';
 import 'package:sourin_spike/ui/home_page.dart';
 import 'package:sourin_spike/ui/live_page.dart';
@@ -144,6 +147,7 @@ void main() {
         AppTab.live: LivePage,
         AppTab.follow: FollowPage,
         AppTab.search: SearchPage,
+        AppTab.cached: CachePage,
         AppTab.settings: SettingsPage,
       };
 

@@ -549,17 +549,95 @@ class _PosterCardState extends State<PosterCard> {
 
               // ── 标题 / 副标题 ──
               const SizedBox(height: Sp.x2),
-              Text(
-                widget.title,
-                // ★ 行数由调用点决定（默认 1 ⇒ 与旧代码逐位相同）
-                maxLines: widget.titleLines,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  fontSize: FontSizes.base,
-                  fontWeight: FontWeights.regular,
-                  color: colors.onSurface,
+              /*
+               * ★★★ 2026-10-09（Owner：「已缓存的视频高度不一致,名字会换行,
+               *                高度不一致不好看需要统一」）
+               *
+               * # 根因：`maxLines` 只是"最多两行"，**不是**"固定两行高"
+               * ```text
+               * 一行标题的卡片比两行标题的矮一整个行高 ⇒ 同一行网格里
+               * 卡片底边参差（用户截图里就是这个）。
+               * ```
+               *
+               * # 修法：把标题区**撑到** `titleLines` 行的高度
+               * ```text
+               * 用 `SizedBox` 包住标题，高度 = 行高 × titleLines，
+               * 并让文本顶对齐 ⇒ 一行标题也占两行的位置，底边就齐了。
+               * ```
+               *
+               * ⚠️ 只对 `titleLines > 1` 生效：`titleLines == 1` 是默认值，
+               *    改它会动到首页/搜索页等**所有**海报卡（那些页面的承载高度
+               *    是按 1 行算的）⇒ 必须逐字节保持原行为。
+               *
+               * ⚠️ 高度算式与 `AppMetrics.posterMetaHeight` **同源** ——
+               *    那个函数是承载高度（含副标题等）的权威，这里只取标题那几行。
+               */
+              if (widget.titleLines > 1)
+                SizedBox(
+                  height: AppMetrics.posterTitleLine *
+                      widget.titleLines *
+                      AppMetrics.cardTextScale,
+                  child: Align(
+                    alignment: Alignment.topLeft,
+                    child: Text(
+                      widget.title,
+                      maxLines: widget.titleLines,
+                      overflow: TextOverflow.ellipsis,
+                      /*
+                       * ★★★ `height` 这一行是**必须的**，不是装饰（实测定的）
+                       *
+                       * # 不写它会怎样（我第一版就漏了，实测抓出来）
+                       * ```text
+                       * 上面那个 SizedBox 的高度算式用的是 `posterTitleLine`
+                       * （= `FontSizes.base × 1.35` = **21.6**）。
+                       * 但**字体自己的行高不是 1.35** —— 实测 16px 中文两行
+                       * 需要 **46.0px**（即 23.0/行，比 21.6 多 1.4）。
+                       *
+                       * ⇒ 2 行的文字要 46.0，我给的盒子只有 43.2
+                       * ⇒ **第二行被裁掉 2.8px**（字的底边被切），
+                       *   而且外层 Column 报 "overflowed by 3.6 pixels"。
+                       * ```
+                       *
+                       * # 修法：把行高**钉成** 1.35，让字体服从算式
+                       * ```text
+                       * TextStyle.height 是"行高 = fontSize × height"的**倍数**，
+                       * 它**覆盖**字体自带的 ascent/descent ⇒ 行高恰好 21.6，
+                       * 与 `posterTitleLine` 逐位一致 ⇒ 盒子刚好装得下。
+                       *
+                       * ★ 顺带修掉一个**早就存在**的问题：
+                       *   全仓所有 `railHeight(titleLines: 2)` 的承载高度
+                       *   都是按 21.6/行 算的，而真实 2 行标题要 23.0/行
+                       *   ⇒ 那些卡片一直矮 2.8px（表现为轻微溢出/底边贴太紧）。
+                       *   钉住行高之后，算式与渲染**第一次真正对齐**。
+                       * ```
+                       *
+                       * ⚠️ 倍数写成 `posterTitleLine / FontSizes.base` 而不是
+                       *    字面量 1.35 —— 两个常量各改各的迟早漂移，
+                       *    这样写它们**在结构上不可能不一致**。
+                       * ⚠️ 只在 `titleLines > 1` 这条分支里加：
+                       *    `titleLines == 1` 是默认值，必须逐字节保持原行为。
+                       */
+                      style: TextStyle(
+                        fontSize: FontSizes.base,
+                        fontWeight: FontWeights.regular,
+                        color: colors.onSurface,
+                        height: AppMetrics.posterTitleLine / FontSizes.base,
+                      ),
+                    ),
+                  ),
                 ),
-              ),
+              if (widget.titleLines <= 1)
+                Text(
+                  widget.title,
+                  // ★ 行数由调用点决定（默认 1 ⇒ 与旧代码逐位相同）
+                  maxLines: widget.titleLines,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: FontSizes.base,
+                    fontWeight: FontWeights.regular,
+                    color: colors.onSurface,
+                  ),
+                ),
               if (widget.subtitle != null && widget.subtitle!.isNotEmpty)
                 Padding(
                   padding: const EdgeInsets.only(top: 2),

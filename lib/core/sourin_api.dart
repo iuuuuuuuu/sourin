@@ -38,6 +38,10 @@
 // Dart 侧**统一返回 Future** —— 因为即使本地命令也不该阻塞 UI 线程。
 // `call` 走同步路径（快），`callAsync` 走线程池（慢/网络）。
 
+// ⚠️ 只为了 `@visibleForTesting`（task-11 的三个探针注入点）——
+//    用 `show` 限定，不把整个 foundation 拉进来。
+import 'package:flutter/foundation.dart' show visibleForTesting;
+
 import 'ffi.dart';
 import 'json_utils.dart';
 import 'models.dart';
@@ -76,6 +80,62 @@ class SourinApi {
   /// ```
   static Future<Map<String, dynamic>> start(String dataDir) =>
       SourinCore.startAsync(dataDir);
+
+  // ═══════════════════════════════════════════════════════════════════
+  //  ★★ 探针钩子：让**真进程**探针包住三个取数函数来数调用次数
+  // ═══════════════════════════════════════════════════════════════════
+  //
+  // # 为什么必须包住真函数（而不是让探针另写一份计数逻辑）
+  //
+  // 本项目踩过两次「仪器与被测对象不是同一个东西」：
+  // ```text
+  // ① fix-autoscroll 用「日志文本计数」当判据 ⇒ binding 接管 debugPrint ⇒ 恒 0
+  // ② 探针自己循环取流，而产品走的是 probe() 的并发池 ⇒ 数的是另一条路
+  // ```
+  // ⇒ 判据必须与判据对象**同源**：要数「首页切源发了几次列表请求」，
+  //   就包住**首页真正调的那两个函数**（getList / getRank）。
+  //
+  // ⚠️ 默认全为 null ⇒ 生产路径**逐字不变**（只是多一次判空）。
+  //   探针进程退出即恢复默认（进程级），不会影响别的入口。
+  // ⚠️ 真机探针的实测结论见 `.probe/t11-cache.txt`。
+
+  /// 探针注入点：`get_home`（首页分区骨架）
+  ///
+  /// ⚠️ **生产路径永不为非 null** —— 只有真机探针（`lib/t11_cache_probe.dart`）
+  ///    会在启动时装一次，进程退出即消失。产品代码里没有任何地方写它。
+  @visibleForTesting
+  static Future<List<ProviderGroup>> Function()? debugHomeFetcher;
+
+  /// 探针注入点：`get_list` / `get_rank`（首页区块内容）
+  ///
+  /// ⚠️ 同上：**生产路径永不为非 null**，只给探针数「切源那一刻发了几次请求」。
+  @visibleForTesting
+  static Future<Page<MediaItem>> Function(
+    String provider,
+    String categoryId, {
+    int page,
+  })? debugListFetcher;
+  @visibleForTesting
+  static Future<Page<MediaItem>> Function(
+    String provider,
+    String rankId, {
+    int page,
+  })? debugRankFetcher;
+
+  /// 装/卸这两个注入点（`null` = 恢复真实实现）
+  static void debugSetListFetchers({
+    Future<Page<MediaItem>> Function(String, String, {int page})? getList,
+    Future<Page<MediaItem>> Function(String, String, {int page})? getRank,
+  }) {
+    debugListFetcher = getList;
+    debugRankFetcher = getRank;
+  }
+
+  static void debugSetHomeFetcher(
+    Future<List<ProviderGroup>> Function()? getHome,
+  ) {
+    debugHomeFetcher = getHome;
+  }
 
   /// 核心是否已启动
   static bool get isStarted => SourinCore.isStarted;
@@ -180,6 +240,25 @@ class SourinApi {
   /// 首页只列出「有哪些分类区块」，具体内容等用户切过去时再拉。
   /// 见 `Section.items` 的说明。
   static Future<List<ProviderGroup>> getHome() async {
+    // ★ 探针注入点（默认 null ⇒ 生产路径逐字不变）
+    final hook = debugHomeFetcher;
+    if (hook != null) return hook();
+    return getHomeReal();
+  }
+
+  /// **真实实现**（不经 hook）—— 只给探针在计数包装里"转发"用
+  ///
+  /// ⚠️ 为什么必须单独暴露它（第一版踩到的硬 bug，实测炸过）
+  /// ```text
+  /// 探针的计数包装里写的是 `SourinApi.getHome()` —— 而 getHome 又调 hook
+  ///   （= 那个计数包装）⇒ **自己调自己**：
+  ///   Unhandled Exception: Stack Overflow（15200+ 帧）
+  ///   countingGetHome → getHome → hook(=countingGetHome) → …
+  /// ```
+  /// ⇒ 计数包装必须调 **Real**。★ 这也修掉了"仪器与被测对象不同源"：
+  ///   探针转发到的就是**生产走的那段代码**，外面只多包了一层计数。
+  @visibleForTesting
+  static Future<List<ProviderGroup>> getHomeReal() async {
     final r = await SourinCore.callAsync('get_home');
     return jlist<ProviderGroup>(r, ProviderGroup.fromJson).toList();
   }
@@ -192,6 +271,19 @@ class SourinApi {
 
   /// 某源的排行榜
   static Future<Page<MediaItem>> getRank(
+    String provider,
+    String rankId, {
+    int page = 1,
+  }) async {
+    // ★ 探针注入点（默认 null ⇒ 生产路径逐字不变）
+    final hook = debugRankFetcher;
+    if (hook != null) return hook(provider, rankId, page: page);
+    return getRankReal(provider, rankId, page: page);
+  }
+
+  /// 真实实现（不经 hook）—— 理由同 [getHomeReal]
+  @visibleForTesting
+  static Future<Page<MediaItem>> getRankReal(
     String provider,
     String rankId, {
     int page = 1,
@@ -209,6 +301,19 @@ class SourinApi {
   /// ⚠️ 参数名 `category_id` —— 原版前端传 `categoryId`，
   /// Rust 的 `Args::get` 会自动回退到 camelCase。
   static Future<Page<MediaItem>> getList(
+    String provider,
+    String categoryId, {
+    int page = 1,
+  }) async {
+    // ★ 探针注入点（默认 null ⇒ 生产路径逐字不变）
+    final hook = debugListFetcher;
+    if (hook != null) return hook(provider, categoryId, page: page);
+    return getListReal(provider, categoryId, page: page);
+  }
+
+  /// 真实实现（不经 hook）—— 理由同 [getHomeReal]
+  @visibleForTesting
+  static Future<Page<MediaItem>> getListReal(
     String provider,
     String categoryId, {
     int page = 1,

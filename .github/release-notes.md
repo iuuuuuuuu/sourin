@@ -77,6 +77,31 @@ macOS 侧的 `.dmg` 与 `.zip` 同理 —— 内容同源，只是分发形态�
 
 ---
 
+## 插件
+
+源影自带一份**可直接运行**的示例插件 `demo.js`（不是伪代码）—— 照着它改就能写自己的源。
+它是「给人看怎么写插件的模板」，**默认停用**（首次启动时会写进 `disabled-providers.json`，
+想用它就在「设置 → 插件」里手动启用）。
+
+**它在哪里**（三条真实路径，任选）：
+
+| 位置 | 怎么拿到 |
+|---|---|
+| **数据目录**（推荐） | 装好或解压后**首次启动**程序，它会自动释放到 `<数据目录>\plugins\`。Windows 默认是 `%APPDATA%\app.sourin.player\plugins\demo.js` |
+| **仓库源码** | [`rust/sourin_core/plugins/demo.js`](https://github.com/iuuuuuuuu/sourin/blob/main/rust/sourin_core/plugins/demo.js) |
+| **本页 Source code** | 下载本 Release 页的 `Source code (zip)` / `Source code (tar.gz)`，里面同一路径下有同一份 |
+
+> 无需从安装包或 zip 里翻找 —— 示例插件是**编进核心库**的
+> （`rust/sourin_core/src/state.rs` 的 `include_str!("../plugins/demo.js")`），
+> 首次启动时由程序自己释放到数据目录，和收藏/历史放在一起。
+>
+> 想了解插件的**完整 API 契约**（每个方法要返回什么字段）？本仓库目前**没有**单独的
+> `plugins/README.md` —— `demo.js` 头部注释里引用的就是它，一并说明：若你的源码包里没有
+> 这个文件，请看本页这一节；需要更细的字段说明时，`demo.js` 里每个方法上都有逐字段注释，
+> 那是最权威的说明。
+
+---
+
 ## ⚠️ 平台注意事项（重要）
 
 ### macOS 首次打开

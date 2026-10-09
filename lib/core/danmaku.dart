@@ -638,6 +638,39 @@ class DanmakuConfig {
   static const String keySpeed = 'dsh.danmaku.speed';
   static const String keyArea = 'dsh.danmaku.area';
 
+  // ---- ★★★ 2026-10-09 新增：屏蔽与分类开关（对齐 B 站弹幕设置） ----
+  //
+  // Owner 原话：「弹幕管理 还要支持指定区域的屏幕不显示 大小 屏蔽 速度 等等,
+  //            这些都参考b站的弹幕设置就行了」
+  //
+  // 键名沿用 `dsh.danmaku.` 前缀，且**全部有向后兼容的缺省值** ——
+  // 老用户的 ui-prefs.json 里没有这些键，读出来就是默认（全显示、不屏蔽）。
+
+  /// 滚动弹幕开关（缺省开）
+  static const String keyScroll = 'dsh.danmaku.showScroll';
+
+  /// 顶部固定弹幕开关（缺省开）
+  static const String keyTop = 'dsh.danmaku.showTop';
+
+  /// 底部固定弹幕开关（缺省开）
+  static const String keyBottom = 'dsh.danmaku.showBottom';
+
+  /// 屏蔽词（**每行一个**，存成一个多行字符串）
+  ///
+  /// 为什么用多行字符串而不是 JSON 数组：用户是在一个多行输入框里敲的，
+  /// 存成 JSON 的话每次读写都要序列化，而 UiPrefs 存的就是字符串 ——
+  /// 多行文本**就是**最自然的形态，且用户手改 ui-prefs.json 时也看得懂。
+  static const String keyBlockWords = 'dsh.danmaku.blockWords';
+
+  /// 屏蔽词是否按**正则**解释（缺省否 ⇒ 按子串包含匹配）
+  static const String keyBlockRegex = 'dsh.danmaku.blockRegex';
+
+  /// 屏蔽「按类型」—— 上面三个开关是"显示/不显示"，
+  /// 这一组是"这类弹幕直接不进渲染队列"（与 B 站的"屏蔽类型"对应）。
+  static const String keyBlockScroll = 'dsh.danmaku.blockScroll';
+  static const String keyBlockTop = 'dsh.danmaku.blockTop';
+  static const String keyBlockBottom = 'dsh.danmaku.blockBottom';
+
   // ---- 显示参数的取值范围（UI 滑块与这里共用，别在两处写死） ----
 
   static const double fontScaleMin = 0.6;
@@ -683,6 +716,75 @@ class DanmakuConfig {
   static double get area =>
       _readDouble(keyArea, defaultArea, areaMin, areaMax);
 
+  // ---- ★ 新增项的读（缺省值 = 向后兼容：老用户读出来就是"全显示、不屏蔽"） ----
+
+  static bool get showScroll => UiPrefs.get(keyScroll) != '0';
+
+  static bool get showTop => UiPrefs.get(keyTop) != '0';
+
+  static bool get showBottom => UiPrefs.get(keyBottom) != '0';
+
+  /// 屏蔽词列表（已 trim、去空行、去重）
+  static List<String> get blockWords {
+    final raw = UiPrefs.get(keyBlockWords) ?? '';
+    if (raw.trim().isEmpty) return const <String>[];
+    final out = <String>[];
+    for (final line in raw.split('\n')) {
+      final w = line.trim();
+      if (w.isNotEmpty && !out.contains(w)) out.add(w);
+    }
+    return out;
+  }
+
+  static bool get blockRegex => UiPrefs.get(keyBlockRegex) == '1';
+
+  static bool get blockScroll => UiPrefs.get(keyBlockScroll) == '1';
+
+  static bool get blockTop => UiPrefs.get(keyBlockTop) == '1';
+
+  static bool get blockBottom => UiPrefs.get(keyBlockBottom) == '1';
+
+  /// 一条弹幕该不该显示 —— **纯函数**，可单测。
+  ///
+  /// 判据（全部来自 B 站那套，逐条对应）：
+  /// ```text
+  /// ① 该类型的"显示"开关关着 ⇒ 不显示
+  /// ② 该类型被"屏蔽类型"勾上 ⇒ 不显示
+  /// ③ 文本命中屏蔽词 ⇒ 不显示（正则模式按正则，否则按子串包含）
+  /// ```
+  ///
+  /// ⚠️ 正则**编译失败**时按"不匹配"处理（不是"全都屏蔽"）——
+  ///    用户敲错一个正则不该让所有弹幕消失。
+  static bool shouldShow({
+    required DanmakuMode mode,
+    required String text,
+  }) {
+    switch (mode) {
+      case DanmakuMode.scroll:
+        if (!showScroll || blockScroll) return false;
+      case DanmakuMode.top:
+        if (!showTop || blockTop) return false;
+      case DanmakuMode.bottom:
+        if (!showBottom || blockBottom) return false;
+    }
+    final words = blockWords;
+    if (words.isEmpty) return true;
+    if (blockRegex) {
+      for (final w in words) {
+        try {
+          if (RegExp(w).hasMatch(text)) return false;
+        } catch (_) {
+          // 用户的正则写错了 ⇒ 跳过这一条（见上面的说明）
+        }
+      }
+      return true;
+    }
+    for (final w in words) {
+      if (text.contains(w)) return false;
+    }
+    return true;
+  }
+
   // ---- 写 ----
 
   static void setEnabled(bool v) => UiPrefs.set(keyEnabled, v ? '1' : '0');
@@ -702,6 +804,31 @@ class DanmakuConfig {
 
   static void setArea(double v) =>
       UiPrefs.set(keyArea, _fmt(_clamp(v, areaMin, areaMax)));
+
+  // ---- ★ 2026-10-09 新增项的写 ----
+
+  static void setShowScroll(bool v) => UiPrefs.set(keyScroll, v ? '1' : '0');
+
+  static void setShowTop(bool v) => UiPrefs.set(keyTop, v ? '1' : '0');
+
+  static void setShowBottom(bool v) => UiPrefs.set(keyBottom, v ? '1' : '0');
+
+  /// 写入屏蔽词原文（多行，每行一个）
+  static void setBlockWords(String raw) {
+    if (raw.trim().isEmpty) {
+      UiPrefs.remove(keyBlockWords);
+    } else {
+      UiPrefs.set(keyBlockWords, raw);
+    }
+  }
+
+  static void setBlockRegex(bool v) => UiPrefs.set(keyBlockRegex, v ? '1' : '0');
+
+  static void setBlockScroll(bool v) => UiPrefs.set(keyBlockScroll, v ? '1' : '0');
+
+  static void setBlockTop(bool v) => UiPrefs.set(keyBlockTop, v ? '1' : '0');
+
+  static void setBlockBottom(bool v) => UiPrefs.set(keyBlockBottom, v ? '1' : '0');
 
   /// 清空凭证（用户点"清除"时用）
   static void clearCredentials() {

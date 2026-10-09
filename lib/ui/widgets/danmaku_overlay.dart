@@ -564,8 +564,32 @@ class _DanmakuOverlayState extends State<DanmakuOverlay>
     final old = _layoutKey;
     if (old != null && _sameKey(old, key)) return;
     _layoutKey = key;
+    /*
+     * ★★★ 2026-10-09：**在这里**过一遍用户设置的屏蔽规则。
+     *
+     * # 为什么放在这一层，而不是让调用方先过滤
+     * ```text
+     * 调用方（player_page）把 `_danmakuComments` 原样传进来，那个列表
+     * 同时被别的几处读（条数统计、面板读数、探针）。
+     * 若在调用方过滤，那些读数会跟着变 —— 用户会看到「明明有 1200 条，
+     * 面板说 800 条」，那是**读数撒谎**。
+     * 屏蔽只该影响"画什么"，不该影响"有几条"。
+     * ```
+     *
+     * # 过滤规则（全部来自 DanmakuConfig，纯函数可单测）
+     * ```text
+     * 滚动/顶部/底部各自的显示开关、屏蔽类型、屏蔽词（含正则模式）。
+     * ```
+     *
+     * ⚠️ 过滤后的列表进 `DanmakuTrackAllocator.layout` —— 轨道是按
+     *    **可见的那批**排的。这是对的：被屏蔽的弹幕不该占轨道。
+     */
+    final visible = <DanmakuComment>[
+      for (final c in widget.comments)
+        if (DanmakuConfig.shouldShow(mode: c.mode, text: c.text)) c,
+    ];
     final l = DanmakuTrackAllocator.layout(
-      comments: widget.comments,
+      comments: visible,
       canvasWidth: canvas.width,
       canvasHeight: canvas.height,
       fontSize: fontSize,

@@ -189,6 +189,7 @@ class OverlayCardMotion extends StatelessWidget {
     this.distance = OverlayMotion.cardSlide,
     this.slideFrom,
     this.duration,
+    this.curve,
   });
 
   final Widget child;
@@ -204,6 +205,37 @@ class OverlayCardMotion extends StatelessWidget {
   /// 覆盖默认时长（默认 Motion.base）
   final Duration? duration;
 
+  /// 覆盖默认曲线（默认 OverlayMotion.cardCurve）
+  ///
+  /// ══════════════════════════════════════════════════════════════════
+  /// ★ task-2【⑥】为什么需要这个口子（2026-10-09）
+  /// ══════════════════════════════════════════════════════════════════
+  ///
+  /// Owner 原话（第 6 条）：「选集抽屉阻尼感觉太重」。实测根因是
+  /// **曲线形状**，不是时长：
+  ///
+  /// text
+  /// OverlayMotion.cardCurve = Motion.easeOut = Cubic(0.22, 1, 0.36, 1)
+  ///   260ms 内的进度：26ms 40.1% / 52ms 67.4% / 78ms 83.2%
+  ///                  90ms 87.8% / 130ms 96.1% / 260ms 100%
+  /// ⇒ 前 90ms 就冲完 87.8%，剩下 170ms 只走 12.2%
+  ///   观感是「一冲一顿」，正是 Owner 说的「阻尼重」。
+  ///
+  /// ★ 为什么不直接改 OverlayMotion.cardCurve：
+  ///   它是**全局共享 token**，弹幕设置面板 / 字幕面板 / 直播频道面板 /
+  ///   线路面板四处浮层共用（t99 ⑥ 组那条断言的**本意**就是「四处都接
+  ///   同一个共享件」）。改 token 等于同时改掉那四处的入场手感 ——
+  ///   而 Owner 这条只针对**选集抽屉**。
+  ///
+  /// ⇒ 正解：共享件保留，把曲线做成**逐调用点可覆盖**的参数。
+  ///   选集面板那一处传对称曲线（起步缓、中段快、收尾长），
+  ///   其余三处不传 ⇒ 零改动、手感不变。
+  ///
+  /// ⚠️ 仍必须经 MotionPrefs.curve 降级：Reduce Motion 时给
+  ///    Curves.linear，与全局 token 那条路径的行为一致（见
+  ///    motion_prefs.dart:72-73 与「系统偏好优先」铁律）。
+  final Curve? curve;
+
   @override
   Widget build(BuildContext context) {
     // ★ Reduce Motion ⇒ Duration.zero ⇒ 第一帧就在原位、完全不透明
@@ -212,12 +244,13 @@ class OverlayCardMotion extends StatelessWidget {
       duration ?? OverlayMotion.cardDuration,
     );
     final from = slideFrom ?? Offset(0, distance);
+    final cv = curve ?? OverlayMotion.cardCurve;
 
     return TweenAnimationBuilder<double>(
       // 1 → 0：t 是「距离原位还有多远」的**比例**（1 = 还在起点）
       tween: Tween<double>(begin: 1, end: 0),
       duration: dur,
-      curve: MotionPrefs.curve(context, OverlayMotion.cardCurve),
+      curve: MotionPrefs.curve(context, cv),
       builder: (context, t, child) => Opacity(
         opacity: (1 - t).clamp(0.0, 1.0),
         child: Transform.translate(

@@ -156,6 +156,7 @@ class DanmakuSettingsDialog extends StatefulWidget {
     required this.onClose,
     this.onOpenBili,
     this.onHintAction,
+    this.onChanged,
     this.fill = true,
   });
 
@@ -187,6 +188,16 @@ class DanmakuSettingsDialog extends StatefulWidget {
   /// 宿主的开关，也不该猜）。动作本身由宿主执行 —— 面板只负责把
   /// `DanmakuHint.action` 原样递出去。
   final ValueChanged<DanmakuHintAction>? onHintAction;
+
+  /// 用户改了「显示哪些弹幕 / 屏蔽词」时回调 —— 让宿主重建播放页，
+  /// 好让新的过滤规则**立刻**反映到正在播的那一集上。
+  ///
+  /// ⚠️ 这些项**不走** `onSetXxx` 那一套（那套是"宿主持有状态、面板只管显示"）：
+  ///    屏蔽规则直接读写 `DanmakuConfig`（静态偏好），面板自己就能落盘，
+  ///    所以只需要一个"我改过了，你重建一下"的信号。
+  ///    与上面几个回调**不是**同一层抽象，这是有意的 ——
+  ///    把六个开关也塞进 `onSetXxx` 会让宿主的构造参数再长六行，收益为零。
+  final VoidCallback? onChanged;
 
   /// 根节点是否由**本面板**写成 `Positioned.fill`（默认 true，= 既有行为）
   ///
@@ -277,6 +288,8 @@ class _DanmakuSettingsDialogState extends State<DanmakuSettingsDialog> {
                             _divider(),
                             _displaySection(),
                             _divider(),
+                            _filterSection(),
+                            _divider(),
                             _requestSection(),
                             /*
                                * ★★ Owner 第 1 条：把 403/401 翻成**能照着做**的中文
@@ -309,20 +322,58 @@ class _DanmakuSettingsDialogState extends State<DanmakuSettingsDialog> {
     return widget.fill ? Positioned.fill(child: body) : body;
   }
 
+  /// 面板标题 —— 缺陷 17：**细节说明的落点**
+  ///
+  /// ══════════════════════════════════════════════════════════════
+  /// ★★★ 为什么这里要多一个副标题（2026-10-09 · 缺陷 17 / Lead 裁决）
+  /// ══════════════════════════════════════════════════════════════
+  /// 播放页底栏那枚 `Icons.tune` 按钮的 tooltip 改前是一长串：
+  /// ```text
+  /// '弹幕设置（AppId / 字号 / 透明度）'   <- player_page.dart 旧写法
+  /// ```
+  /// 它有两个毛病（Lead 裁决里点名）：
+  /// ```text
+  /// ① 与同一页「更多」菜单项 `Text('弹幕设置')` 不是同一个叫法；
+  /// ② 括号里那串**是误导性摘要** —— 面板实际有：状态 / 显示开关 /
+  ///    AppId + AppSecret（弹幕库凭证）/ 字号 / 透明度 / 速度 / 占用区域 /
+  ///    重新获取弹幕。三个词既不全、又不是最需要知道的。
+  /// ```
+  /// ⇒ tooltip 截成 `'弹幕设置'`（与菜单项逐字一致），细节挪到**这里** ——
+  ///   面板标题下方的 `note`，用户一打开就看见，也不用悬停才出现。
+  ///
+  /// ⚠️ 标题文字本身仍是 `'弹幕设置'` 四个字**一字不改**（副标题是**新增**）：
+  ///    既有测试 `test/t99_overlay_motion_test.dart:538/542/569` 用的是
+  ///    `find.text('弹幕设置')` ⇒ 多一个 `Text('弹幕库凭证 / 显示 / 请求')`
+  ///    之类的新串不会撞上它（那是不同的字符串，`find.text` 是精确匹配）。
   Widget _header() {
     return Padding(
       padding: const EdgeInsets.fromLTRB(Sp.x6, Sp.x4, Sp.x3, Sp.x2),
       child: Row(
         children: [
-          const Text(
-            '弹幕设置',
-            style: TextStyle(
-              color: Colors.white,
-              fontSize: FontSizes.lg,
-              fontWeight: FontWeight.w600,
+          const Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  '弹幕设置',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: FontSizes.lg,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                SizedBox(height: Sp.x1),
+                Text(
+                  '弹幕库凭证 / 显示 / 请求',
+                  style: TextStyle(
+                    color: Colors.white38,
+                    fontSize: FontSizes.cap,
+                  ),
+                ),
+              ],
             ),
           ),
-          const Spacer(),
           IconButton(
             onPressed: widget.onClose,
             icon: const Icon(Icons.close, color: Colors.white),
@@ -554,6 +605,86 @@ class _DanmakuSettingsDialogState extends State<DanmakuSettingsDialog> {
         ),
         _hint('弹幕可占用的纵向比例（越小越集中在上方，避免挡住字幕）'),
       ],
+    );
+  }
+
+  /// ★★★ 2026-10-09 新增：屏蔽与分类开关（对齐 B 站的弹幕设置）
+  ///
+  /// Owner 原话：「弹幕管理 还要支持指定区域的屏幕不显示 大小 屏蔽 速度 等等,
+  ///            这些都参考b站的弹幕设置就行了」
+  ///
+  /// 与上面「显示」那一节的分工：
+  /// ```text
+  /// 显示  ⇒ 字号/透明度/速度/占用区域（"长什么样"）
+  /// 本节点 ⇒ 显示哪几类 + 屏蔽哪些词（"留哪些"）
+  /// ```
+  /// ⚠️ 与 B 站的差异：B 站把"显示类型"和"屏蔽类型"分成两处（容易让人困惑
+  ///    为什么同一类要开关两次）。这里合并成一组三态开关：
+  ///    关 = 不显示（等价于 B 站两个开关都关）。
+  Widget _filterSection() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _sectionTitle('显示哪些弹幕', note: '即时生效'),
+        _typeSwitch('滚动弹幕', DanmakuConfig.showScroll, DanmakuConfig.setShowScroll),
+        _typeSwitch('顶部弹幕', DanmakuConfig.showTop, DanmakuConfig.setShowTop),
+        _typeSwitch('底部弹幕', DanmakuConfig.showBottom, DanmakuConfig.setShowBottom),
+        _hint('关掉某一类 ⇒ 那一类的弹幕不再进入渲染（也不占轨道）'),
+        const SizedBox(height: 8),
+        _sectionTitle('屏蔽词', note: '每行一个'),
+        _blockWordsField(),
+        _typeSwitch('按正则匹配', DanmakuConfig.blockRegex, DanmakuConfig.setBlockRegex),
+        _hint(
+          DanmakuConfig.blockRegex
+              ? '当前按正则解释（写错了会自动跳过那一条，不会屏蔽全部）'
+              : '当前按"包含"匹配（勾上右边开关可改用正则）',
+        ),
+      ],
+    );
+  }
+
+  /// 三类弹幕的显示开关
+  Widget _typeSwitch(String label, bool value, void Function(bool) set) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(label, style: const TextStyle(fontSize: 13)),
+          ),
+          Switch(
+            value: value,
+            onChanged: (v) {
+              set(v);
+              // 立刻重建对话框，让开关与渲染同步（父层也会收到回调）
+              widget.onChanged?.call();
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 屏蔽词多行输入框
+  ///
+  /// ⚠️ 用 StatefulWidget 的 controller 会与对话框重建打架，所以这里
+  ///    每次 build 都按当前偏好重建 controller（文本很短，代价可忽略）。
+  Widget _blockWordsField() {
+    final ctl = TextEditingController(text: DanmakuConfig.blockWords.join('\n'));
+    return TextField(
+      controller: ctl,
+      maxLines: 4,
+      minLines: 3,
+      style: const TextStyle(fontSize: 13),
+      decoration: const InputDecoration(
+        hintText: '例如：\n剧透\n前方高能',
+        border: OutlineInputBorder(),
+        isDense: true,
+      ),
+      onChanged: (v) {
+        DanmakuConfig.setBlockWords(v);
+        widget.onChanged?.call();
+      },
     );
   }
 
