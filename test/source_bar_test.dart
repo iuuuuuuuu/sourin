@@ -31,11 +31,12 @@ import 'dart:io';
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 
 import 'package:sourin_spike/core/sourin_api.dart';
 import 'package:sourin_spike/ui/widgets/source_bar.dart';
+import 'package:sourin_spike/ui/app_scaffold.dart';
+import 'package:sourin_spike/ui/app_theme.dart';
 
 /// 造 N 个假源（只用得到 id / name；其余字段不影响源条渲染）
 List<ProviderManifest> _sources(int n) => [
@@ -47,12 +48,12 @@ List<ProviderManifest> _sources(int n) => [
         ),
     ];
 
-Widget _host(Widget child, {FThemeData? theme}) {
+Widget _host(Widget child, {ThemeData? theme}) {
   // 默认深色（与 shell 的默认主题一致）；浅色用例显式传 `FTheme.neutral.light`
-  final data = theme ?? FTheme.neutral.dark.desktop;
+  final data = theme ?? AppTheme.themeFor(Brightness.dark);
   return MaterialApp(
-    theme: data.toApproximateMaterialTheme(),
-    builder: (_, c) => FTheme(data: data, child: c ?? const SizedBox()),
+    theme: data,
+    builder: (_, c) => AppThemeHost(data: data, child: c ?? const SizedBox()),
     home: Scaffold(body: Center(child: child)),
   );
 }
@@ -545,7 +546,7 @@ void main() {
           current: 'src-1',
           onSelect: (_) {},
         ),
-        theme: FTheme.neutral.dark.desktop,
+        theme: AppTheme.themeFor(Brightness.dark),
       ));
       await t.pumpAndSettle();
 
@@ -587,7 +588,7 @@ void main() {
           current: 'src-1',
           onSelect: (_) {},
         ),
-        theme: FTheme.neutral.light.desktop,
+        theme: AppTheme.themeFor(Brightness.light),
       ));
       await t.pumpAndSettle();
 
@@ -626,7 +627,7 @@ void main() {
       // ── 深色 ──
       await t.pumpWidget(_host(
         SourceBar(sources: _sources(4), current: 'src-1', onSelect: (_) {}),
-        theme: FTheme.neutral.dark.desktop,
+        theme: AppTheme.themeFor(Brightness.dark),
       ));
       await t.pumpAndSettle();
       final darkText = _textColor(t, '源1');
@@ -636,7 +637,7 @@ void main() {
       // ── 浅色 ──
       await t.pumpWidget(_host(
         SourceBar(sources: _sources(4), current: 'src-1', onSelect: (_) {}),
-        theme: FTheme.neutral.light.desktop,
+        theme: AppTheme.themeFor(Brightness.light),
       ));
       await t.pumpAndSettle();
       final lightText = _textColor(t, '源1');

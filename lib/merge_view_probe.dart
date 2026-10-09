@@ -49,7 +49,6 @@ import 'dart:ui' as ui;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/widgets.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:window_manager/window_manager.dart';
 
@@ -58,8 +57,8 @@ import 'core/sourin_api.dart';
 import 'core/ui_prefs.dart';
 import 'ui/app_theme.dart';
 import 'ui/settings_page.dart';
-import 'ui/theme_bridge.dart';
 import 'ui/widgets/settings_kit.dart';
+import 'ui/app_scaffold.dart';
 
 /// 截图用的重绘边界（包住整棵 UI）
 final _rootKey = GlobalKey();
@@ -233,23 +232,20 @@ Future<void> main() async {
   }
 
   final brightness = AppTheme.resolve(systemBrightness: Brightness.light);
-  final theme = AppTheme.themeFor(brightness);
-  final materialTheme = brightness == Brightness.light
-      ? buildLightMaterialTheme(theme)
-      : buildMaterialTheme(theme);
+  final materialTheme = AppTheme.themeFor(brightness);
 
   runApp(
     RepaintBoundary(
       key: _rootKey,
       child: MaterialApp(
         debugShowCheckedModeBanner: false,
-        localizationsDelegates: FLocalizations.localizationsDelegates,
-        supportedLocales: FLocalizations.supportedLocales,
+        localizationsDelegates: GlobalMaterialLocalizations.delegates,
+        supportedLocales: [Locale("zh", "CN"), Locale("en", "US")],
         theme: materialTheme,
         /*
          * ★★★ 必须复刻生产的两层外壳（否则 SettingsPage 变成 ErrorWidget）
          *
-         * 我第一版只写了 `builder: (c, child) => FTheme(...)`，
+         * 我第一版只写了 `builder: (c, child) => AppThemeHost(...)`，
          * 结果启动即抛：
          * ```text
          * Null check operator used on a null value
@@ -276,9 +272,9 @@ Future<void> main() async {
          *    报的是「✗ JS 插件入口存在」而不是"缺 Material"。
          *    真正的原因在 stderr 的堆栈里 —— **必须读 stderr**。
          */
-        builder: (context, child) => FTheme(
-          data: theme,
-          child: FScaffold(
+        builder: (context, child) => AppThemeHost(
+          data: materialTheme,
+          child: AppScaffold(
             child: Material(
               type: MaterialType.transparency,
               child: child!,

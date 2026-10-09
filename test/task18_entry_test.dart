@@ -44,7 +44,6 @@ import 'dart:ffi' show DynamicLibrary;
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 
 import 'package:sourin_spike/core/clip_download.dart';
@@ -56,6 +55,8 @@ import 'package:sourin_spike/ui/settings/playback_page.dart';
 import 'package:sourin_spike/ui/settings/touch_gestures_page.dart';
 import 'package:sourin_spike/ui/settings_page.dart';
 import 'package:sourin_spike/ui/widgets/settings_kit.dart';
+import 'package:sourin_spike/ui/app_scaffold.dart';
+import 'package:sourin_spike/ui/app_theme.dart';
 
 const String kTag = '[T18E]';
 void log(String s) => debugPrint('$kTag $s');
@@ -83,11 +84,11 @@ void _preloadCoreDll() {
 /// ★ 必须给 `Material` 祖先 —— `SettingsEntryRow` 的 `InkWell`、
 ///   二级页的 `OutlinedButton`/`Slider` 都要它。
 Widget _host(Widget child, {Size size = const Size(1280, 900)}) {
-  final theme = FTheme.neutral.light.desktop;
+  final theme = AppTheme.themeFor(Brightness.light);
   return MaterialApp(
     debugShowCheckedModeBanner: false,
-    theme: theme.toApproximateMaterialTheme(),
-    builder: (context, c) => FTheme(data: theme, child: c ?? const SizedBox()),
+    theme: theme,
+    builder: (context, c) => AppThemeHost(data: theme, child: c ?? const SizedBox()),
     home: Builder(
       builder: (context) {
         final mq = MediaQuery.of(context);

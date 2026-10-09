@@ -32,10 +32,11 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:material_ui/material_ui.dart';
-import 'package:forui/forui.dart';
 
 import 'package:sourin_spike/ui/widgets/skip_marker_dialog.dart';
 import 'package:sourin_spike/ui/widgets/skip_timeline.dart';
+import 'package:sourin_spike/ui/app_scaffold.dart';
+import 'package:sourin_spike/ui/app_theme.dart';
 
 /// 剥掉注释（保留字符串字面量）—— 本仓铁律⑤
 ///
@@ -167,10 +168,10 @@ Future<void> openDialog(WidgetTester t) async {
   t.view.devicePixelRatio = 1.0;
   addTearDown(t.view.reset);
 
-  final theme = FTheme.neutral.light.desktop;
+  final theme = AppTheme.themeFor(Brightness.light);
   await t.pumpWidget(MaterialApp(
-    theme: theme.toApproximateMaterialTheme(),
-    builder: (_, c) => FTheme(data: theme, child: c ?? const SizedBox()),
+    theme: theme,
+    builder: (_, c) => AppThemeHost(data: theme, child: c ?? const SizedBox()),
     home: Scaffold(
       body: Builder(
         builder: (ctx) => ElevatedButton(
@@ -300,7 +301,7 @@ void main() {
        * ⇒ "点四个按钮"得到**两种完全不同的行为**，
        *   而 Owner 要的是四个都"显示对应的那一帧"。
        */
-      final rows = bodyOf(dlgSrc, 'Widget _rows(FColors colors)');
+      final rows = bodyOf(dlgSrc, 'Widget _rows(AppPalette colors)');
       final n = RegExp(r'onPreview: \(v\) => _previewFrame\(v\)')
           .allMatches(rows)
           .length;
@@ -317,7 +318,7 @@ void main() {
        * ★ 防"四个都 seek 到同一个值"这类变异。
        *   逐个断言 `value:` 绑定的字段，且顺序必须是 开始→结束→开始→结束。
        */
-      final rows = bodyOf(dlgSrc, 'Widget _rows(FColors colors)');
+      final rows = bodyOf(dlgSrc, 'Widget _rows(AppPalette colors)');
       final labels = RegExp(r"label: '([^']+)'")
           .allMatches(rows)
           .map((m) => m.group(1))
@@ -389,9 +390,9 @@ void main() {
        * ★ 这与"四个按钮显示那一帧"是**两个不同诉求**，必须各有入口：
        *   点 = 那一帧（静止）／段 = 循环播放（看运动）
        */
-      expect(dlgSrc.contains('Widget _rangePreviewRow(FColors colors)'), isTrue,
+      expect(dlgSrc.contains('Widget _rangePreviewRow(AppPalette colors)'), isTrue,
           reason: '★★★ 必须有独立的「整段」行');
-      final row = bodyOf(dlgSrc, 'Widget _rangePreviewRow(FColors colors)');
+      final row = bodyOf(dlgSrc, 'Widget _rangePreviewRow(AppPalette colors)');
       final n = RegExp(r"label: '片[头尾]'").allMatches(row).length;
       expect(n, 2,
           reason: '★★★ 片头、片尾各一个「整段」按钮 —— 实测到 $n 个');
@@ -401,7 +402,7 @@ void main() {
       /*
        * ★ 逐个断言**配对正确** —— 防"片头按钮传了片尾的区间"这类变异。
        */
-      final row = bodyOf(dlgSrc, 'Widget _rangePreviewRow(FColors colors)');
+      final row = bodyOf(dlgSrc, 'Widget _rangePreviewRow(AppPalette colors)');
       // 片头那个必须传 _introStart / _introEnd
       expect(
           RegExp(r'label: .片头.,[\s\S]*?from: _introStart,[\s\S]*?to: _introEnd,')
@@ -435,7 +436,7 @@ void main() {
        * ② `_toggleRange` 必须调 `_previewRange`（仍然循环播，没退化成抓帧）
        * ```
        */
-      final row = bodyOf(dlgSrc, 'Widget _rangePreviewRow(FColors colors)');
+      final row = bodyOf(dlgSrc, 'Widget _rangePreviewRow(AppPalette colors)');
       expect(row.contains('_toggleRange('), isTrue,
           reason: '★★★ 「整段」必须走 `_toggleRange` —— '
               'Owner：「预览的时候不支持暂停」（点一下要能停住）');
@@ -499,7 +500,7 @@ void main() {
        * ⚠️ 但"不静默失效"这条**仍然成立**：
        *    按钮仍带 Tooltip 说明"未设置，用默认范围"。
        */
-      final row = bodyOf(dlgSrc, 'Widget _rangePreviewRow(FColors colors)');
+      final row = bodyOf(dlgSrc, 'Widget _rangePreviewRow(AppPalette colors)');
       expect(row.contains('fallback'), isTrue,
           reason: '★★★ 未设全时要用 `fallback` 默认区间 —— '
               'Owner：「「整段」未设置时也能点（自动给默认值）」');

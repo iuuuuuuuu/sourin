@@ -435,7 +435,7 @@ class _ProviderImportDialogState extends State<ProviderImportDialog> {
   Widget build(BuildContext context) {
     /*
      * ⚠️ 这里用 `Theme.of(context).colorScheme`（Material）而不是
-     *    `FTheme.of(context).colors`（forui）—— 两种角色名不同：
+     *    `AppPalette.of(context)`（forui）—— 两种角色名不同：
      *    ```text
      *    Material : onSurface / onSurfaceVariant / outlineVariant
      *    forui    : foreground / mutedForeground / border

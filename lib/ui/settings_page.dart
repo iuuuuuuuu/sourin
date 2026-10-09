@@ -216,6 +216,7 @@ import 'widgets/settings_sub_page.dart';
  * 两者都是纯本地读文件，界面上共用卡片上的同一个图标按钮。
  */
 import 'widgets/tvbox_source_panel.dart';
+import '../ui/app_theme.dart';
 
 /// 本文件里的旧名字 → `settings_kit.dart` 里的公开类
 ///

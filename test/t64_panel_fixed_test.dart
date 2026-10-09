@@ -41,13 +41,12 @@
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 
 import 'package:sourin_spike/core/models.dart';
 import 'package:sourin_spike/ui/app_theme.dart';
 import 'package:sourin_spike/ui/detail_page.dart';
-import 'package:sourin_spike/ui/theme_bridge.dart';
+import 'package:sourin_spike/ui/app_scaffold.dart';
 
 /// 剥注释（本仓铁律⑤：`contains` 必须先剥注释）
 ///
@@ -127,8 +126,8 @@ Widget host(Widget child) {
   final theme = AppTheme.themeFor(Brightness.dark);
   return MaterialApp(
     debugShowCheckedModeBanner: false,
-    theme: buildMaterialTheme(theme),
-    builder: (_, c) => FTheme(data: theme, child: c ?? const SizedBox()),
+    theme: theme,
+    builder: (_, c) => AppThemeHost(data: theme, child: c ?? const SizedBox()),
     home: child,
   );
 }

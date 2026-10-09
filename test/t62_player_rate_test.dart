@@ -52,11 +52,12 @@ import 'dart:io';
 // material_ui 已经把 rendering 的公开类型带出来了（analyzer 实测：
 // 单独 import 会报 unnecessary_import）。
 import 'package:flutter_test/flutter_test.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 
 import 'package:sourin_spike/core/ui_prefs.dart';
 import 'package:sourin_spike/ui/widgets/player_settings_sheet.dart';
+import 'package:sourin_spike/ui/app_scaffold.dart';
+import 'package:sourin_spike/ui/app_theme.dart';
 
 // ═══════════════════════════════════════════════════════════════════════
 //  注释剥离器（逐字照抄 player_capability_test.dart:61-110）
@@ -118,10 +119,10 @@ String _codeOf(String path) => _stripComments(File(path).readAsStringSync());
 
 /// 把控件套进真实的壳（与 player_capability_test.dart:120-127 同构）
 Widget _host(Widget child) {
-  final theme = FTheme.neutral.dark.desktop;
+  final theme = AppTheme.themeFor(Brightness.dark);
   return MaterialApp(
-    theme: theme.toApproximateMaterialTheme(),
-    builder: (_, c) => FTheme(data: theme, child: c ?? const SizedBox()),
+    theme: theme,
+    builder: (_, c) => AppThemeHost(data: theme, child: c ?? const SizedBox()),
     home: Scaffold(body: Stack(children: [child])),
   );
 }

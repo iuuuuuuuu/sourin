@@ -39,7 +39,6 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/scheduler.dart';
-import 'package:forui/forui.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:material_ui/material_ui.dart';
 
@@ -48,6 +47,8 @@ import 'package:sourin_spike/ui/player_page.dart';
 import 'package:sourin_spike/ui/tokens.dart';
 import 'package:sourin_spike/ui/widgets/danmaku_settings_dialog.dart';
 import 'package:sourin_spike/ui/widgets/overlay_motion.dart';
+import 'ui/app_scaffold.dart';
+import 'ui/app_theme.dart';
 
 /// 探针输出（真机用；stdout 会被父进程写进 t104_out.log）
 final List<String> _log = <String>[];
@@ -152,11 +153,11 @@ class _ProbeApp extends StatelessWidget {
      * ★ 外面套 forui 的 FTheme：项目里所有面板都用 FTheme.of(context) 取色
      *   （episode_strip / settings 系），没有祖先时会静默兜底。
      */
-    final theme = FTheme.neutral.dark.desktop;
+    final theme = AppTheme.themeFor(Brightness.dark);
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      theme: theme.toApproximateMaterialTheme(),
-      builder: (_, child) => FTheme(data: theme, child: child ?? const SizedBox()),
+      theme: theme,
+      builder: (_, child) => AppThemeHost(data: theme, child: child ?? const SizedBox()),
       home: const PlayerPage(
       provider: 'probe',
       id: 'probe',

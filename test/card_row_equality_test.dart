@@ -58,11 +58,12 @@
 
 import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 
 import 'package:sourin_spike/ui/tokens.dart';
 import 'package:sourin_spike/ui/widgets/reorderable_card_grid.dart';
+import 'package:sourin_spike/ui/app_scaffold.dart';
+import 'package:sourin_spike/ui/app_theme.dart';
 
 /// 量一个子树的高度
 class _Measure extends StatefulWidget {
@@ -108,12 +109,12 @@ void main() {
       double wantHeight(int i) => i.isEven ? 100.0 : 160.0;
 
       final heights = <int, double>{};
-      final theme = FTheme.neutral.light.desktop;
+      final theme = AppTheme.themeFor(Brightness.light);
 
       await tester.pumpWidget(
         MaterialApp(
-          theme: theme.toApproximateMaterialTheme(),
-          builder: (_, c) => FTheme(data: theme, child: c ?? const SizedBox()),
+          theme: theme,
+          builder: (_, c) => AppThemeHost(data: theme, child: c ?? const SizedBox()),
           home: Scaffold(
             body: SingleChildScrollView(
               child: ReorderableCardGrid(
@@ -175,12 +176,12 @@ void main() {
       addTearDown(tester.view.reset);
 
       final heights = <int, double>{};
-      final theme = FTheme.neutral.light.desktop;
+      final theme = AppTheme.themeFor(Brightness.light);
 
       await tester.pumpWidget(
         MaterialApp(
-          theme: theme.toApproximateMaterialTheme(),
-          builder: (_, c) => FTheme(data: theme, child: c ?? const SizedBox()),
+          theme: theme,
+          builder: (_, c) => AppThemeHost(data: theme, child: c ?? const SizedBox()),
           home: Scaffold(
             body: SingleChildScrollView(
               child: ReorderableCardGrid(

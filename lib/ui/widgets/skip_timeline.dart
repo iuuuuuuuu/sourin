@@ -70,8 +70,8 @@ import 'dart:math' as math;
 
 // ★ `DragStartBehavior` 只在 gestures 里导出（material_ui 不转出它）
 import 'package:flutter/gestures.dart' show DragStartBehavior;
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
+import '../../ui/app_palette.dart';
 
 import 'skip_marker_dialog.dart' show SkipEdge;
 
@@ -568,7 +568,7 @@ class _SkipTimelineState extends State<SkipTimeline> {
 
   @override
   Widget build(BuildContext context) {
-    final colors = FTheme.of(context).colors;
+    final colors = AppPalette.of(context);
 
     return LayoutBuilder(
       builder: (context, box) {
@@ -874,7 +874,7 @@ class _QuarkTimelinePainter extends CustomPainter {
   final double arrowH;
   final double inset;
   final double canvasH;
-  final FColors colors;
+  final AppPalette colors;
 
   /// 片头色 —— 原版 `--skipdlg-accent: #e8b04b`（琥珀，给**深色**播放器底做的）
   static const _introAmber = Color(0xFFE8B04B);
@@ -1143,8 +1143,8 @@ class _QuarkTimelinePainter extends CustomPainter {
      * ```text
      * ① 颜色确实是黑的 —— 不是观感问题，是**取色取错了**：
      *      `_drawPlayhead` 用的是 `colors.primary`，
-     *      而这里的 `colors` 是 **forui 的 `FColors`**
-     *      （`FTheme.of(context).colors`，见 `:487`）。
+     *      而这里的 `colors` 是 **forui 的 `AppPalette`**
+     *      （`AppPalette.of(context)`，见 `:487`）。
      *      实测 `FTheme.neutral.light` 的 `primary = #171717`（近黑）
      *      —— **不是** Material 那套 `#3B6FE0` 品牌蓝。
      *      ★ 原注释写着「颜色 colors.foreground → colors.primary，
