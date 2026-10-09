@@ -27,6 +27,7 @@
 //  播放器画面区不跟随浅色主题 —— 见 `_BottomBarIcon` / `PlayerPopoverSurface`，
 //  全部写死白/深灰，不读 `Theme.of(context).colorScheme`。
 
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:material_ui/material_ui.dart';
 
 import '../../core/models.dart' show StreamCandidate;
@@ -89,7 +90,7 @@ class PlayerBottomBar extends StatelessWidget {
     super.key,
     required this.controller,
     required this.playing,
-    required this.position,
+    required this.positionListenable,
     required this.duration,
     required this.isLive,
     required this.rate,
@@ -134,7 +135,12 @@ class PlayerBottomBar extends StatelessWidget {
   final PopoverController controller;
 
   final bool playing;
-  final Duration position;
+
+  /// ★ 播放位置的**局部**真源（）
+  ///
+  /// 为什么不是 ：改前这里是普通字段，每秒一次整页 。
+  /// 改成 listenable 之后只有「时间 + 进度条」那一小块在重建。
+  final ValueListenable<Duration> positionListenable;
   final Duration duration;
   final bool isLive;
   final double rate;
@@ -203,25 +209,25 @@ class PlayerBottomBar extends StatelessWidget {
   ];
 
   List<PopoverOption<double>> rateOptions() => [
-        for (final r in kRates)
-          PopoverOption<double>(
-            value: r,
-            label: '${_trimRate(r)}x',
-            checked: (r - rate).abs() < 0.001,
-          ),
-      ];
+    for (final r in kRates)
+      PopoverOption<double>(
+        value: r,
+        label: '${_trimRate(r)}x',
+        checked: (r - rate).abs() < 0.001,
+      ),
+  ];
 
   static String _trimRate(double r) =>
       r == r.roundToDouble() ? r.toStringAsFixed(0) : '$r';
 
   List<PopoverOption<String>> streamOptions() => [
-        for (final s in streams)
-          PopoverOption<String>(
-            value: s.url,
-            label: s.label ?? s.quality ?? s.url,
-            checked: currentStream != null && currentStream!.url == s.url,
-          ),
-      ];
+    for (final s in streams)
+      PopoverOption<String>(
+        value: s.url,
+        label: s.label ?? s.quality ?? s.url,
+        checked: currentStream != null && currentStream!.url == s.url,
+      ),
+  ];
 
   /// 底栏的常驻 + 条件动作（宽档）
   ///
@@ -340,17 +346,16 @@ class PlayerBottomBar extends StatelessWidget {
         final id = controller.openId;
         final body = switch (id) {
           PlayerPopoverIds.rate => _panelSurface(
-              rateOptions().map(_rateRow).toList(),
-            ),
+            rateOptions().map(_rateRow).toList(),
+          ),
           PlayerPopoverIds.quality when qualityOptions.isNotEmpty =>
             _panelSurface(qualityOptions.map(_row).toList()),
-          PlayerPopoverIds.tracks when trackGroups.isNotEmpty =>
-            _panelSurface([
-              for (final entry in trackGroups.entries) ...[
-                PopoverGroupLabel(entry.key),
-                for (final o in entry.value) _row(o),
-              ],
-            ], width: 220),
+          PlayerPopoverIds.tracks when trackGroups.isNotEmpty => _panelSurface([
+            for (final entry in trackGroups.entries) ...[
+              PopoverGroupLabel(entry.key),
+              for (final o in entry.value) _row(o),
+            ],
+          ], width: 220),
           PlayerPopoverIds.danmaku => _danmakuPanel(),
           PlayerPopoverIds.more => _morePanel(),
           _ => const SizedBox.shrink(),
@@ -380,49 +385,47 @@ class PlayerBottomBar extends StatelessWidget {
       );
 
   Widget _row(PopoverOption<String> o) => PopoverRow(
-        label: o.label,
-        hint: o.hint,
-        checked: o.checked,
-        onTap: o.enabled
-            ? () {
-                onPickQuality?.call(o.value);
-                controller.close();
-              }
-            : null,
-      );
+    label: o.label,
+    hint: o.hint,
+    checked: o.checked,
+    onTap: o.enabled
+        ? () {
+            onPickQuality?.call(o.value);
+            controller.close();
+          }
+        : null,
+  );
 
   Widget _rateRow(PopoverOption<double> o) => PopoverRow(
-        label: o.label,
-        checked: o.checked,
-        onTap: () {
-          onRate(o.value);
-          controller.close();
-        },
-      );
+    label: o.label,
+    checked: o.checked,
+    onTap: () {
+      onRate(o.value);
+      controller.close();
+    },
+  );
 
   Widget _danmakuPanel() => _panelSurface([
-        PopoverRow(
-          label: danmakuEnabled ? '关闭弹幕' : '开启弹幕',
-          checked: danmakuEnabled,
-          onTap: () {
-            onDanmakuToggle();
-            controller.close();
-          },
-        ),
-        const PopoverDivider(),
-        PopoverRow(
-          label: danmakuBusy ? '弹幕设置（加载中…）' : '弹幕设置',
-          onTap: () {
-            onDanmakuSettings();
-            controller.close();
-          },
-        ),
-      ]);
+    PopoverRow(
+      label: danmakuEnabled ? '关闭弹幕' : '开启弹幕',
+      checked: danmakuEnabled,
+      onTap: () {
+        onDanmakuToggle();
+        controller.close();
+      },
+    ),
+    const PopoverDivider(),
+    PopoverRow(
+      label: danmakuBusy ? '弹幕设置（加载中…）' : '弹幕设置',
+      onTap: () {
+        onDanmakuSettings();
+        controller.close();
+      },
+    ),
+  ]);
 
-  Widget _morePanel() => PlayerMoreMenu(
-        groups: more.groups,
-        onDismiss: controller.close,
-      );
+  Widget _morePanel() =>
+      PlayerMoreMenu(groups: more.groups, onDismiss: controller.close);
 
   Widget _body(BuildContext context) {
     final bottomInset = MediaQuery.paddingOf(context).bottom;
@@ -457,30 +460,37 @@ class PlayerBottomBar extends StatelessWidget {
   /// ★ 时间与滑杆**同一行**（进度条占 Expanded）：手机上时间让位给滑杆，
   ///   桌面两端对齐 —— 两种形态都只需要这一行，字号同样取 `FontSizes.cap`。
   Widget _progressRow() {
-    final now = Text(
-      _fmt(position),
-      style: const TextStyle(color: Colors.white, fontSize: FontSizes.cap),
-    );
     final total = Text(
       _fmt(duration),
       style: const TextStyle(color: Colors.white, fontSize: FontSizes.cap),
     );
-    return Row(
-      children: [
-        now,
-        const SizedBox(width: Sp.x2),
-        Expanded(
-          child: PlayerProgressSlider(
-            position: position,
-            duration: duration,
-            buffered: buffered,
-            onSeek: onSeek,
-            barKey: bufferBarKey,
+    // ★ 整块进度区（含「已播放时间」与滑杆）由 listenable 驱动：
+    //   播放位置每秒变一次 ⇒ 只有这一小块重建，底栏按钮行与整页都不动。
+    return ValueListenableBuilder<Duration>(
+      valueListenable: positionListenable,
+      builder: (context, position, _) => Row(
+        children: [
+          Text(
+            _fmt(position),
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: FontSizes.cap,
+            ),
           ),
-        ),
-        const SizedBox(width: Sp.x2),
-        total,
-      ],
+          const SizedBox(width: Sp.x2),
+          Expanded(
+            child: PlayerProgressSlider(
+              position: position,
+              duration: duration,
+              buffered: buffered,
+              onSeek: onSeek,
+              barKey: bufferBarKey,
+            ),
+          ),
+          const SizedBox(width: Sp.x2),
+          total,
+        ],
+      ),
     );
   }
 
@@ -546,13 +556,7 @@ class PlayerBottomBar extends StatelessWidget {
 
         final wide = avail >= _kBarRowWidth;
         if (wide) {
-          return Row(
-            children: [
-              ...primary,
-              const Spacer(),
-              ...secondary,
-            ],
-          );
+          return Row(children: [...primary, const Spacer(), ...secondary]);
         }
         // 窄 / 中档：第一行常驻 + 弹性 + 全屏，其余条件项横滑兜底
         return Column(
@@ -564,9 +568,7 @@ class PlayerBottomBar extends StatelessWidget {
                 ...primary,
                 const Spacer(),
                 _BarIconButton(
-                  icon: fullscreen
-                      ? Icons.fullscreen_exit
-                      : Icons.fullscreen,
+                  icon: fullscreen ? Icons.fullscreen_exit : Icons.fullscreen,
                   tooltip: fullscreen ? '退出全屏' : '全屏',
                   onTap: onToggleFullscreen,
                 ),
@@ -599,7 +601,6 @@ class _BarIconButton extends StatelessWidget {
     this.enabled = true,
     this.active = false,
     this.big = false,
-
   });
 
   final IconData icon;
@@ -609,20 +610,19 @@ class _BarIconButton extends StatelessWidget {
   final bool active;
   final bool big;
 
-
   @override
   Widget build(BuildContext context) => IconButton(
-        onPressed: enabled ? onTap : null,
-        tooltip: tooltip,
-        visualDensity: VisualDensity.compact,
-        icon: Icon(
-          icon,
-          size: big ? 30 : 20,
-          color: !enabled
-              ? Colors.white24
-              : (active ? const Color(0xFF32C7FF) : Colors.white),
-        ),
-      );
+    onPressed: enabled ? onTap : null,
+    tooltip: tooltip,
+    visualDensity: VisualDensity.compact,
+    icon: Icon(
+      icon,
+      size: big ? 30 : 20,
+      color: !enabled
+          ? Colors.white24
+          : (active ? const Color(0xFF32C7FF) : Colors.white),
+    ),
+  );
 }
 
 /// 带下划文字的入口（选集 / 清晰度 / 弹幕 / 更多）
@@ -669,8 +669,7 @@ class _PopoverButton extends StatelessWidget {
       ),
     );
     final button = TextButton(
-      onPressed:
-          onTap ?? () => controller.toggle(id),
+      onPressed: onTap ?? () => controller.toggle(id),
       style: TextButton.styleFrom(
         visualDensity: VisualDensity.compact,
         padding: const EdgeInsets.symmetric(horizontal: Sp.x1),
@@ -706,26 +705,26 @@ class _VolumeControl extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          _BarIconButton(
-            icon: muted || volume == 0
-                ? Icons.volume_off
-                : (volume < 50 ? Icons.volume_down : Icons.volume_up),
-            tooltip: '静音',
-            onTap: onToggleMute,
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      _BarIconButton(
+        icon: muted || volume == 0
+            ? Icons.volume_off
+            : (volume < 50 ? Icons.volume_down : Icons.volume_up),
+        tooltip: '静音',
+        onTap: onToggleMute,
+      ),
+      if (!compact)
+        SizedBox(
+          width: 72,
+          child: Slider(
+            value: muted ? 0 : volume,
+            max: 100,
+            onChanged: onVolume,
           ),
-          if (!compact)
-            SizedBox(
-              width: 72,
-              child: Slider(
-                value: muted ? 0 : volume,
-                max: 100,
-                onChanged: onVolume,
-              ),
-            ),
-        ],
-      );
+        ),
+    ],
+  );
 }
 
 /// 画面缩放滑条（从旧 `_ZoomSliderCard` 平移过来，形态不变）
@@ -745,44 +744,41 @@ class PlayerZoomSliderCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Container(
-        margin: const EdgeInsets.only(bottom: Sp.x2),
-        padding: const EdgeInsets.symmetric(horizontal: Sp.x3, vertical: Sp.x1),
-        decoration: BoxDecoration(
-          color: Colors.black.withValues(alpha: 0.85),
-          borderRadius: Radii.rSm,
+    margin: const EdgeInsets.only(bottom: Sp.x2),
+    padding: const EdgeInsets.symmetric(horizontal: Sp.x3, vertical: Sp.x1),
+    decoration: BoxDecoration(
+      color: Colors.black.withValues(alpha: 0.85),
+      borderRadius: Radii.rSm,
+    ),
+    child: Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        const Text(
+          '画面缩放',
+          style: TextStyle(color: Colors.white, fontSize: FontSizes.cap),
         ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Text(
-              '画面缩放',
-              style: TextStyle(color: Colors.white, fontSize: FontSizes.cap),
-            ),
-            Expanded(
-              child: Slider(
-                value: zoom.clamp(50.0, 200.0),
-                min: 50,
-                max: 200,
-                onChanged: onChanged,
-                onChangeEnd: onDone,
-              ),
-            ),
-            Text(
-              '${zoom.round()}%',
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: FontSizes.cap,
-              ),
-            ),
-            IconButton(
-              onPressed: onClose,
-              visualDensity: VisualDensity.compact,
-              icon: const Icon(Icons.close, size: 16, color: Colors.white),
-              tooltip: '关闭',
-            ),
-          ],
+        Expanded(
+          child: Slider(
+            value: zoom.clamp(50.0, 200.0),
+            min: 50,
+            max: 200,
+            onChanged: onChanged,
+            onChangeEnd: onDone,
+          ),
         ),
-      );
+        Text(
+          '${zoom.round()}%',
+          style: const TextStyle(color: Colors.white, fontSize: FontSizes.cap),
+        ),
+        IconButton(
+          onPressed: onClose,
+          visualDensity: VisualDensity.compact,
+          icon: const Icon(Icons.close, size: 16, color: Colors.white),
+          tooltip: '关闭',
+        ),
+      ],
+    ),
+  );
 }
 
 /// 进度条上那段「已缓冲」的区间
@@ -820,9 +816,8 @@ class PlayerProgressSlider extends StatelessWidget {
     return LayoutBuilder(
       builder: (context, c) {
         final w = c.maxWidth <= 0 ? 1.0 : c.maxWidth;
-        Duration at(double dx) => Duration(
-              milliseconds: ((dx.clamp(0.0, w) / w) * total).round(),
-            );
+        Duration at(double dx) =>
+            Duration(milliseconds: ((dx.clamp(0.0, w) / w) * total).round());
         return GestureDetector(
           behavior: HitTestBehavior.opaque,
           onTapDown: (d) => onSeek(at(d.localPosition.dx)),
@@ -845,16 +840,19 @@ class PlayerProgressSlider extends StatelessWidget {
                 // （后者在 start > 0 时算出的偏移会随宽度漂）
                 if (buffered != null)
                   Positioned(
-                    left: (buffered!.start.inMilliseconds.toDouble()
-                            .clamp(0.0, total) /
-                        total) *
+                    left:
+                        (buffered!.start.inMilliseconds.toDouble().clamp(
+                              0.0,
+                              total,
+                            ) /
+                            total) *
                         w,
                     width:
                         ((buffered!.end.inMilliseconds.toDouble() -
                                     buffered!.start.inMilliseconds.toDouble())
                                 .clamp(0.0, total) /
                             total) *
-                            w,
+                        w,
                     top: 8,
                     bottom: 8,
                     child: Container(

@@ -125,6 +125,7 @@ import 'remote_bridge.dart';
 import 'titlebar_visibility.dart';
 import 'media_session.dart';
 import 'cast/cast_button.dart';
+import 'player/episode_panel.dart';
 import 'player/player_bottom_bar.dart';
 import 'player/player_more_menu.dart';
 import 'player/player_popover.dart';
@@ -704,6 +705,23 @@ class _PlayerPageState extends State<PlayerPage>
 
   /// 当前播放位置 / 时长（秒）
   Duration _position = Duration.zero;
+
+  /// ★ 2026-10-09（Owner 第 10 条「很多地方卡卡的」）：播放位置的**局部**真源
+  ///
+  /// # 为什么要有它（改前的实测）
+  /// ```text
+  /// 改前：`_onPositionTick` 每跨一秒 `setState(() {})` **一次** ⇒
+  ///   整棵 1.6 万行的播放页重建 —— 底栏那一小块时间变了，
+  ///   却把弹幕层、顶栏、所有浮层都重排一遍。
+  /// 改后：位置只写进这个 notifier，底栏用 `ValueListenableBuilder` 单独重建；
+  ///   **整页不再因为时间前进而重建**。
+  /// ```
+  ///
+  /// ⚠️ `_position` 字段**保留**（seek / 续播 / 快退 / 弹幕判定都读它，
+  ///    且读的是**最新值**，语义不变）；这个 notifier 只承担"通知 UI 重画"。
+  final ValueNotifier<Duration> _positionNotifier = ValueNotifier<Duration>(
+    Duration.zero,
+  );
   Duration _duration = Duration.zero;
 
   /// 真实时长（从流里读出来的，不是元数据的）
@@ -2671,8 +2689,10 @@ class _PlayerPageState extends State<PlayerPage>
        */
       final cur = await native.getProperty('hwdec-current');
       // ignore: lines_longer_than_80_chars
-      debugPrint('[PLAYER] hwdec-current = $cur'
-          '（就绪=${ready ? "是" : "否，等待 ${waited * 250}ms 超时"}）');
+      debugPrint(
+        '[PLAYER] hwdec-current = $cur'
+        '（就绪=${ready ? "是" : "否，等待 ${waited * 250}ms 超时"}）',
+      );
     } catch (e) {
       debugPrint('[PLAYER] 读 hwdec-current 失败: $e');
     }
@@ -2849,7 +2869,11 @@ class _PlayerPageState extends State<PlayerPage>
     _player.stream.playing.listen((v) {
       if (mounted) setState(() => _playing = v);
       // 缺陷 13：暂停时不轮询缓冲属性
-      if (v) { _bufferPoller?.start(); } else { _bufferPoller?.stop(); }
+      if (v) {
+        _bufferPoller?.start();
+      } else {
+        _bufferPoller?.stop();
+      }
     });
     _player.stream.position.listen(_onPositionTick);
     _player.stream.duration.listen((d) {
@@ -3122,7 +3146,16 @@ class _PlayerPageState extends State<PlayerPage>
     _position = p; // ★ 无条件更新（读值语义不变）
     if (secChanged) {
       debugPlayerPositionSetStates++; // ★ 仅探针计数
-      setState(() {});
+      /*
+       * ★★★ 2026-10-09：这里**不再 setState**。
+       *
+       * 改前 `setState(() {})` 触发的是**整页**重建，而这次变化只影响
+       * 底栏的时间与进度条 —— 其余 1.6 万行（弹幕层、顶栏、浮层、描边）
+       * 一行都不需要重排。
+       * ⇒ 只通知 notifier，由底栏那一小块 `ValueListenableBuilder` 重建。
+       * 实测读数见交付报告（改前 1 次/秒整页重建 → 改后 0 次）。
+       */
+      _positionNotifier.value = p;
       // ★ task-13 ⑦ 面板开着时刷一次弹幕实时读数（每秒一次，开销可忽略）
       if (_danmakuSheetOpen) _refreshDanmakuReadout();
     }
@@ -4129,6 +4162,15 @@ class _PlayerPageState extends State<PlayerPage>
     );
   }
 
+  /// 选集面板这一端是**右侧侧栏**还是**底部面板**
+  ///
+  /// ★ 判据（几何，不是设备类型）：**宽 ≥ 高**（横屏）走侧栏，竖屏走底部面板。
+  ///   手机横屏（915×412）与桌面、TV 都落进侧栏那一支 —— 它们都是"旁边还有地方"。
+  bool _episodePanelIsDrawer(BuildContext context) {
+    final s = MediaQuery.sizeOf(context);
+    return s.width >= s.height;
+  }
+
   /// 「更多」浮层的分组清单
   ///
   /// ★ 每一次调用都**现算**（不缓存）—— 组里有哪些项取决于集数 / 直播 / 画中画
@@ -4143,11 +4185,11 @@ class _PlayerPageState extends State<PlayerPage>
           onTap: () => unawaited(_takeScreenshot()),
         ),
         MoreMenuEntry(
-            label: '画面缩放',
-            icon: Icons.zoom_in_map,
-            hint: '${_videoZoomPct.round()}%',
-            onTap: () => setState(() => _zoomOpen = !_zoomOpen),
-          ),
+          label: '画面缩放',
+          icon: Icons.zoom_in_map,
+          hint: '${_videoZoomPct.round()}%',
+          onTap: () => setState(() => _zoomOpen = !_zoomOpen),
+        ),
         if (_pipSupported)
           MoreMenuEntry(
             label: _pipActive ? '退出画中画' : '画中画',
@@ -7807,6 +7849,7 @@ class _PlayerPageState extends State<PlayerPage>
       _biliSheetOpen ||
       // ★ task-31 ⑤ 在线搜索字幕面板（同款全屏浮层）
       _subtitlePanelOpen;
+
   /// ★★★ 错误态下顶栏那枚返回箭头**必须仍然可用**（Owner 2026-10-09 新增）
   ///
   /// ══════════════════════════════════════════════════════════════════
@@ -8396,7 +8439,6 @@ class _PlayerPageState extends State<PlayerPage>
     _showControls();
   }
 
-
   // ══════════════════════════════════════════════════════════════════
   // ★ 探针钩子（缺陷 1 / 11 静音状态机）—— 仅测试用，不参与生产逻辑
   // ══════════════════════════════════════════════════════════════════
@@ -8440,9 +8482,8 @@ class _PlayerPageState extends State<PlayerPage>
   }
 
   /// 探针用：读回实际下发过的音量序列（'/' 分隔）
-  String debugPlayerVolumeWrites() => _probeVolumeWrites
-      .map((e) => e.toStringAsFixed(0))
-      .join('/');
+  String debugPlayerVolumeWrites() =>
+      _probeVolumeWrites.map((e) => e.toStringAsFixed(0)).join('/');
 
   /// 探针用：清空下发记录
   void debugPlayerResetVolumeWrites() => _probeVolumeWrites.clear();
@@ -8454,13 +8495,17 @@ class _PlayerPageState extends State<PlayerPage>
     _volumeBeforeMute = null;
     _probeVolumeWrites.clear();
   }
+
   /// ★ 缺陷 13：把探针塞进去的缓冲区间直接推给 UI（不经 mpv）
   ///
   /// 为什么要这个口子：真实 mpv 只在**真播放**时才给出 demuxer-cache-*，
   /// 而探针要在**任意可控输入**下断言缓冲条的几何。
   /// 本方法走的是与生产**完全相同**的那条 `setState(_bufferedRange)`，
   /// 所以它证明的是"UI 对区间的反应"，不是"另一个实现"。
-  BufferedRange? debugPlayerPushBufferForProbe(Duration? end, {Duration? start}) {
+  BufferedRange? debugPlayerPushBufferForProbe(
+    Duration? end, {
+    Duration? start,
+  }) {
     setState(() {
       _bufferedRange = end == null
           ? null
@@ -8484,6 +8529,7 @@ class _PlayerPageState extends State<PlayerPage>
     return 'left=${o.dx.toStringAsFixed(1)}|top=${o.dy.toStringAsFixed(1)}'
         '|w=${s.width.toStringAsFixed(1)}|h=${s.height.toStringAsFixed(1)}';
   }
+
   void _rateBy(double delta) {
     final r = (_rate + delta).clamp(0.25, 4.0);
     // 保留两位小数，避免 0.30000000000000004 这种
@@ -8633,9 +8679,7 @@ class _PlayerPageState extends State<PlayerPage>
          * ⚠️ 用 unawaited 包住，避免 lint 与「未处理 Future」。
          * ⚠️ 失败仍然吞掉（与 await 分支同一语义）—— 不该因此让播放中断。
          */
-        unawaited(
-          windowManager.setFullScreen(next).catchError((Object _) {}),
-        );
+        unawaited(windowManager.setFullScreen(next).catchError((Object _) {}));
       }
     } catch (_) {
       // 插件不可用（极端情况）—— 不该因此让播放中断
@@ -8722,7 +8766,7 @@ class _PlayerPageState extends State<PlayerPage>
   void _autoHideNow() {
     if (mounted && _playing && !_hintsOpen && !_zoomOpen) {
       setState(() => _controlsVisible = false);
-        /*
+      /*
          * ★★★ 2026-10-08（Owner 追加：顶栏要与底栏**联动**一起消失）
          *
          * # 改前这里**没有**这一行 —— 这正是「顶栏一直不消失」的根因之一
@@ -9787,7 +9831,7 @@ class _PlayerPageState extends State<PlayerPage>
   ///
   /// ⚠️ 顺序：**先退全屏，再 pop**。反过来的话 pop 已经开始了，
   ///    退全屏的动画会和页面切换动画打架，看起来像闪一下。
-    /// ★ task-8 ① 探针：直接 await `_toggleFullscreen()`，量它到底要多久 / 卡不卡。
+  /// ★ task-8 ① 探针：直接 await `_toggleFullscreen()`，量它到底要多久 / 卡不卡。
   ///
   /// # 为什么要单独量它
   /// ```text
@@ -9799,7 +9843,8 @@ class _PlayerPageState extends State<PlayerPage>
     await _toggleFullscreen();
     return sw.elapsedMilliseconds;
   }
-Future<void> _exitPlayer() async {
+
+  Future<void> _exitPlayer() async {
     /*
      * ★★★ task-8 ①（Owner 2026-10-09 第三批）：返回卡顿
      *
@@ -9886,8 +9931,7 @@ Future<void> _exitPlayer() async {
           return;
         }
         if (spanSec != null) {
-          final expected =
-              _position.inMilliseconds + (spanSec * 1000).round();
+          final expected = _position.inMilliseconds + (spanSec * 1000).round();
           if ((end.inMilliseconds - expected).abs() > 2000) {
             debugPrint(
               '[PLAYER] 缓冲区间校验不过：end=${end.inMilliseconds}ms '
@@ -9901,10 +9945,7 @@ Future<void> _exitPlayer() async {
         }
         final startMs = spanSec == null
             ? null
-            : (end.inMilliseconds - (spanSec * 1000).round()).clamp(
-                0,
-                1 << 40,
-              );
+            : (end.inMilliseconds - (spanSec * 1000).round()).clamp(0, 1 << 40);
         setState(() {
           _bufferedRange = BufferedRange(
             end: end,
@@ -9968,6 +10009,7 @@ Future<void> _exitPlayer() async {
     _onEpisodeChanged = null;
     // ★ popover 的唯一真值源（ChangeNotifier ⇒ 必须 dispose）
     _popover.dispose();
+    _positionNotifier.dispose();
     /*
      * ★ 注销 early handler + 释放显式 FocusNode（task-42）
      *
@@ -10685,15 +10727,15 @@ Future<void> _exitPlayer() async {
                      *    false ⇒ 整条不渲染）。现在用 `visible` 表达同一件事。
                      */
                     _TopBar(
-                        title: _title,
-                        episodeTitle: _epIndex < _episodes.length
-                            ? _episodes[_epIndex].title
-                            : widget.episodeTitle,
-                        isLive: _isLive,
-                        providerName: _providerName,
-                        onBack: () => unawaited(_exitPlayer()),
-                        onHints: hints.isEmpty ? null : _toggleHints,
-                        /*
+                      title: _title,
+                      episodeTitle: _epIndex < _episodes.length
+                          ? _episodes[_epIndex].title
+                          : widget.episodeTitle,
+                      isLive: _isLive,
+                      providerName: _providerName,
+                      onBack: () => unawaited(_exitPlayer()),
+                      onHints: hints.isEmpty ? null : _toggleHints,
+                      /*
                      * ★ 常驻悬浮返回键（用户缺陷②）
                      *
                      * 用户原话：
@@ -10702,7 +10744,7 @@ Future<void> _exitPlayer() async {
                      * 顶栏随控制条 3 秒后一起消失 ⇒ 屏幕上再没有可点的返回口。
                      * 判据与设计见 `_FloatingBackButton` 的长注释。
                      */
-                        /*
+                      /*
                          * ★★★ 缺陷（Owner 2026-10-09）：错误态下**也要**给返回口
                          *
                          * 改前只有 `_canUseFloatingBack` ⇒ `_error != null` 时传 null
@@ -10710,7 +10752,7 @@ Future<void> _exitPlayer() async {
                          * 而顶栏那枚又因 `visible == false` 被 IgnorePointer 挡住。
                          * 见 `_canUseTopBarBack` 的长注释。
                          */
-                        /*
+                      /*
                          * ★ 顶栏渐变条的可见性 —— 与**底栏同一条判据**
                          *
                          * 底栏的判据是
@@ -10736,10 +10778,10 @@ Future<void> _exitPlayer() async {
                          * ⚠️ 为什么**不是**复用 `_canUseFloatingBack`：那一位在错误态恒 false
                          *    （它含 `_error == null`），写进去等于没改。
                          */
-                        visible:
-                            (_controlsVisible && _error == null) ||
-                                _canUseTopBarBack,
-                        /*
+                      visible:
+                          (_controlsVisible && _error == null) ||
+                          _canUseTopBarBack,
+                      /*
                          * ★ 2026-10-08（Owner 第 9 条）：顶栏的淡入淡出。
                          *
                          * ⚠️ 只喂给那条渐变条 —— 常驻悬浮返回键走
@@ -10772,11 +10814,11 @@ Future<void> _exitPlayer() async {
                          * ⚠️ 正常播放时（`_error == null`）表达式退化成原来的 `_controlsFade`
                          *    **逐字节不变** ⇒ 缺陷 2 的几何/交叉淡化判据（zz_t2 探针）不受影响。
                          */
-                        fade: _canUseTopBarBack
-                            ? kAlwaysCompleteAnimation
-                            : _controlsFade,
-                        backArrowKey: _topBarBackKey,
-                        /*
+                      fade: _canUseTopBarBack
+                          ? kAlwaysCompleteAnimation
+                          : _controlsFade,
+                      backArrowKey: _topBarBackKey,
+                      /*
                          * ★★★ task-16（Owner：「全屏左上角这个单独的返回icon,
                          *     还没消失」）—— 悬浮键的**常驻**判据。
                          *
@@ -10788,7 +10830,7 @@ Future<void> _exitPlayer() async {
                          *    不是本按钮自己的矩形 —— 用户的本意是
                          *    「鼠标在画面上就该有返回口」。
                          */
-                      ),
+                    ),
 
                     /*
                  * ── 直播"只有音频能播"的提示（用户报的黑屏）──
@@ -11003,7 +11045,7 @@ Future<void> _exitPlayer() async {
                         !_videoOutputDead)
                       _BottomBar(
                         playing: _playing,
-                        position: _position,
+                        positionNotifier: _positionNotifier,
                         duration: _duration,
                         isLive: _isLive,
                         rate: _rate,
@@ -11153,16 +11195,17 @@ Future<void> _exitPlayer() async {
                      * 点了只弹一句提示的按钮”更诚实（详见 _BottomBar
                      * 的 castUrl 文档）。
                      */
-                    onCast: _openCast,
-                    castUrl: _current?.url ?? '',
-                    castHeaders: _current?.httpHeaders ?? const <String, String>{},
-                    castTitle: _castTitle,
-                    /*
+                        onCast: _openCast,
+                        castUrl: _current?.url ?? '',
+                        castHeaders:
+                            _current?.httpHeaders ?? const <String, String>{},
+                        castTitle: _castTitle,
+                        /*
                      * ★ 2026-10-08（Owner 第 9 条）：底栏与顶栏**同一个**
                      *    `_controlsFade` 实例 ⇒ 两条一起淡出，
                      *    不会出现「顶栏没了、底栏还在」的半截状态。
                      */
-                    fade: _controlsFade,
+                        fade: _controlsFade,
                         buffered: _isLive ? null : _bufferedRange,
                         bufferBarKey: _bufferBarKey,
                         /*
@@ -11174,7 +11217,8 @@ Future<void> _exitPlayer() async {
                         onPickStream: (s) => _startPlayback(s),
                         qualityOptions: _qualityPopoverOptions(),
                         onPickQuality: _pickQualityByLabel,
-                        currentQuality: _current?.label ?? _current?.quality ?? '',
+                        currentQuality:
+                            _current?.label ?? _current?.quality ?? '',
                         trackGroups: _trackPopoverGroups(),
                         onPickTrack: _pickTrackFromPopover,
                         moreGroups: _moreMenuGroups(context),
@@ -11277,7 +11321,8 @@ Future<void> _exitPlayer() async {
                    *    那正是本条要修的「被夹在小盒子里」的同一种病。
                    */
                       overlayLocation: OverlayChildLocation.rootOverlay,
-                      overlayChildBuilder: (ctx) => _buildSettingsPortalChild(ctx),
+                      overlayChildBuilder: (ctx) =>
+                          _buildSettingsPortalChild(ctx),
                       child: const SizedBox.shrink(),
                     ),
                     // ── 弹幕设置面板（「弹幕」齿轮 → task-13 ⑦）──
@@ -11439,19 +11484,35 @@ Future<void> _exitPlayer() async {
                     Positioned.fill(
                       child: SheetTransition(
                         visible: _episodeSheetOpen,
-                        slideFrom: Device.isDesktop
+                        // ★ 2026-10-09（Owner 第 12 条）：形态按**面板几何**定，
+                        //   不再按 `Device.isDesktop` 分叉 ——
+                        //   桌面/手机横屏都是右侧轻量侧栏，只有竖屏是底部面板。
+                        slideFrom: _episodePanelIsDrawer(context)
                             ? const Offset(24, 0)
                             : const Offset(0, 24),
-                        // ★ 深色皮肤 —— 见 `PlayerPanelTheme` 的说明（①-B）
-                        child: PlayerPanelTheme(
-                          child: EpisodePanel(
-                            episodes: _episodes,
-                            currentIndex: _epIndex,
-                            onPick: _gotoEpisode,
-                            onClose: () =>
-                                setState(() => _episodeSheetOpen = false),
-                          ),
-                        ),
+                        child: _episodePanelIsDrawer(context)
+                            ? Align(
+                                alignment: Alignment.centerRight,
+                                child: PlayerEpisodePanel(
+                                  episodes: _episodes,
+                                  currentIndex: _epIndex,
+                                  onPick: _gotoEpisode,
+                                  onClose: () =>
+                                      setState(() => _episodeSheetOpen = false),
+                                  style: PlayerEpisodePanelStyle.rightDrawer,
+                                ),
+                              )
+                            : Align(
+                                alignment: Alignment.bottomCenter,
+                                child: PlayerEpisodePanel(
+                                  episodes: _episodes,
+                                  currentIndex: _epIndex,
+                                  onPick: _gotoEpisode,
+                                  onClose: () =>
+                                      setState(() => _episodeSheetOpen = false),
+                                  style: PlayerEpisodePanelStyle.bottomSheet,
+                                ),
+                              ),
                       ),
                     ),
 
@@ -12519,7 +12580,6 @@ bool? debugPlayerRewindTimerActive() => _livePlayerState?._rewindTimer != null;
 /// 累计调用 `_takeScreenshot` 的次数（★ task-21 P1-30 探针用），无播放页时返回 null
 int? debugPlayerScreenshotCalls() => _livePlayerState?._screenshotCalls;
 
-
 /// ★★★ 错误态返回箭头探针（Owner 2026-10-09 新增缺陷）
 ///
 /// 返回 `(顶栏箭头矩形, 顶栏箭头**不透明度**, 顶栏是否参与命中测试)`。
@@ -12553,6 +12613,7 @@ int? debugPlayerScreenshotCalls() => _livePlayerState?._screenshotCalls;
       : null;
   return (rect, op, ignoring);
 }
+
 (double, double)? debugPlayerControlBarsOpacity() {
   final s = _livePlayerState;
   if (s == null) return null;
@@ -12692,6 +12753,7 @@ Future<int?> debugPlayerAwaitToggleFullscreenForProbe() {
   if (s == null) return Future<int?>.value(null);
   return s.debugPlayerToggleFullscreenForProbe();
 }
+
 bool debugPlayerSetFullscreenForProbe(bool v) {
   final s = _livePlayerState;
   if (s == null) return false;
@@ -12699,6 +12761,7 @@ bool debugPlayerSetFullscreenForProbe(bool v) {
   s.setState(() => s._fullscreen = v);
   return true;
 }
+
 /// ★ task-7 探针用：走**生产** `_exitPlayer()`（与点返回箭头同一个回调）。
 ///
 /// ⚠️ 不能只写 `Navigator.maybePop()` —— 那证明的是「Navigator 能用」，
@@ -12709,6 +12772,7 @@ bool debugPlayerBackForProbe() {
   unawaited(s._exitPlayer());
   return true;
 }
+
 bool debugPlayerInjectStreamErrorForProbe(String message) {
   final s = _livePlayerState;
   if (s == null) return false;
@@ -13186,25 +13250,31 @@ bool? debugPlayerBufferingForProbe() => _livePlayerState?._buffering;
 void debugPlayerToggleMute() => _livePlayerState?.debugPlayerToggleMute();
 
 /// 探针用：等价于键盘 ↑/↓ 与滚轮调音量
-void debugPlayerVolumeBy(double delta) => _livePlayerState?.debugPlayerVolumeBy(delta);
+void debugPlayerVolumeBy(double delta) =>
+    _livePlayerState?.debugPlayerVolumeBy(delta);
 
 /// 探针用：等价于拖底栏音量滑杆
-void debugPlayerSetVolume(double v) => _livePlayerState?.debugPlayerSetVolume(v);
+void debugPlayerSetVolume(double v) =>
+    _livePlayerState?.debugPlayerSetVolume(v);
 
 /// 探针用：进入无音频模式（短路真实下发；生产恒为 false）
-void debugPlayerSetNoAudioForProbe(bool v) => _livePlayerState?.debugPlayerSetNoAudioForProbe(v);
+void debugPlayerSetNoAudioForProbe(bool v) =>
+    _livePlayerState?.debugPlayerSetNoAudioForProbe(v);
 
 /// 探针用：读回静音状态机（muted / volume / beforeMute / lastVolume）
 String? debugPlayerMuteState() => _livePlayerState?.debugPlayerMuteState();
 
 /// 探针用：读回实际下发过的音量序列（'/' 分隔）
-String? debugPlayerVolumeWrites() => _livePlayerState?.debugPlayerVolumeWrites();
+String? debugPlayerVolumeWrites() =>
+    _livePlayerState?.debugPlayerVolumeWrites();
 
 /// 探针用：清空下发记录
-void debugPlayerResetVolumeWrites() => _livePlayerState?.debugPlayerResetVolumeWrites();
+void debugPlayerResetVolumeWrites() =>
+    _livePlayerState?.debugPlayerResetVolumeWrites();
 
 /// 探针用：直接摆好当前音量（模拟用户已调到该值）
-void debugPlayerSeedVolume(double v) => _livePlayerState?.debugPlayerSeedVolume(v);
+void debugPlayerSeedVolume(double v) =>
+    _livePlayerState?.debugPlayerSeedVolume(v);
 
 /// 探针用：在**真实播放页**上跑一遍生产看门狗，返回是否启动成功
 ///
@@ -13524,8 +13594,8 @@ class _TopBar extends StatelessWidget {
                 child: child,
               ),
               child: Container(
-              padding: EdgeInsets.only(
-                /*
+                padding: EdgeInsets.only(
+                  /*
                  * ★★★ 左右留白 Sp.x2 -> Sp.x3（2026-10-09，缺陷 2 配套）
                  *
                  * # 为什么必须动这里（不是随手放大）
@@ -13542,56 +13612,56 @@ class _TopBar extends StatelessWidget {
                  * => 只能让顶栏对齐悬浮键，不能反过来。
                  * ```
                  */
-                top: MediaQuery.of(context).padding.top + Sp.x3,
-                left: Sp.x3,
-                right: Sp.x3,
-                bottom: Sp.x4,
-              ),
-              decoration: const BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment.topCenter,
-                  end: Alignment.bottomCenter,
-                  colors: [Colors.black87, Colors.transparent],
+                  top: MediaQuery.of(context).padding.top + Sp.x3,
+                  left: Sp.x3,
+                  right: Sp.x3,
+                  bottom: Sp.x4,
                 ),
-              ),
-              child: Row(
-                children: [
-                  IconButton(
-                    key: backArrowKey,
-                    onPressed: onBack,
-                    icon: const Icon(Icons.arrow_back, color: Colors.white),
-                    tooltip: '返回',
+                decoration: const BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [Colors.black87, Colors.transparent],
                   ),
-                  const SizedBox(width: Sp.x2),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          title,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: FontSizes.base,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                        if (episodeTitle != null && episodeTitle!.isNotEmpty)
+                ),
+                child: Row(
+                  children: [
+                    IconButton(
+                      key: backArrowKey,
+                      onPressed: onBack,
+                      icon: const Icon(Icons.arrow_back, color: Colors.white),
+                      tooltip: '返回',
+                    ),
+                    const SizedBox(width: Sp.x2),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
                           Text(
-                            episodeTitle!,
+                            title,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: const TextStyle(
-                              color: Colors.white70,
-                              fontSize: FontSizes.cap,
+                              color: Colors.white,
+                              fontSize: FontSizes.base,
+                              fontWeight: FontWeight.w600,
                             ),
                           ),
-                      ],
+                          if (episodeTitle != null && episodeTitle!.isNotEmpty)
+                            Text(
+                              episodeTitle!,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: Colors.white70,
+                                fontSize: FontSizes.cap,
+                              ),
+                            ),
+                        ],
+                      ),
                     ),
-                  ),
-                  /*
+                    /*
                * ══════════════════════════════════════════════════════════
                * ★★★ 当前播放源（task-32，用户要求）
                * ══════════════════════════════════════════════════════════
@@ -13619,51 +13689,51 @@ class _TopBar extends StatelessWidget {
                *    会把 `Expanded` 的标题挤成 "…"（交付要求：
                *    窄窗口下不许挤压/换行/截断 —— 让**站名自己**省略号）。
                */
-                  if (providerName != null && providerName!.isNotEmpty) ...[
-                    const SizedBox(width: Sp.x2),
-                    ConstrainedBox(
-                      constraints: const BoxConstraints(maxWidth: _kNameMaxW),
-                      child: Container(
+                    if (providerName != null && providerName!.isNotEmpty) ...[
+                      const SizedBox(width: Sp.x2),
+                      ConstrainedBox(
+                        constraints: const BoxConstraints(maxWidth: _kNameMaxW),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: Sp.x3,
+                            vertical: 3,
+                          ),
+                          decoration: BoxDecoration(
+                            // 与「直播」徽章同款底：黑 0.55 让它压得住任何画面
+                            color: Colors.black.withValues(alpha: 0.55),
+                            borderRadius: Radii.rFull,
+                          ),
+                          child: Text(
+                            providerName!,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: Colors.white70,
+                              fontSize: FontSizes.cap,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                    if (isLive)
+                      Container(
                         padding: const EdgeInsets.symmetric(
                           horizontal: Sp.x3,
                           vertical: 3,
                         ),
-                        decoration: BoxDecoration(
-                          // 与「直播」徽章同款底：黑 0.55 让它压得住任何画面
-                          color: Colors.black.withValues(alpha: 0.55),
+                        decoration: const BoxDecoration(
+                          color: AppColors.liveDot,
                           borderRadius: Radii.rFull,
                         ),
-                        child: Text(
-                          providerName!,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            color: Colors.white70,
+                        child: const Text(
+                          '直播',
+                          style: TextStyle(
+                            color: Colors.white,
                             fontSize: FontSizes.cap,
                           ),
                         ),
                       ),
-                    ),
-                  ],
-                  if (isLive)
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: Sp.x3,
-                        vertical: 3,
-                      ),
-                      decoration: const BoxDecoration(
-                        color: AppColors.liveDot,
-                        borderRadius: Radii.rFull,
-                      ),
-                      child: const Text(
-                        '直播',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: FontSizes.cap,
-                        ),
-                      ),
-                    ),
-                  /*
+                    /*
                * ★ task-20：触摸端不画这个按钮
                *
                * 原因：`hintsFor()` 在触摸端返回**空列表**（触摸端没有键盘），
@@ -13673,20 +13743,20 @@ class _TopBar extends StatelessWidget {
                *   写上去就是“假装有”。产品原则与插件/TVBox 那套一致：
                *   **没有的能力不假装有**。
                */
-                  if (onHints != null)
-                    IconButton(
-                      onPressed: onHints,
-                      icon: const Icon(
-                        Icons.keyboard_outlined,
-                        color: Colors.white,
+                    if (onHints != null)
+                      IconButton(
+                        onPressed: onHints,
+                        icon: const Icon(
+                          Icons.keyboard_outlined,
+                          color: Colors.white,
+                        ),
+                        tooltip: '快捷键',
                       ),
-                      tooltip: '快捷键',
-                    ),
-                ],
+                  ],
+                ),
               ),
             ),
           ),
-        ),
         ),
         /*
          * ★ 常驻悬浮返回键：只在桌面端且没有错误/浮层时出现，
@@ -13857,8 +13927,10 @@ class BufferedRange {
 /// ```
 /// ⚠️ 编译期常量（`String.fromEnvironment`）—— 不传时走 mpv，
 ///    正式构建里这个开关本身零开销。
-const String kBufferRangeMode =
-    String.fromEnvironment('BUFFER_RANGE', defaultValue: 'mpv');
+const String kBufferRangeMode = String.fromEnvironment(
+  'BUFFER_RANGE',
+  defaultValue: 'mpv',
+);
 
 /// ★ 供 test/ 渲染**生产实现** `_ProgressSlider` 的唯一通道
 ///
@@ -13891,6 +13963,7 @@ class DebugProgressSliderForProbe extends StatelessWidget {
     barKey: barKey,
   );
 }
+
 /// ★ 2026-10-09：底栏重做后这三个阈值由 `PlayerBottomBar` 自己判。
 ///   保留是为了让 t68 / t80 / t92 的**源码级**判据仍能找到同一份文档。
 // ignore: unused_element
@@ -13949,7 +14022,7 @@ const double _kBottomBarMiniWidth = 528;
 class _BottomBar extends StatelessWidget {
   const _BottomBar({
     required this.playing,
-    required this.position,
+    required this.positionNotifier,
     required this.duration,
     required this.isLive,
     required this.rate,
@@ -14036,7 +14109,9 @@ class _BottomBar extends StatelessWidget {
   });
 
   final bool playing;
-  final Duration position;
+
+  /// ★ 见 （秒级刷新只重建底栏那一小块）
+  final ValueListenable<Duration> positionNotifier;
   final Duration duration;
   final bool isLive;
   final double rate;
@@ -14207,7 +14282,7 @@ class _BottomBar extends StatelessWidget {
     return PlayerBottomBar(
       controller: popover,
       playing: playing,
-      position: position,
+      positionListenable: positionNotifier,
       duration: duration,
       isLive: isLive,
       rate: rate,
@@ -14297,7 +14372,7 @@ class _BufferPoller {
 
   /// 三参：终点 / cache-buffering-state / 跨度（秒）
   final void Function(Duration? end, double? statePercent, double? span)
-      onChanged;
+  onChanged;
 
   final Duration interval;
 
