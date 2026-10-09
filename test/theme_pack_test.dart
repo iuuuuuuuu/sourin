@@ -271,6 +271,31 @@ void main() {
       expect(ThemePackStore.loadAll().where((p) => p.id == 'my-theme'), isEmpty);
     });
 
+    test('★ 目录不可写 / 不可枚举 ⇒ 降级成「只有内置主题」，不抛异常', () {
+      // polish agent 在合并前提出的一个真问题：主题页是**保活 tab**，
+      // 可能��数据目录解析完成前就被打开，而 `loadAll()` 是同步的。
+      // 那条路径没有覆盖 —— 而它恰好是最容易崩的地方。
+      //
+      // 期望行为（已写进实现，这里把它钉住）：
+      //   目录建不出来 / 列不出来 ⇒ **只用内置主题**，绝不抛。
+      //   理由：主题包是「锦上添花」。因为磁盘上一个只读目录就让应用
+      //   起不来，是不可接受的 —— 而内置主题永远在。
+      ThemePackStore.debugSetDataDir('/proc/definitely-not-writable/x');
+      final all = ThemePackStore.loadAll();
+      expect(all.length, ThemePackStore.builtins.length,
+          reason: '拿不到外部包时应当恰好剩下内置的那几套');
+      expect(all.every((p) => p.builtin), isTrue);
+
+      // 选中一个不存在的包也不该崩
+      ThemePackStore.select('whatever');
+      expect(ThemePackStore.current().id, ThemePackStore.builtins.first.id);
+
+      // 往不可写目录导入也不该抛（只是文件没落地）
+      final r = ThemePackStore.importFromString(
+          '{"name":"临时","brightness":"dark"}');
+      expect(r.pack.name, '临时', reason: '导入本身仍然可用，只是不落盘');
+    });
+
     test('★ 目录里的坏文件不能让 loadAll 抛异常', () {
       final root = Directory.systemTemp.createTempSync('sourin_themepack_bad');
       final dir = Directory('${root.path}${Platform.pathSeparator}themes')
