@@ -63,6 +63,29 @@ Widget _gallery(AppPalette p) => Column(
         ]),
         const SizedBox(height: 16),
         Row(children: [
+          PopupMenuButton<String>(
+            onSelected: (_) {},
+            itemBuilder: (_) => const [
+              PopupMenuItem(value: 'a', child: Text('菜单项一')),
+              PopupMenuItem(value: 'b', child: Text('菜单项二')),
+            ],
+            child: const Text('菜单 ▾'),
+          ),
+          const SizedBox(width: 12),
+          Tooltip(
+            message: '这是一个提示',
+            child: IconButton(
+                onPressed: () {},
+                icon: const Icon(Icons.info_outline, size: 20)),
+          ),
+          const SizedBox(width: 12),
+          const Badge(label: Text('9')),
+          const SizedBox(width: 12),
+          const SizedBox(
+              width: 120, child: LinearProgressIndicator(value: 0.45)),
+        ]),
+        const SizedBox(height: 16),
+        Row(children: [
           Chip(
             label: Text('Chip',
                 style: TextStyle(fontSize: 14, color: p.foreground)),
