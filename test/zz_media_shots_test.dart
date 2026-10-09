@@ -410,6 +410,28 @@ void main() {
     final f = await saveViewShot(t, 'shot6_online_detail');
     debugPrint('SHOT-6 = ${f.path}');
   });
+  testWidgets('SHOT-7 在线详情页（合并页，生产宽度）', (t) async {
+    // ★ 挂**真的 MediaPage**（而不是单拆 DetailPage）——
+    //   右侧宽度是 MediaPage 按 `mq.width * 0.30` 算出来的（夹在 [340,440]），
+    //   单拆 DetailPage 时我自己包的宽度不一定对 ⇒ 看的不是用户看到的布局。
+    await setShotViewport(t, const Size(1440, 900));
+    NetworkStatus.debugProbe = () async => true;
+    await t.runAsync(() async {
+      await t.pumpWidget(_appWith(MediaPage(
+        provider: 'demo',
+        id: '42',
+        title: '无职转生 第三季',
+      )));
+      for (var i = 0; i < 40; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+        await t.pump();
+        while (t.takeException() != null) {}
+      }
+    });
+    _claim(t);
+    final f = await saveViewShot(t, 'shot7_online_detail_page');
+    debugPrint('SHOT-7 = ${f.path}');
+  });
 }
 
 /// 一张 8x8 的纯色 PNG（当封面用，避免整片占位块看不清排版）
