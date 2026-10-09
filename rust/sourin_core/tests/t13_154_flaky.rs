@@ -335,7 +335,10 @@ async fn c_stage_dimension() {
     let probe_page = "https://www.iqiyi.com/v_1hn0p07xxls.html";
     for base in [
         "https://player.gimy.bot/u/parse.php?url=",
-        "https://api.huaqi.pro/api/?key=5bd0db7c858ba9f999373450f3651af7&url=",
+        // ★ 2026-10-10：这里原来还有 `api.huaqi.pro/api/?key=<真实凭据>`。
+        //   那是**付费服务的真实密钥**，被硬编码进了公开仓库；而产品侧早已把它
+        //   从 `PARSE_SERVICES` 里删掉（实测 2026-10-02 起它就返回 404 不再工作）。
+        //   ⇒ 这里一并删除，不要把任何人的密钥写进仓库。
     ] {
         let url = format!("{base}{}", urlencoding(probe_page));
         let host = base.split('/').nth(2).unwrap_or("?");

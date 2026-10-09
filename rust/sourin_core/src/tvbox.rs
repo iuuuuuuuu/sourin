@@ -101,12 +101,21 @@ pub async fn fetch_config_text(
 }
 /// 第三方网页解析服务（前缀 + urlencoded(目标页)）
 ///
-/// 来源：tvbox-convert.mjs 里收集 15 个 type=1 接口实测后**只剩这两个活着**。
-/// 2026-10-02 复测：gimy 活着（能返回真 m3u8），huaqi 已失效（返回
-/// {"code":"404",...,"msg":"解析失败"}，没有 url 字段 → 自动 continue）。
-pub const PARSE_SERVICES: [&str; 2] = [
+/// 来源：tvbox-convert.mjs 里收集 15 个 type=1 接口实测后只剩这一个活着。
+///
+/// ★ 2026-10-10（review agent 查出安全问题，lead 处理）：这里原来还有第二个
+///   `api.huaqi.pro/api/?key=<32 位十六进制>` —— **那是一个真实的付费服务凭据，
+///   却被硬编码进了公开仓库**。而且本文件上方原有的注释自己就写着
+///   「2026-10-02 复测：huaqi 已失效（返回 {"code":"404",...,"msg":"解析失败"}，
+///   没有 url 字段 → 自动 continue）」
+///   ⇒ **它既不安全、也早已不工作**，留着只是让每个用户都在用一个死服务。
+///   ⇒ 直接删掉。若将来要恢复，请改成从**用户自己的源配置**里读 key，
+///      不要再把任何人的密钥写进代���。
+///
+/// ⚠️ 因此：如果你在别处见过 `api.huaqi.pro` 的 key，**请去该服务后台吊销它**
+///   （凭据已随公开仓库泄露过）。
+pub const PARSE_SERVICES: [&str; 1] = [
     "https://player.gimy.bot/u/parse.php?url=",
-    "https://api.huaqi.pro/api/?key=5bd0db7c858ba9f999373450f3651af7&url=",
 ];
 
 /// 单次 HTTP 超时（探测与取列表共用）
