@@ -1892,6 +1892,10 @@ class HomePageState extends State<HomePage> {
              */
             pinned: true,
             delegate: _StickySourceBar(
+              // ★ 与 `SourceBar` 用**同一个**过滤结果算 extent ——
+              //   源少于 2 个时那条返回 `SizedBox.shrink()`，
+              //   此刻吸附条必须完全不占位（见 `extentFor` 的长注释）。
+              visibleCount: visibleSourceList(_enabled).length,
               // ⚠️ 必须传**同一个 GlobalKey** 给 SourceBar
               //    （见 `_sourceBarKey` 的说明：不用 key 的话
               //     delegate 每次重建都会**丢 ScrollController 状态**）
@@ -2039,9 +2043,59 @@ final sourceBarKey = GlobalKey();
 
 /// 「吸附在顶部」的源条 sliver
 class _StickySourceBar extends SliverPersistentHeaderDelegate {
-  _StickySourceBar({required this.child});
+  _StickySourceBar({required this.child, required this.visibleCount});
 
   final Widget child;
+
+  /// ★★★ 本次实际使用的 extent（见 [extentFor]）
+  late final double _extentNow = extentFor(visibleCount);
+
+  /// 源条**可见的**源数（调用方按 `SourceBar` 的同一判据算好传进来）
+  final int visibleCount;
+
+  /// ★★★ 源条此刻真的占多高（而不是恒定 60）
+  ///
+  /// # 为什么不能恒定（实测到的真崩溃，Owner「很多地方我都感觉卡卡的」之一）
+  ///
+  /// `RenderSliverPinnedPersistentHeader.performLayout`（SDK
+  /// `rendering/sliver_persistent_header.dart:420-444`）算的是：
+  ///
+  /// ```dart
+  /// layoutChild(...);                       // 子件按 maxExtent 布局
+  /// layoutExtent = clamp(maxExtent - scrollOffset, 0, remainingPaint);
+  /// paintExtent  = min(childExtent, remainingPaint);   // ★ 读子件的真实高度
+  /// ```
+  ///
+  /// `layoutExtent` 用的���**我们报的** `maxExtent`，`paintExtent` 用的是
+  /// **子件实测的** `childExtent`。两者一旦不一致就炸：
+  ///
+  /// ```text
+  /// SliverGeometry is not valid: The "layoutExtent" exceeds the "paintExtent".
+  /// The paintExtent is 16.0, but the layoutExtent is 60.0.
+  /// ```
+  ///
+  /// # 16.0 是怎么来的（探针实测，`test/t1009_sliver_probe_test.dart`）
+  ///
+  /// `SourceBar` 在**可见源少于 2 个**时返回 `SizedBox.shrink()`
+  /// （`source_bar.dart`：`if (sources.length <= 1) return SizedBox.shrink()`）。
+  /// 而 `_StickySourceBar.build` 给它包了 `Padding(vertical: 8)`：
+  ///
+  /// ```text
+  /// 8（上） + 0（shrink） + 8（下） = 16  ← childExtent = 16
+  /// ```
+  ///
+  /// 而外层照报 `min == max == 60` ⇒ 60 > 16 ⇒ 断言炸。
+  ///
+  /// ⚠️ 这是**每个用户都会踩**的形态：新装、只用了一个源、或者把源都停了。
+  ///   真机上它表现为整个页面**每帧抛异常**，也就是"到处都卡"的来源之一。
+  /// ⚠️ 也因此这条修复是**全局**的：它对所有页面都生效（首页是这个 sliver 的
+  ///   唯一宿主），而 `flutter test` 里因为没有核心库、源恒为 0，**必现**。
+  ///
+  /// # 修法：extent 跟着"源条会不会画出来"走
+  ///
+  /// 判据与 `SourceBar` 共用 [visibleSourceList] 的结果（调用方传进来），
+  /// 不在这里重写一遍"少于 2 个就隐藏"—— 两处各写一遍必然漂。
+  static double extentFor(int visibleCount) => visibleCount <= 1 ? 0 : _extent;
 
   /// 源条自身高度 44 + 上下各 8 的呼吸空间
   ///
@@ -2057,10 +2111,10 @@ class _StickySourceBar extends SliverPersistentHeaderDelegate {
   static const double _extent = 44 + 8 + 8;
 
   @override
-  double get minExtent => _extent;
+  double get minExtent => _extentNow;
 
   @override
-  double get maxExtent => _extent;
+  double get maxExtent => _extentNow;
 
   @override
   Widget build(
@@ -2072,15 +2126,25 @@ class _StickySourceBar extends SliverPersistentHeaderDelegate {
      * ⚠️ 用 `Padding` 包一层（而不是让子项自己撑）——
      *    `SliverPersistentHeader` 给的是**紧约束**（高度 == extent），
      *    子项如果直接是 44px 的 Center 会溢出。
+     *
+     * ★ 源条隐藏时（源 < 2 个，见 [extentOf]）**连 Padding 都不能给**：
+     *   Padding(vertical: 8) 即便包着 `SizedBox.shrink()` 也有 16 高，
+     *   而此刻 extent 是 0 ⇒ `layoutExtent(0) > paintExtent(16)`
+     *   反而**多造一处**非法几何。两者必须同步。
      */
+    if (_extentNow == 0) return child;
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 8),
       child: child,
     );
   }
 
+  /// ★ 必须比 extent：源数跨过 1/2 的门槛时 extent 会变
+  /// （`SourceBar` 在源 < 2 个时返回 `SizedBox.shrink()`），
+  /// 不比它就会用着**上一次**的 extent —— 那正是非法几何的来源。
   @override
-  bool shouldRebuild(_StickySourceBar old) => old.child != child;
+  bool shouldRebuild(_StickySourceBar old) =>
+      old.child != child || old._extentNow != _extentNow;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
