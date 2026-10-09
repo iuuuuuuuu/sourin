@@ -146,6 +146,32 @@ class _SyncPanelState extends State<SyncPanel> {
   String _ok = '';
   String _err = '';
 
+  /// 忙的时候正在做哪一步（进度圈旁边那行字）
+  ///
+  /// 用一个字段而不是从 `_ok` 反推：`_ok` 是**结果**，
+  /// 一旦某步失败它会被 `_sayErr` 清掉，进度圈就没了文字。
+  String _busyHint = '';
+
+  /// 四个动作都用它包一层，把 `_syncBusy` 与提示语绑在一起 ——
+  /// 少写一处 `setState(() => _syncBusy = true)` 就少一处忘记置提示的错误。
+  Future<T?> _busy<T>(String hint, Future<T> Function() body) async {
+    if (!mounted) return null;
+    setState(() {
+      _syncBusy = true;
+      _busyHint = hint;
+    });
+    try {
+      return await body();
+    } finally {
+      if (mounted) {
+        setState(() {
+          _syncBusy = false;
+          _busyHint = '';
+        });
+      }
+    }
+  }
+
   @override
   void initState() {
     super.initState();
@@ -218,79 +244,90 @@ class _SyncPanelState extends State<SyncPanel> {
         );
     if (r == null) return;
 
-    setState(() => _syncBusy = true);
-    try {
-      /*
-       * ★ 后端会「先建目录再自检」并返回自检结果
-       *
-       * 原版 2026-09-15 修的 bug：`test()` 会 PROPFIND 含 remote_dir
-       * 的完整路径，目录不存在就 404 → 报「路径不存在」让用户
-       * 以为填错了地址。所以必须 prepare() 在前。
-       */
-      final msg = await SourinApi.configureWebdav(
-        baseUrl: r.url,
-        username: r.user,
-        password: r.pass,
-        remoteDir: r.dir.isEmpty ? null : r.dir,
-      );
-      await _reload();
-      _sayOk(msg);
-    } catch (e) {
-      _sayErr('配置失败：$e');
-    } finally {
-      if (mounted) setState(() => _syncBusy = false);
-    }
+    await _busy('正在检查地址并准备目录…', () async {
+      try {
+        /*
+         * ★ 后端会「先建目录再自检」并返回自检结果
+         *
+         * 原版 2026-09-15 修的 bug：`test()` 会 PROPFIND 含 remote_dir
+         * 的完整路径，目录不存在就 404 → 报「路径不存在」让用户
+         * 以为填错了地址。所以必须 prepare() 在前。
+         */
+        final msg = await SourinApi.configureWebdav(
+          baseUrl: r.url,
+          username: r.user,
+          password: r.pass,
+          remoteDir: r.dir.isEmpty ? null : r.dir,
+        );
+        await _reload();
+        _sayOk(msg);
+      } catch (e) {
+        _sayErr('配置失败：$e');
+      }
+    });
   }
 
   Future<void> _testSync() async {
-    setState(() => _syncBusy = true);
-    try {
-      final msg = await SourinApi.testSync();
-      _sayOk(msg);
-    } catch (e) {
-      _sayErr('测试失败：$e');
-    } finally {
-      if (mounted) setState(() => _syncBusy = false);
-    }
+    await _busy('正在测试连接…', () async {
+      try {
+        final msg = await SourinApi.testSync();
+        _sayOk(msg);
+      } catch (e) {
+        _sayErr('测试失败：$e');
+      }
+    });
   }
 
   Future<void> _syncNow() async {
-    setState(() => _syncBusy = true);
-    _sayOk('正在同步…');
-    try {
-      final sums = await SourinApi.syncNow();
-      await _reload();
-      // 把每一步的汇总拼出来给用户看
-      final desc = sums
-          .map((s) => '${s.kind}${s.count > 0 ? "(${s.count})" : ""}')
-          .join(' / ');
-      _sayOk(sums.isEmpty ? '同步完成（无变化）' : '同步完成：$desc');
-    } catch (e) {
-      _sayErr('同步失败：$e');
-    } finally {
-      if (mounted) setState(() => _syncBusy = false);
+    await _busy('正在同步…', () async {
+      try {
+        final sums = await SourinApi.syncNow();
+        await _reload();
+        _sayOk(_fmtSyncResult(sums));
+      } catch (e) {
+        _sayErr('同步失败：$e');
+      }
+    });
+  }
+
+  /// 把每一步的汇总说成人话
+  ///
+  /// ★ 只列**真的动了**的平面 —— 三个平面全 0 时说「无变化」，
+  ///   而不是把「收藏与追更(0) / 播放进度(0) / 内容源配置(0)」端给用户。
+  static String _fmtSyncResult(List<SyncSummary> sums) {
+    if (sums.isEmpty) return '同步完成（没有可同步的内容）';
+    final moved = sums.where((s) => s.total > 0).toList();
+    if (moved.isEmpty) return '同步完成（收藏、进度、内容源都没有变化）';
+
+    final parts = <String>[];
+    for (final s in moved) {
+      final bits = <String>[
+        if (s.pulled > 0) '拉取 ${s.pulled}',
+        if (s.pushed > 0) '上传 ${s.pushed}',
+      ];
+      final base = '${s.label}：${bits.join(' / ')}';
+      parts.add(s.conflicts > 0 ? '$base（有 ${s.conflicts} 条按较新的一份为准）' : base);
     }
+    return '同步完成 —— ${parts.join('；')}';
   }
 
   // ── 整体备份（手动那一路，契约 §1/§5）─────────────────────────────
 
   /// 立即上传一份整体备份，并按保留份数清理旧份
   Future<void> _backupNow() async {
-    setState(() => _syncBusy = true);
-    _sayOk('正在上传整体备份…');
-    try {
-      final r = await SourinApi.syncBackupNow();
-      await _reloadBackups();
-      final pruned = r.pruned.isEmpty ? '' : '，已清理 ${r.pruned.length} 份旧备份';
-      _sayOk(
-        '已备份 ${r.name}（${_fmtBytes(r.bytes)}），'
-        '云端现有 ${r.total} 份$pruned',
-      );
-    } catch (e) {
-      _sayErr('备份失败：$e');
-    } finally {
-      if (mounted) setState(() => _syncBusy = false);
-    }
+    await _busy('正在打包并上传…', () async {
+      try {
+        final r = await SourinApi.syncBackupNow();
+        await _reloadBackups();
+        final pruned =
+            r.pruned.isEmpty ? '' : '，并清理了 ${r.pruned.length} 份旧备份';
+        _sayOk(
+          '已备份 ${_fmtBytes(r.bytes)}，云端现有 ${r.total} 份$pruned',
+        );
+      } catch (e) {
+        _sayErr('备份失败：$e');
+      }
+    });
   }
 
   Future<void> _deleteBackup(SyncBackupEntry e) async {
@@ -299,20 +336,19 @@ class _SyncPanelState extends State<SyncPanel> {
       message:
           '确定删掉云端的这一份备份吗？\n\n'
           '${e.name}\n\n'
-          '⚠️ 云盘上的删除一般**不进回收站**，删了就找不回来了。',
+          '⚠️ 云盘上的删除一般不进回收站，删了就找不回来了。',
       okLabel: '删除',
     );
     if (!ok) return;
-    setState(() => _syncBusy = true);
-    try {
-      await SourinApi.syncBackupDelete(e.name);
-      await _reloadBackups();
-      _sayOk('已删除 ${e.name}');
-    } catch (err) {
-      _sayErr('删除失败：$err');
-    } finally {
-      if (mounted) setState(() => _syncBusy = false);
-    }
+    await _busy('正在删除…', () async {
+      try {
+        await SourinApi.syncBackupDelete(e.name);
+        await _reloadBackups();
+        _sayOk('已删除这份备份');
+      } catch (err) {
+        _sayErr('删除失败：$err');
+      }
+    });
   }
 
   // ── 设置（保留份数 / 自动同步 / 两个间隔，契约 §1/§2/§6）─────────────
@@ -328,23 +364,22 @@ class _SyncPanelState extends State<SyncPanel> {
     // `SettingsGestureToggle` 的 onChanged 不可为 null（见 settings_kit.dart），
     // 所以「忙时点不动」得在这里挡。
     if (_syncBusy) return;
-    setState(() => _syncBusy = true);
-    try {
-      final s = await SourinApi.setSyncSettings(
-        retainCount: retainCount,
-        autoEnabled: autoEnabled,
-        autoIntervalMinutes: autoIntervalMinutes,
-        autoOnChange: autoOnChange,
-        autoBackupIntervalMinutes: autoBackupIntervalMinutes,
-      );
-      if (!mounted) return;
-      setState(() => _settings = s);
-      _sayOk('设置已保存（后端的自动任务最多 1 分钟后就按新设置跑）');
-    } catch (e) {
-      _sayErr('设置保存失败：$e');
-    } finally {
-      if (mounted) setState(() => _syncBusy = false);
-    }
+    await _busy('正在保存设置…', () async {
+      try {
+        final s = await SourinApi.setSyncSettings(
+          retainCount: retainCount,
+          autoEnabled: autoEnabled,
+          autoIntervalMinutes: autoIntervalMinutes,
+          autoOnChange: autoOnChange,
+          autoBackupIntervalMinutes: autoBackupIntervalMinutes,
+        );
+        if (!mounted) return;
+        setState(() => _settings = s);
+        _sayOk('设置已保存，最多 1 分钟后按新设置自动执行');
+      } catch (e) {
+        _sayErr('设置保存失败：$e');
+      }
+    });
   }
 
   Future<void> _disconnectSync() async {
@@ -355,17 +390,15 @@ class _SyncPanelState extends State<SyncPanel> {
           '凭据仍保留在系统钥匙串里，重新配置时不用再输密码。',
     );
     if (!ok) return;
-    // ★ 原来这里漏了 `_syncBusy`（见文件头 ②），补上
-    setState(() => _syncBusy = true);
-    try {
-      await SourinApi.disconnectSync();
-      await _reload();
-      _sayOk('已断开');
-    } catch (e) {
-      _sayErr('$e');
-    } finally {
-      if (mounted) setState(() => _syncBusy = false);
-    }
+    await _busy('正在断开…', () async {
+      try {
+        await SourinApi.disconnectSync();
+        await _reload();
+        _sayOk('已断开云盘（密码仍保留在系统中）');
+      } catch (e) {
+        _sayErr('$e');
+      }
+    });
   }
 
   /// 本地确认框（原来借用宿主 `SettingsPageState._confirm`）
@@ -413,13 +446,20 @@ class _SyncPanelState extends State<SyncPanel> {
       ),
       children: [
         Text(
-          '收藏、追更、进度会跨设备同步。'
+          '收藏、追更、播放进度与内容源配置会跨设备同步。'
           '支持任意 WebDAV 服务（坚果云、Nextcloud、群晖等）。',
           style: TextStyle(
             fontSize: FontSizes.sm,
             color: colors.onSurfaceVariant,
+            height: 1.6,
           ),
         ),
+        // ★ 已连接时把「连的是哪、账号是谁、目录在哪、上次什么时候同步过」
+        //   摆出来 —— 换到第二台设备后用户要靠这三行确认自己没连错地方。
+        if (connected) ...[
+          const SizedBox(height: Sp.x3),
+          _connInfo(colors, s),
+        ],
         const SizedBox(height: Sp.x4),
         Wrap(
           spacing: Sp.x2,
@@ -454,15 +494,12 @@ class _SyncPanelState extends State<SyncPanel> {
             ],
           ],
         ),
-        if (_sync?.backend != null) ...[
+        // ★ 忙时给一行明确的进度文案 ——
+        //   网络操作要好几秒到几十秒（整包备份更大），按钮变灰但页面
+        //   毫无变化的话，用户会以为「点了没反应」而去连点。
+        if (_syncBusy) ...[
           const SizedBox(height: Sp.x3),
-          Text(
-            '后端：${_sync!.backend}',
-            style: TextStyle(
-              fontSize: FontSizes.cap,
-              color: colors.onSurfaceVariant,
-            ),
-          ),
+          _busyLine(colors),
         ],
         if (connected && s != null) ...[
           const SizedBox(height: Sp.x5),
@@ -481,6 +518,71 @@ class _SyncPanelState extends State<SyncPanel> {
       ],
     );
   }
+
+  /// 已连接时的连接详情（地址 / 账号 / 目录 / 上次同步）
+  ///
+  /// 用户会同时开好几台设备，改错地址的代价（数据写到别人的网盘目录里）
+  /// 比什么都大，所以这四行常驻。
+  Widget _connInfo(ColorScheme colors, SyncSettings? s) {
+    final backend = _sync?.backend;
+    final rows = <(String, String)>[
+      if (backend != null && backend.isNotEmpty) ('服务', backend),
+      if (s != null && s.baseUrl.isNotEmpty) ('地址', s.baseUrl),
+      if (s != null && s.username.isNotEmpty) ('账号', s.username),
+      if (s != null)
+        ('目录', s.remoteDir.isEmpty ? '网盘根目录' : s.remoteDir),
+      if (s != null && s.lastSyncAt > 0)
+        ('上次同步', _fmtTime(s.lastSyncAt)),
+      if (s != null && s.lastBackupAt > 0)
+        ('上次备份', _fmtTime(s.lastBackupAt)),
+    ];
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        for (final (k, v) in rows)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 2),
+            child: Text.rich(
+              TextSpan(
+                children: [
+                  TextSpan(
+                    text: '$k　',
+                    style: TextStyle(color: colors.onSurfaceVariant),
+                  ),
+                  TextSpan(
+                    text: v,
+                    style: TextStyle(color: colors.onSurface),
+                  ),
+                ],
+              ),
+              style: TextStyle(fontSize: FontSizes.cap, height: 1.6),
+            ),
+          ),
+      ],
+    );
+  }
+
+  /// 忙时的那一行
+  ///
+  /// 用固定尺寸的进度圈而不是 `setState` 里的第二个状态 ——
+  /// 动画交给 widget 自己跑，避免每次 `setState` 都重建整页。
+  Widget _busyLine(ColorScheme colors) => Row(
+        children: [
+          const SizedBox(
+            width: 14,
+            height: 14,
+            child: CircularProgressIndicator(strokeWidth: 2),
+          ),
+          const SizedBox(width: Sp.x2),
+          Text(
+            _busyHint,
+            style: TextStyle(
+              fontSize: FontSizes.cap,
+              color: colors.onSurfaceVariant,
+            ),
+          ),
+        ],
+      );
 
   /// 自动同步 / 备份设置（只在已连接时显示 —— 这些参数由云端那一路用）
   Widget _autoSection(ColorScheme colors, SyncSettings s) {
@@ -546,8 +648,9 @@ class _SyncPanelState extends State<SyncPanel> {
         const SizedBox(height: Sp.x1),
         _note(
           colors,
-          '超出份数的旧备份会在**下一次备份成功后**自动删掉（只删文件名以 '
-          'dsh-backup- 开头的，别的文件不动）。',
+          '超出份数的旧备份会在下一次备份成功后自动删掉。'
+          '只会删除本应用自己创建的 dsh-backup- 开头的备份，'
+          '该目录里的其它文件一律不动。',
         ),
       ],
     );

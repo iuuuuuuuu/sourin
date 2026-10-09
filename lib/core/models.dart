@@ -2383,19 +2383,61 @@ class SyncStatus {
       );
 }
 
-/// 同步的一步汇总
+/// 同步的一步汇总（`sync_now` / `sync_all` 每个平面一条）
+///
+/// # ★ 字段名必须与 Rust 的 `sync::SyncSummary` 一一对应
+///
+/// 权威定义在 `rust/sourin_core/src/sync/mod.rs`：
+/// ```text
+/// { plane, pulled, pushed, conflicts, note? }
+/// ```
+/// 之前这里写的是 `kind` / `count` / `message` —— 三个键在线上一个都不存在，
+/// 于是 [SourinApi.syncNow] 拿回来的每一条都是全空，
+/// 面板拼出来是「同步完成： /  / 」这种什么都没有的字符串
+/// （用户看到的是「同步成功了，但没说同步了什么」）。
 class SyncSummary {
-  const SyncSummary({this.kind = '', this.count = 0, this.message = ''});
+  const SyncSummary({
+    this.plane = '',
+    this.pulled = 0,
+    this.pushed = 0,
+    this.conflicts = 0,
+    this.note,
+  });
 
-  final String kind;
-  final int count;
-  final String message;
+  /// 平面名：`favorites` / `progress` / `providers`
+  final String plane;
+
+  /// 这一轮从云端**新拉进本地**的条数
+  final int pulled;
+
+  /// 这一轮**真正上传**的条数（不是文件里总共有多少条 —— 见 Rust 侧注释）
+  final int pushed;
+
+  /// 因云端更新而被本地让掉的条数
+  final int conflicts;
+
+  /// 后端给的补充说明（`sync_provider_configs` 才有）
+  final String? note;
+
+  /// 给人看的平面名。未知名字原样透传，不吞掉。
+  String get label => _planeLabels[plane] ?? plane;
+
+  /// 这一轮动过的总量（拉 + 推）；全 0 = 「无变化」
+  int get total => pulled + pushed;
 
   factory SyncSummary.fromJson(Map<String, dynamic> j) => SyncSummary(
-        kind: j['kind'] as String? ?? '',
-        count: (j['count'] as num?)?.toInt() ?? 0,
-        message: j['message'] as String? ?? '',
+        plane: j['plane'] as String? ?? '',
+        pulled: (j['pulled'] as num?)?.toInt() ?? 0,
+        pushed: (j['pushed'] as num?)?.toInt() ?? 0,
+        conflicts: (j['conflicts'] as num?)?.toInt() ?? 0,
+        note: j['note'] as String?,
       );
+
+  static const Map<String, String> _planeLabels = <String, String>{
+    'favorites': '收藏与追更',
+    'progress': '播放进度',
+    'providers': '内容源配置',
+  };
 }
 
 /// 云盘同步 + 自动备份的设置（`sync_settings_get` / `sync_settings_set`）
