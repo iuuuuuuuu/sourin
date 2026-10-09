@@ -11,30 +11,28 @@
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 
 import 'package:sourin_spike/core/ffi.dart';
 import 'package:sourin_spike/ui/search_page.dart';
+import 'package:sourin_spike/ui/app_theme.dart';
 import 'package:sourin_spike/ui/settings_page.dart';
 import 'package:sourin_spike/ui/widgets/settings_kit.dart';
 
 import 'support/ui_shot.dart';
 
-Widget _app(Widget home) {
-  final theme = FTheme.neutral.dark.desktop;
-  return MaterialApp(
-    debugShowCheckedModeBanner: false,
-    theme: theme.toApproximateMaterialTheme(),
-    builder: (_, c) => FTheme(data: theme, child: c ?? const SizedBox()),
-    home: Scaffold(body: home),
-  );
-}
+Widget _app(Widget home) => MaterialApp(
+  debugShowCheckedModeBanner: false,
+  // ★ 走生产同一套主题（forui 已移除，截图/量测必须与真机同源）
+  theme: AppTheme.themeFor(Brightness.dark),
+  home: Scaffold(body: home),
+);
 
 Future<void> settle(WidgetTester tester, {int frames = 8}) async {
   for (var i = 0; i < frames; i++) {
     await tester.runAsync(
-        () => Future<void>.delayed(const Duration(milliseconds: 120)));
+      () => Future<void>.delayed(const Duration(milliseconds: 120)),
+    );
     await tester.pump();
   }
 }
@@ -95,24 +93,31 @@ void main() {
         }
         final gap = prevBottom == null ? null : r.top - prevBottom!;
         // ignore: avoid_print
-        print('  组 $g  top=${r.top.toStringAsFixed(1)} '
-            'size=${r.size.width.toStringAsFixed(1)}x${r.size.height.toStringAsFixed(1)}'
-            '${gap == null ? '' : ' 距上一块 ${gap.toStringAsFixed(1)}'}');
+        print(
+          '  组 $g  top=${r.top.toStringAsFixed(1)} '
+          'size=${r.size.width.toStringAsFixed(1)}x${r.size.height.toStringAsFixed(1)}'
+          '${gap == null ? '' : ' 距上一块 ${gap.toStringAsFixed(1)}'}',
+        );
         prevBottom = r.bottom;
       }
       for (final e in entries) {
         final r = _r(tester, e);
         if (r == null) continue;
         // ignore: avoid_print
-        print('  入口 $e  top=${r.top.toStringAsFixed(1)} '
-            '右边界=${r.right.toStringAsFixed(1)} / 视口 ${size.width}');
+        print(
+          '  入口 $e  top=${r.top.toStringAsFixed(1)} '
+          '右边界=${r.right.toStringAsFixed(1)} / 视口 ${size.width}',
+        );
       }
 
       // ③ 没有任何节点越过视口右缘
       for (final e in [...groups, ...entries]) {
         final r = _r(tester, e);
-        expect(r == null || r.right <= size.width + 0.5, isTrue,
-            reason: '「$e」溢出视口右缘：right=${r?.right} > ${size.width}');
+        expect(
+          r == null || r.right <= size.width + 0.5,
+          isTrue,
+          reason: '「$e」溢出视口右缘：right=${r?.right} > ${size.width}',
+        );
       }
 
       // ② 入口行整体高度 ≥ 44（触摸命中区下限）
@@ -123,8 +128,11 @@ void main() {
         );
         if (f.evaluate().isEmpty) continue;
         final h = tester.getSize(f.first).height;
-        expect(h, greaterThanOrEqualTo(44),
-            reason: '「$e」入口行只有 ${h.toStringAsFixed(1)}px 高，触摸命中区不够');
+        expect(
+          h,
+          greaterThanOrEqualTo(44),
+          reason: '「$e」入口行只有 ${h.toStringAsFixed(1)}px 高，触摸命中区不够',
+        );
       }
     });
   }
@@ -139,13 +147,18 @@ void main() {
     for (final t in ['搜索', '同时搜索全部已启用内容源', '搜索全部内容源', '输入关键词后回车即可同时搜索']) {
       final r = _r(tester, t);
       // ignore: avoid_print
-      print('  「$t」 ${r == null ? '不存在' : 'top=${r.top.toStringAsFixed(1)} 中心x=${r.center.dx.toStringAsFixed(1)} / 视口中心 ${720}'}');
+      print(
+        '  「$t」 ${r == null ? '不存在' : 'top=${r.top.toStringAsFixed(1)} 中心x=${r.center.dx.toStringAsFixed(1)} / 视口中心 ${720}'}',
+      );
     }
     // 空态说明文字必须**居中**（限宽 maxWidth=420 生效的证据）
     final hint = find.text('输入关键词后回车即可同时搜索');
     if (hint.evaluate().isNotEmpty) {
-      expect(tester.getSize(hint).width, lessThanOrEqualTo(420.5),
-          reason: '空态说明不应铺满超宽屏');
+      expect(
+        tester.getSize(hint).width,
+        lessThanOrEqualTo(420.5),
+        reason: '空态说明不应铺满超宽屏',
+      );
     }
   });
 }
