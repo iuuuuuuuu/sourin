@@ -2670,6 +2670,14 @@ class RemoteState {
     this.outroEnd,
     this.autoSkip = true,
     this.skipEditing,
+    this.cover,
+    this.isLive = false,
+    this.liveChannelId = '',
+    this.liveChannels = const [],
+    this.speed = 1.0,
+    this.danmaku = false,
+    this.fullscreen = false,
+    this.qualities = const [],
   });
 
   final bool playing;
@@ -2710,6 +2718,30 @@ class RemoteState {
   /// 正在编辑哪个端点（手机端据此高亮）
   final String? skipEditing;
 
+  /// 当前片子的封面图（手机端「正在播放」卡片显示）
+  final String? cover;
+
+  /// **当前是直播**（而不是点播）—— 手机端据此把「选集」换成「频道列表」
+  final bool isLive;
+
+  /// 当前直播频道 id
+  final String liveChannelId;
+
+  /// 直播频道列表 `(id, 名称)`，供手机端选台
+  final List<(String, String)> liveChannels;
+
+  /// 当前播放倍速（1.0 = 正常）
+  final double speed;
+
+  /// 弹幕是否开着
+  final bool danmaku;
+
+  /// 客户端是否处于全屏
+  final bool fullscreen;
+
+  /// 可选的清晰度 / 线路候选（只给显示名，地址不下发 —— 常带一次性签名）
+  final List<String> qualities;
+
   /// 转成 `remote_report_state` 要的 Map
   ///
   /// ⚠️ **片头片尾字段必须全给**（哪怕是 null）——
@@ -2734,6 +2766,14 @@ class RemoteState {
         'outro_end': outroEnd,
         'auto_skip': autoSkip,
         'skip_editing': skipEditing,
+        'cover': cover,
+        'is_live': isLive,
+        'live_channel_id': liveChannelId,
+        'live_channels': liveChannels.map((e) => [e.$1, e.$2]).toList(),
+        'speed': speed,
+        'danmaku': danmaku,
+        'fullscreen': fullscreen,
+        'qualities': qualities,
       };
 
   /// 「没有播放器」时上报的状态

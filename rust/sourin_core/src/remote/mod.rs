@@ -194,6 +194,28 @@ pub enum RemoteCommand {
     NextChannel,
     /// 上一个直播频道（**循环**：第一个之前回到最后一个）
     PrevChannel,
+    /// 跳到指定直播频道（按 `id`）
+    ///
+    /// 与 `GotoChannel { order }`（按序号）分开：频道 id 是稳定的，
+    /// 序号会随列表刷新漂移 —— 手机端的频道列表是快照，用 id 才不会跳错台。
+    GotoChannel { id: String },
+
+    // ── 播放设置（遥控端能做的都在这儿）──
+
+    /// 设置播放倍速（1.0 / 1.25 / 1.5 / 2.0 …）
+    ///
+    /// ⚠️ 用 `f32` 而不是整数倍：媒体内核接受 1.25 这类倍率，
+    /// 取整会把用户能选的档位砍掉一半。
+    SetSpeed { value: f32 },
+    /// 弹幕开关（开 = 取弹幕并叠层，关 = 清空）
+    ToggleDanmaku,
+    /// 全屏切换（客户端侧切，不是手机自己的全屏）
+    ToggleFullscreen,
+    /// 选清晰度 / 线路（`index` 是候选列表的下标，0 基）
+    ///
+    /// ⚠️ 发下标而不是 url —— url 可能有几百字符，
+    /// 而且里面常带一次性签名，下标更短也更稳定。
+    SetQuality { index: i64 },
 
     // ── 查询类（前端执行后把结果回填到 hub，手机端再取）──
     //
@@ -350,6 +372,62 @@ pub struct RemoteState {
     /// 正在编辑哪一项（手机端据此高亮）；`None` = 没在编辑
     #[serde(default)]
     pub skip_editing: Option<SkipKind>,
+
+    /*
+     * ══════════════════════════════════════════════════════════════
+     * ★★ 手机端遥控页重做新增的状态（全部 `#[serde(default)]`）
+     * ══════════════════════════════════════════════════════════════
+     *
+     * 为什么这里只加字段、不改已有字段的名字与类型：
+     * 老版本客户端的 `toJson()` 少这些字段，反序列化必须照样成功
+     * ——否则**整个遥控**会因为一个缺字段而挂掉（`providers` 就是这么处理的）。
+     * 手机端对缺省值的表现就是「那一项按钮不画」。
+     */
+
+    /// 当前片子的封面图 URL（手机端「正在播放」卡片显示）
+    #[serde(default)]
+    pub cover: Option<String>,
+
+    /// **当前是直播**（而不是点播）
+    ///
+    /// 手机端据此把「选集」换成「频道列表」——直播没有集数的概念。
+    #[serde(default)]
+    pub is_live: bool,
+
+    /// 当前直播频道 id
+    #[serde(default)]
+    pub live_channel_id: String,
+
+    /// 直播频道列表 `(id, 名称)`，供手机端选台
+    #[serde(default)]
+    pub live_channels: Vec<(String, String)>,
+
+    /// 当前播放倍速（1.0 = 正常）
+    #[serde(default = "default_speed")]
+    pub speed: f32,
+
+    /// 弹幕是否开着
+    #[serde(default)]
+    pub danmaku: bool,
+
+    /// 客户端是否处于全屏
+    #[serde(default)]
+    pub fullscreen: bool,
+
+    /// 可选的清晰度 / 线路候选（显示名）
+    ///
+    /// ⚠️ 只给**显示名**：地址常带一次性签名，回传给手机既长又不安全。
+    /// 手机端按下标发 `set_quality`，由客户端自己取自己那份真值。
+    #[serde(default)]
+    pub qualities: Vec<String>,
+}
+
+/// 倍速的缺省值 —— 缺省即正常速度
+///
+/// 不能用 `Default::default()`（那是 `0.0`）：媒体内核会拒绝 0 倍速，
+/// 老客户端上报的状态会让客户端**放不下去**。
+fn default_speed() -> f32 {
+    1.0
 }
 
 /// 手机端的搜索/浏览请求要转发给前端执行 —— 复用命令通道
