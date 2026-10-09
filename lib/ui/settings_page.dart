@@ -2879,63 +2879,91 @@ class SettingsPageState extends State<SettingsPage> {
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
+          /*
+           * ★★ 2026-10-10：8 个按钮 → 2 个常驻 + 一个 ⋮ 菜单
+           *
+           * 改前（Owner：「3.js插件的ui不好看」）：
+           * ```text
+           * [调整顺序][健康检测][测速][导入源] │ [重新加载][从网址安装][粘贴源码安装]
+           * ```
+           * 8 个描边按钮排成两行、还夹一条竖线，在 26 张卡片**上面**压着
+           * —— 一眼扫过去最抢眼的是一排按钮，而不是「有哪些源」。
+           *
+           * ⇒ 按频率分层：
+           * ```text
+           * 常驻  [从网址安装]  [⋮]   安装是这一页的主要入口
+           * 菜单  调整顺序 / 健康检测 / 测速 / 导入源 / 重新加载 / 粘贴源码安装
+           * ```
+           *   —— 全部**一个没删**，只是收进菜单（菜单项带图标 + 文案，
+           *      比 6 个同款描边按钮好认得多）。
+           *
+           * ⚠️ `PopupMenuButton` 可被方向键聚焦、Enter 打开、
+           *    菜单项在菜单路由里可方向键上下选 ⇒ TV 上不失可达。
+           */
           Wrap(
             spacing: Sp.x2,
             runSpacing: Sp.x2,
             crossAxisAlignment: WrapCrossAlignment.center,
             children: [
-              // ── 左组：作用于**全部源** ──
-              OutlinedButton.icon(
-                onPressed: _openOrderDialog,
-                icon: const Icon(Icons.reorder, size: 16),
-                label: const Text('调整顺序'),
+              FilledButton.icon(
+                onPressed: _installPlugin,
+                icon: const Icon(Icons.download, size: 16),
+                label: const Text('从网址安装'),
               ),
-              OutlinedButton.icon(
-                onPressed: _sweeping ? null : _healthSweep,
-                icon: const Icon(Icons.monitor_heart_outlined, size: 16),
-                label: Text(_sweeping ? '检测中…' : '健康检测'),
+              PopupMenuButton<String>(
+                tooltip: '更多操作',
+                icon: const Icon(Icons.more_vert, size: 18),
+                onSelected: (v) {
+                  switch (v) {
+                    case 'order':
+                      _openOrderDialog();
+                    case 'health':
+                      if (!_sweeping) _healthSweep();
+                    case 'import':
+                      _openImportDialog();
+                    case 'reload':
+                      if (!_pluginBusy) _reloadPlugins();
+                    case 'source':
+                      _installPluginSource();
+                  }
+                },
+                itemBuilder: (_) => [
+                  PopupMenuItem(
+                    value: 'order',
+                    child: _menuRow(Icons.reorder, '调整顺序'),
+                  ),
+                  PopupMenuItem(
+                    value: 'health',
+                    enabled: !_sweeping,
+                    child: _menuRow(
+                      Icons.monitor_heart_outlined,
+                      _sweeping ? '健康检测中…' : '健康检测',
+                    ),
+                  ),
+                  PopupMenuItem(
+                    value: 'import',
+                    child: _menuRow(Icons.add, '导入源'),
+                  ),
+                  PopupMenuItem(
+                    value: 'reload',
+                    enabled: !_pluginBusy,
+                    child: _menuRow(
+                      Icons.refresh,
+                      _pluginBusy ? '重新加载中…' : '重新加载',
+                    ),
+                  ),
+                  PopupMenuItem(
+                    value: 'source',
+                    child: _menuRow(Icons.code, '粘贴源码安装'),
+                  ),
+                ],
               ),
-              /*
-               * ★★★ 2026-10-09：插件**实测速率**入口（Owner：「js插件那里做一个探测功能,
-               *     强制的啊,就是看哪个视频网站速度快,然后这个测速的记录要持久化」）
-               *
-               * ⚠️ 这里的「速度」是**真实下载速率（MB/s）**，不是 ping 延迟 ——
-               *    Owner 专门澄清过（「随机挑一部影片实测速率有多少」）。
-               *    实现见 `widgets/plugin_speedtest.dart`（随机抽片 → 真下载 → 计时）。
-               */
+              // 测速自带自己的按钮态（进度/结果），仍常驻在块头右侧。
               PluginSpeedTestAllButton(
                 pluginIds: list
                     .where((p) => p.enabled)
                     .map((p) => p.id)
                     .toList(growable: false),
-              ),
-              OutlinedButton.icon(
-                onPressed: _openImportDialog,
-                icon: const Icon(Icons.add, size: 16),
-                label: const Text('导入源'),
-              ),
-              // ── 两组之间的竖线（原版 `.head__sep`）──
-              Container(
-                width: 1,
-                height: 18,
-                margin: const EdgeInsets.symmetric(horizontal: Sp.x1),
-                color: colors.outlineVariant,
-              ),
-              // ── 右组：只作用于 JS 插件 ──
-              OutlinedButton.icon(
-                onPressed: _pluginBusy ? null : _reloadPlugins,
-                icon: const Icon(Icons.refresh, size: 16),
-                label: Text(_pluginBusy ? '处理中…' : '重新加载'),
-              ),
-              FilledButton.tonalIcon(
-                onPressed: _installPlugin,
-                icon: const Icon(Icons.download, size: 16),
-                label: const Text('从网址安装'),
-              ),
-              OutlinedButton.icon(
-                onPressed: _installPluginSource,
-                icon: const Icon(Icons.code, size: 16),
-                label: const Text('粘贴源码安装'),
               ),
             ],
           ),
@@ -5296,6 +5324,18 @@ class _FieldLabel extends StatelessWidget {
 ///    忘了删旧的那份，编译报 `The name '_ChipTone' is already defined`。
 ///    Dart 里同名类型不能重复声明（即使内容完全一样）。
 enum _ChipTone { plain, brand, off, danger }
+
+/// 菜单项的一行（图标 + 文案）—— 插件块头 / 卡片 ⋮ 菜单共用
+///
+/// 为什么单独抽：两处菜单的项都是同一形态（16px 图标 + 8px 间距 + 文字），
+/// 各写一遍的代价是以后调间距时漏一处，菜单里就出现两种行宽。
+Widget _menuRow(IconData icon, String label, {Color? color}) => Row(
+      children: [
+        Icon(icon, size: 16, color: color),
+        const SizedBox(width: Sp.x3),
+        Text(label, style: color == null ? null : TextStyle(color: color)),
+      ],
+    );
 
 class _MiniChip extends StatelessWidget {
   const _MiniChip({required this.text, this.tone = _ChipTone.plain});
