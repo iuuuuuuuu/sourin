@@ -287,7 +287,15 @@ async fn run_body(r: &mut Report) -> Result<(), String> {
     }
 
     // ─────────── start both servers ───────────
-    let script = probe_dir().join("t91_dav_server.py");
+    //
+    // ★ 阳性对照的仪器**已入库**（`tests/support/mini_dav_server.py`）。
+    //   原先它住在 `.probe/t91_dav_server.py`，而 `.probe/` 在 .gitignore 里
+    //   ⇒ 那个文件从没进过仓库 ⇒ 这条测试对**任何人**都必然红在
+    //   「positive-control instrument missing」，永远跑不起来。
+    let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("support")
+        .join("mini_dav_server.py");
     if !script.is_file() {
         return Err(format!(
             "positive-control instrument missing: {} (expected this project's \
@@ -336,7 +344,7 @@ async fn run_body(r: &mut Report) -> Result<(), String> {
         &lower_log,
     )?;
     let lower = Server {
-        label: "t91_dav_server.py (lowercase <d:>)".to_string(),
+        label: "mini_dav_server.py (lowercase <d:>)".to_string(),
         port: lower_port,
         child: lower,
     };
@@ -357,16 +365,26 @@ async fn run_body(r: &mut Report) -> Result<(), String> {
     println!("[T77] ---- raw LOWER body (t91), HTTP {lcode}, {} bytes ----", lbody.len());
     println!("{}", head_chars(&lbody, 900));
 
-    let u_upper_response = occ(&ubody, "<D:response");
+    // ★ wsgidav 的前缀**随版本变**：4.3.5 实测发 `ns0:`，更早的版本发大写 `D:`。
+    //   所以这里判的是「前缀**不是**小写 `d:`」这件事（也就是本测试要证的
+    //   前缀无关性），而不是死认某一个具体前缀 —— 否则换个 wsgidav 版本
+    //   这条测试就会假红，而被测的解析器其实一直是好的。
+    let u_upper_response = occ(&ubody, "<D:response") + occ(&ubody, "<ns0:response");
     let u_lower_response = occ(&ubody, "<d:response");
-    let u_upper_getetag = occ(&ubody, "<D:getetag");
+    let u_upper_getetag = occ(&ubody, "<D:getetag") + occ(&ubody, "<ns0:getetag");
+    let u_prefix = if occ(&ubody, "<ns0:response") > 0 {
+        "ns0:"
+    } else {
+        "D:"
+    };
+    println!("[T77] UPPER 实际前缀 = {u_prefix}");
     let l_lower_response = occ(&lbody, "<d:response");
     let l_lower_getetag = occ(&lbody, "<d:getetag");
 
     r.crit(
-        "B1 UPPER server really emits uppercase <D:response> (raw body has 3 blocks)",
+        "B1 UPPER server really emits a NON-lowercase response prefix (3 blocks)",
         ucode == 207 && u_upper_response == EXPECTED_RESPONSE_BLOCKS,
-        &format!("http={ucode} <D:response count={u_upper_response} (want {EXPECTED_RESPONSE_BLOCKS})"),
+        &format!("http={ucode} prefix={u_prefix} response count={u_upper_response} (want {EXPECTED_RESPONSE_BLOCKS})"),
     );
     r.crit(
         "B2 UPPER server emits ZERO lowercase <d:response> -- the literal the old parser searched for",
@@ -374,9 +392,9 @@ async fn run_body(r: &mut Report) -> Result<(), String> {
         &format!("<d:response count={u_lower_response} (want 0)"),
     );
     r.crit(
-        "B3 UPPER server emits uppercase <D:getetag>",
+        "B3 UPPER server emits getetag under that same non-lowercase prefix",
         u_upper_getetag >= 1,
-        &format!("<D:getetag count={u_upper_getetag}"),
+        &format!("prefix={u_prefix} getetag count={u_upper_getetag}"),
     );
     r.crit(
         "B4 LOWER control server emits lowercase <d:response> (3 blocks) + <d:getetag>",
@@ -480,7 +498,7 @@ async fn run_body(r: &mut Report) -> Result<(), String> {
 }
 
 #[tokio::test]
-#[ignore = "spawns local WebDAV servers (wsgidav UPPERCASE <D:> + .probe/t91_dav_server.py lowercase <d:>); run: cargo test --release --test t77_dav_prefix -- --ignored --nocapture"]
+#[ignore = "spawns local WebDAV servers (wsgidav UPPERCASE <D:> + tests/support/mini_dav_server.py lowercase <d:>); run: cargo test --test t77_dav_prefix -- --ignored --nocapture"]
 async fn t77_namespace_prefix_agnostic_listing() {
     let mut r = Report::new();
     if let Err(e) = run_body(&mut r).await {
