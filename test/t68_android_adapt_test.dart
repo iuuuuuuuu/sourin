@@ -115,6 +115,7 @@ String stripComments(String src) {
 
 const String _pagePath = 'lib/ui/player_page.dart';
 const String _sheetPath = 'lib/ui/widgets/player_settings_sheet.dart';
+const String _barPath = 'lib/ui/player/player_bottom_bar.dart';
 
 /// 剥注释后的 `player_page.dart`（**只读一次**，多处复用）
 final String _page = stripComments(File(_pagePath).readAsStringSync());
@@ -135,7 +136,11 @@ int indexOfExactly(String src, String needle, {int want = 1, String? why}) {
     hits.add(i);
     from = i + needle.length;
   }
-  expect(hits.length, want, reason: why ?? '「$needle」应恰好出现 $want 次，实测 ${hits.length} 次');
+  expect(
+    hits.length,
+    want,
+    reason: why ?? '「$needle」应恰好出现 $want 次，实测 ${hits.length} 次',
+  );
   return hits.isEmpty ? -1 : hits.first;
 }
 
@@ -246,8 +251,10 @@ final Finder _card = find.byWidgetPredicate(
 const double _phoneDpr = 3.0; // 1080 / 360
 const double _phoneW = 1080.0;
 const double _phoneH = 2400.0;
+
 /// 状态栏 `InsetsSource type=statusBars frame=[0,0][1080,144]`
 const double _statusBarPhysical = 144.0;
+
 /// 手势条 `InsetsSource type=navigationBars frame=[0,2280][1080,2400]`
 const double _gestureBarPhysical = 120.0;
 const double _statusBarLogical = _statusBarPhysical / _phoneDpr; // 48.0
@@ -283,20 +290,36 @@ void main() {
        * ★ 红度证明：把 `clipDirOpenStrategy` 里的 else 改回
        *   `return 'unsupported';`（旧行为）⇒ 第 4 条立刻红。
        */
-      expect(clipDirOpenStrategy(isWindows: true, isMacOS: false, isLinux: false), 'explorer');
-      expect(clipDirOpenStrategy(isWindows: false, isMacOS: true, isLinux: false), 'open');
-      expect(clipDirOpenStrategy(isWindows: false, isMacOS: false, isLinux: true), 'xdg-open');
+      expect(
+        clipDirOpenStrategy(isWindows: true, isMacOS: false, isLinux: false),
+        'explorer',
+      );
+      expect(
+        clipDirOpenStrategy(isWindows: false, isMacOS: true, isLinux: false),
+        'open',
+      );
+      expect(
+        clipDirOpenStrategy(isWindows: false, isMacOS: false, isLinux: true),
+        'xdg-open',
+      );
       expect(
         clipDirOpenStrategy(isWindows: false, isMacOS: false, isLinux: false),
         'copy-path',
-        reason: '★ 安卓 / iOS 没有文件管理器入口 ⇒ 必须落到「复制路径」，'
+        reason:
+            '★ 安卓 / iOS 没有文件管理器入口 ⇒ 必须落到「复制路径」，'
             '而不是旧行为「什么都不做」。',
       );
     });
 
     test('C①b 优先级：Windows 先于 macOS / Linux（三分支互不吞）', () {
-      expect(clipDirOpenStrategy(isWindows: true, isMacOS: true, isLinux: true), 'explorer');
-      expect(clipDirOpenStrategy(isWindows: false, isMacOS: true, isLinux: true), 'open');
+      expect(
+        clipDirOpenStrategy(isWindows: true, isMacOS: true, isLinux: true),
+        'explorer',
+      );
+      expect(
+        clipDirOpenStrategy(isWindows: false, isMacOS: true, isLinux: true),
+        'open',
+      );
     });
 
     test('C② _openClipDir 真的按策略分派，且 else 分支会复制路径', () {
@@ -305,8 +328,11 @@ void main() {
        *   恒为 false（宿主是 Windows）⇒ 安卓那一支**跑不到**，只能钉住它的形状。
        * ★ 红度证明：把 `else` 分支的 `Clipboard.setData(...)` 删掉 ⇒ 第 3 条红。
        */
-      final i = indexOfExactly(_page, 'Future<void> _openClipDir() async {',
-          why: '_openClipDir 的签名变了');
+      final i = indexOfExactly(
+        _page,
+        'Future<void> _openClipDir() async {',
+        why: '_openClipDir 的签名变了',
+      );
       final body = sliceBalanced(_page, i, '{', '}');
       indexOfExactly(body, 'final strategy = clipDirOpenStrategy(');
       indexOfExactly(body, "if (strategy == 'explorer')");
@@ -315,10 +341,16 @@ void main() {
       indexOfExactly(body, "Process.run('explorer', [d.path])");
       indexOfExactly(body, "Process.run('open', [d.path])");
       indexOfExactly(body, "Process.run('xdg-open', [d.path])");
-      indexOfExactly(body, 'await Clipboard.setData(ClipboardData(text: d.path));',
-          why: '★ else 分支必须把路径塞进剪贴板 —— 这是「可用行为」的全部内容');
-      expect(body.contains("已复制路径"), isTrue,
-          reason: '★ 复制之后要告诉用户「复制了什么」（_flash 文案）');
+      indexOfExactly(
+        body,
+        'await Clipboard.setData(ClipboardData(text: d.path));',
+        why: '★ else 分支必须把路径塞进剪贴板 —— 这是「可用行为」的全部内容',
+      );
+      expect(
+        body.contains("已复制路径"),
+        isTrue,
+        reason: '★ 复制之后要告诉用户「复制了什么」（_flash 文案）',
+      );
     });
 
     test('C③ 旧文案「当前平台不支持打开目录」已彻底消失', () {
@@ -328,11 +360,18 @@ void main() {
        * ★ 红度证明：把 else 分支换回 `_flash('当前平台不支持打开目录：$dir')` ⇒ 红。
        */
       final raw = File(_pagePath).readAsStringSync();
-      expect(_page.contains('当前平台不支持打开目录'), isFalse,
-          reason: '★ 代码里不许再有这句 —— 用户点了按钮只看到「不支持」就是这次的 bug');
-      expect(raw.contains('当前平台不支持打开目录'), isTrue,
-          reason: '★ 反向对照：注释里**应当**留着旧文案（解释改前是什么样）。'
-              '它不见了说明剥注释器没生效，或注释被误删。');
+      expect(
+        _page.contains('当前平台不支持打开目录'),
+        isFalse,
+        reason: '★ 代码里不许再有这句 —— 用户点了按钮只看到「不支持」就是这次的 bug',
+      );
+      expect(
+        raw.contains('当前平台不支持打开目录'),
+        isTrue,
+        reason:
+            '★ 反向对照：注释里**应当**留着旧文案（解释改前是什么样）。'
+            '它不见了说明剥注释器没生效，或注释被误删。',
+      );
     });
   });
 
@@ -349,13 +388,26 @@ void main() {
        *   那一行删掉 ⇒ 第 2 条红（默认是 `OverlayChildLocation.nearestOverlay`，
        *   仍会被夹）。
        */
-      indexOfExactly(_page, 'OverlayPortal(', want: 1,
-          why: '★ 只该有**一处** OverlayPortal —— 多一处说明面板被挂了两次');
-      indexOfExactly(_page, 'overlayLocation: OverlayChildLocation.rootOverlay,');
+      indexOfExactly(
+        _page,
+        'OverlayPortal(',
+        want: 1,
+        why: '★ 只该有**一处** OverlayPortal —— 多一处说明面板被挂了两次',
+      );
+      indexOfExactly(
+        _page,
+        'overlayLocation: OverlayChildLocation.rootOverlay,',
+      );
       indexOfExactly(_page, 'controller: _settingsPortal,');
-      indexOfExactly(_page, 'overlayChildBuilder: (ctx) => _buildSettingsPortalChild(ctx),');
+      indexOfExactly(
+        _page,
+        'overlayChildBuilder: (ctx) => _buildSettingsPortalChild(ctx),',
+      );
       // 门控：`_settingsOpen == false` 时 portal child 不渲染
-      indexOfExactly(_page, 'if (!_settingsOpen) return const SizedBox.shrink();');
+      indexOfExactly(
+        _page,
+        'if (!_settingsOpen) return const SizedBox.shrink();',
+      );
       // 面板只被构造一次（在 `_buildSettingsPortalChild` 里）
       indexOfExactly(_page, 'PlayerSettingsSheet(', want: 1);
       // `onClose` 仍写回 `_settingsOpen`（唯一真值源，不是 portal 的可见性）
@@ -375,9 +427,14 @@ void main() {
       // 关面板要顺手把 portal 收起来（否则可见性镜像与真值源不同步）
       // ★ 恰好 **2** 处**调用**：`_closeSettingsFromEsc()` 助手 + 面板 X 的 onClose
       //   （`void _hideSettingsPortal() {` 那行是**定义**，不含 `;`，不计入）
-      indexOfExactly(_page, '_hideSettingsPortal();', want: 2,
-          why: '★ 关面板的两条路（Esc / 面板 X）都必须把 portal 收起来，'
-              '否则可见性镜像与真值源不同步');
+      indexOfExactly(
+        _page,
+        '_hideSettingsPortal();',
+        want: 2,
+        why:
+            '★ 关面板的两条路（Esc / 面板 X）都必须把 portal 收起来，'
+            '否则可见性镜像与真值源不同步',
+      );
     });
 
     test('D② 面板外壳自带安全区 Padding（top + bottom），且尺寸两行未动', () {
@@ -389,10 +446,16 @@ void main() {
        * ★ 红度证明：把 `top: MediaQuery.paddingOf(context).top,` 删掉 ⇒ 第 1 条红。
        */
       indexOfExactly(_sheetSrc, 'top: MediaQuery.paddingOf(context).top,');
-      indexOfExactly(_sheetSrc, 'bottom: MediaQuery.paddingOf(context).bottom,');
+      indexOfExactly(
+        _sheetSrc,
+        'bottom: MediaQuery.paddingOf(context).bottom,',
+      );
       // 尺寸两行**刻意未动**（Lead 裁决：rootOverlay 之后 560 会被 360 自然夹住）
       indexOfExactly(_sheetSrc, 'width: 560,');
-      indexOfExactly(_sheetSrc, 'constraints: const BoxConstraints(maxHeight: 620),');
+      indexOfExactly(
+        _sheetSrc,
+        'constraints: const BoxConstraints(maxHeight: 620),',
+      );
     });
 
     testWidgets('D③ 真渲染：手机视口下卡片高 620（不再被视频盒夹成 202.67）', (t) async {
@@ -406,14 +469,20 @@ void main() {
       await t.pumpWidget(_host(makeSheet()));
       await t.pump();
 
-      expect(_card, findsOneWidget,
-          reason: '★ 找不到卡片 ⇒ 下面全是恒真的假绿（先修夹具）');
+      expect(_card, findsOneWidget, reason: '★ 找不到卡片 ⇒ 下面全是恒真的假绿（先修夹具）');
       final card = t.getRect(_card);
-      expect(card.height, closeTo(620, 0.01),
-          reason: '★ 卡片高必须 == maxHeight(620)。202.67 就是**改前**那个症状'
-              '（父盒是视频盒）；被夹成别的数说明面板又被塞回小盒子里了。');
-      expect(card.width, closeTo(_phoneLogicalW, 0.01),
-          reason: '★ 360dp 的窗口要把 560 夹到 360（Lead 裁决：这两行尺寸不许改）');
+      expect(
+        card.height,
+        closeTo(620, 0.01),
+        reason:
+            '★ 卡片高必须 == maxHeight(620)。202.67 就是**改前**那个症状'
+            '（父盒是视频盒）；被夹成别的数说明面板又被塞回小盒子里了。',
+      );
+      expect(
+        card.width,
+        closeTo(_phoneLogicalW, 0.01),
+        reason: '★ 360dp 的窗口要把 560 夹到 360（Lead 裁决：这两行尺寸不许改）',
+      );
       // 整块卡片必须落在窗口内（不许有半截在屏幕外）
       expect(card.left, greaterThanOrEqualTo(-0.01));
       expect(card.right, lessThanOrEqualTo(_phoneLogicalW + 0.01));
@@ -437,14 +506,25 @@ void main() {
 
       expect(_card, findsOneWidget);
       final card = t.getRect(_card);
-      const double available = 420 - _statusBarLogical - _gestureBarLogical; // 332
-      expect(card.height, closeTo(available, 0.01),
-          reason: '★ 卡片应被压到「窗口高 - 状态栏 - 手势条」= $available dp');
-      expect(card.top, closeTo(_statusBarLogical, 0.01),
-          reason: '★ 卡片顶边必须**恰好**让开状态栏（$_statusBarLogical dp）；'
-              '顶到 0 就是没让，改前就是这样。');
-      expect(card.bottom, closeTo(420 - _gestureBarLogical, 0.01),
-          reason: '★ 底边同理要让开手势条（$_gestureBarLogical dp）');
+      const double available =
+          420 - _statusBarLogical - _gestureBarLogical; // 332
+      expect(
+        card.height,
+        closeTo(available, 0.01),
+        reason: '★ 卡片应被压到「窗口高 - 状态栏 - 手势条」= $available dp',
+      );
+      expect(
+        card.top,
+        closeTo(_statusBarLogical, 0.01),
+        reason:
+            '★ 卡片顶边必须**恰好**让开状态栏（$_statusBarLogical dp）；'
+            '顶到 0 就是没让，改前就是这样。',
+      );
+      expect(
+        card.bottom,
+        closeTo(420 - _gestureBarLogical, 0.01),
+        reason: '★ 底边同理要让开手势条（$_gestureBarLogical dp）',
+      );
       expect(t.takeException(), isNull);
     });
 
@@ -464,204 +544,203 @@ void main() {
 
       // 面板内部唯一那根滚动条（`_clipSection` 里没有滚动，见 D 组源码判据）
       final scroller = find.byType(SingleChildScrollView).first;
-      for (var i = 0; i < 12 && !open.hitTestable().evaluate().isNotEmpty; i++) {
+      for (
+        var i = 0;
+        i < 12 && !open.hitTestable().evaluate().isNotEmpty;
+        i++
+      ) {
         await t.drag(scroller, const Offset(0, -120));
         await t.pump();
       }
-      expect(open.hitTestable(), findsOneWidget,
-          reason: '★ 滚到底都点不到「打开缓存目录」⇒ 面板可用高度不够（D 的症状）');
+      expect(
+        open.hitTestable(),
+        findsOneWidget,
+        reason: '★ 滚到底都点不到「打开缓存目录」⇒ 面板可用高度不够（D 的症状）',
+      );
       // 字面量随 Owner 第 5 条文案同步：'下载到缓存' → '下载本集到缓存'
       // （旧文案让用户以为下的是片段，实际是整集）
-      expect(find.text('下载本集到缓存').hitTestable(), findsOneWidget,
-          reason: '★ 同一行的另一半（下载）也要能点');
+      expect(
+        find.text('下载本集到缓存').hitTestable(),
+        findsOneWidget,
+        reason: '★ 同一行的另一半（下载）也要能点',
+      );
     });
   });
 
   // ═════════════════════════════════════════════════════════════════════
   //  E：底栏在手机上换形（不再靠横滑找齿轮）
   // ═════════════════════════════════════════════════════════════════════
-  group('★ E 底栏：窄屏换形 compactRow', () {
-    test('E① 出口是 `return fits ? row : compactRow`，旧的「包一层横滑」形状已消失', () {
+  group('★ E 底栏重做（Owner 2026-10-09 第 12 条）：新结构', () {
+    const barPath = 'lib/ui/player/player_bottom_bar.dart';
+    final String bar = stripComments(File(barPath).readAsStringSync());
+
+    test('E① 底栏本体已搬进 ui/player/player_bottom_bar.dart（旧大文件里不再有它）', () {
       /*
-       * ★ 改前：`return fits ? row : SingleChildScrollView(scrollDirection:
-       *   Axis.horizontal, child: row);` ⇒ 齿轮/相机被推到最右，要滑 3 次。
-       * ★ 红度证明：把出口改回那个三元式 ⇒ 第 1、2 条都红。
+       * ★ 红度证明：把 `PlayerBottomBar` 的 build 再塞回 `_BottomBar` 里
+       *   （即恢复"底栏本体在 player_page.dart"）⇒ 本条红。
        */
-      indexOfExactly(_page, 'return fits ? row : compactRow;');
-      indexOfExactly(_page, 'final compactRow = Column(');
-      indexOfExactly(_page, 'child: row,', want: 0,
-          why: '★ `child: row,` 是旧写法的指纹 —— 它还在说明横滑分支没被换掉');
-      indexOfExactly(_page, 'Axis.horizontal', want: 1,
-          why: '★ 现在只该剩 compactRow 第三行那一个横向滚动容器');
+      expect(
+        File(_barPath).readAsStringSync().contains('class PlayerBottomBar'),
+        isTrue,
+        reason:
+            '★★ 新底栏必须在 ui/player/player_bottom_bar.dart —— '
+            '本轮把 1300 多行底栏实现从 player_page.dart 搬出来了。',
+      );
+      // 旧的三档结构（compactRow / miniBar / row）**不该**再出现
+      indexOfExactly(
+        _page,
+        'final compactRow = Column(',
+        want: 0,
+        why: '★ 旧的三档宽度结构已整体替换 —— 判据挪到了新文件上',
+      );
+      indexOfExactly(
+        _page,
+        'final miniBar = Column(',
+        want: 0,
+        why: '★ 同上（中档）',
+      );
     });
 
-    test('E② compactRow 里 相机 → 齿轮 → 更多，各自恰好一次', () {
+    test('E② 新底栏：常驻高频项在任何宽度都在第一行', () {
       /*
-       * ★ 顺序是**用户可见的行为**：`.probe/t24/AUDIT.md:96` 记的亮列 97..1031
-       *   就是「齿轮贴在右边缘被切」。相机必须在齿轮左边（t63 也这么要求）。
-       * ★ 红度证明：把相机那个 IconButton 挪到齿轮后面 ⇒ 顺序断言红。
+       * ★ Owner 的原话是「底部的按钮超级多」—— 本条钉的是**收敛**：
+       *   常驻的只有 播放/音量/倍速，其余（选集/清晰度/字幕/弹幕/更多/下一集）
+       *   是条件项，低频项（截图/设置/投屏/缩放/片头片尾）进了「更多」浮层。
+       * ★ 红度证明：把 `_moreMenuGroups` 里的项删光 ⇒ E③ 红。
        */
-      final iCompact = indexOfExactly(_page, 'final compactRow = Column(');
-      final iRow = indexOfExactly(_page, 'final row = Row(');
-      expect(iCompact, lessThan(iRow), reason: '★ compactRow 必须定义在 row 之前');
-      final compact = _page.substring(iCompact, iRow);
-
-      indexOfExactly(compact, 'Icons.photo_camera', want: 1, why: '★ compactRow 里相机恰好一个');
-      indexOfExactly(compact, 'Icons.settings', want: 1, why: '★ compactRow 里齿轮恰好一个');
-      indexOfExactly(compact, 'Icons.more_vert', want: 1, why: '★ compactRow 里「更多」恰好一个');
-
-      final iCam = compact.indexOf('Icons.photo_camera');
-      final iGear = compact.indexOf('Icons.settings');
-      final iMore = compact.indexOf('Icons.more_vert');
-      expect(iCam, lessThan(iGear), reason: '★ 相机必须在齿轮**左边**（真机亮列证据）');
-      expect(iGear, lessThan(iMore), reason: '★ 齿轮在「更多」左边');
-      // 三个按钮都必须在**横向滚动容器之内**（不能藏进菜单）
-      final iScroll = indexOfExactly(compact, 'SingleChildScrollView(');
-      expect(iScroll, lessThan(iCam),
-          reason: '★ 相机要在滚动容器**里面**（滚动容器之外就掉出底栏了）');
-      indexOfExactly(compact, "tooltip: '截图'");
-      indexOfExactly(compact, "tooltip: '设置（字幕 / 音轨 / 连播）'");
-      indexOfExactly(compact, "tooltip: '更多'");
+      indexOfExactly(bar, 'class PlayerBottomBar');
+      expect(
+        bar.contains('PlayerPopoverIds.more'),
+        isTrue,
+        reason: '★「更多」入口必须还在底栏上（它是低频项的唯一出口）',
+      );
+      expect(
+        bar.contains('PlayerPopoverIds.rate'),
+        isTrue,
+        reason: '★ 倍速必须是 popover 入口（B 站那一档），不是弹窗',
+      );
+      expect(
+        bar.contains('PlayerPopoverIds.quality'),
+        isTrue,
+        reason: '★ 清晰度/线路必须是 popover 入口 —— Owner 点名要的那个',
+      );
+      expect(
+        bar.contains('PlayerPopoverIds.tracks'),
+        isTrue,
+        reason: '★ 字幕/音轨也走 popover',
+      );
     });
 
-    test('E③ 「更多」菜单收拢长尾，且弹幕设置是菜单项（Icons.tune 不在 compactRow 里）', () {
+    test('E③ 低频功能一个没删：全部进了「更多」分组浮层', () {
       /*
-       * ★ 为什么 tune 必须挪进菜单：`(360 - 2*Sp.x4)/2 = 164dp` 是硬预算，
-       *   首屏塞不下「相机 + 齿轮 + tune + 更多」。齿轮（播放设置）才是
-       *   用户报的那一个 ⇒ 齿轮留、tune 进菜单。
-       * ★ 红度证明：把 tune 的 IconButton 从菜单挪回按钮行 ⇒ 第 1 条红。
+       * ★ 这一条是 Owner 要求的**底线**：「只重组入口，不删功能」。
+       *   下面每一项在改前都是底栏上的一枚可见入口。
+       * ★ 红度证明：从 `_moreMenuGroups` 里删掉任意一个 label ⇒ 本条红。
        */
-      final iCompact = _page.indexOf('final compactRow = Column(');
-      final iRow = _page.indexOf('final row = Row(');
-      final compact = _page.substring(iCompact, iRow);
-      indexOfExactly(compact, 'Icons.tune', want: 0,
-          why: '★ compactRow 里不许有 tune —— 它已经进「更多」菜单');
-      indexOfExactly(compact, "'弹幕设置'");
-      indexOfExactly(compact, "'片头片尾'");
-      indexOfExactly(compact, "'所有直播'");
-      indexOfExactly(compact, 'PopupMenuButton<void>(');
-      // 菜单里**不许**再放一份相机/齿轮（t63:186-197 要求各 findsOneWidget）
-      final iMenu = compact.indexOf('PopupMenuButton<void>(');
-      final menu = sliceBalanced(compact, iMenu, '(', ')');
-      expect(menu.contains('Icons.photo_camera'), isFalse,
-          reason: '★ 菜单里再放一份相机会让 t63 的 findsOneWidget 红');
-      expect(menu.contains('Icons.settings'), isFalse,
-          reason: '★ 齿轮同理');
-    });
-
-    test('E④ compactRow 只有一根音量滑杆；宽屏 row 与 480 阈值都还在', () {
-      /*
-       * ★ 1280x800 下走的是 `row`，compactRow **整棵不渲染** ⇒
-       *   `player_capability_test.dart:1260-1306` 的「全页恰好一根 0..8/8
-       *   滑杆」不受影响。但 compactRow 自己的音量滑杆必须是 0..100 那一根。
-       * ★ 红度证明：在 compactRow 里再加一根滑杆 ⇒ 第 1 条红。
-       */
-      final iCompact = _page.indexOf('final compactRow = Column(');
-      final iRow = _page.indexOf('final row = Row(');
-      final compact = _page.substring(iCompact, iRow);
-      indexOfExactly(compact, 'Slider(', want: 1, why: '★ compactRow 里恰好一根滑杆');
-      indexOfExactly(compact, 'max: 100,');
-
-      // 宽屏那一支必须原样还在（t63 / player_capability 都跑 1280x800）
-      final wide = _page.substring(iRow, _page.indexOf('return fits ? row : compactRow;'));
-      indexOfExactly(wide, 'Icons.photo_camera', want: 1);
-      indexOfExactly(wide, 'Icons.settings', want: 1);
-      indexOfExactly(wide, 'Icons.tune', want: 1);
-      indexOfExactly(wide, "Text('选集'");
-      indexOfExactly(_page, 'const double _kBottomBarFitWidth = 480;');
-      indexOfExactly(_page, 'final fits = constraints.maxWidth.isFinite &&');
-    });
-
-    test('E⑤ 「选集」仍在滚动容器里，且相机/齿轮排在它之前（首屏够得到）', () {
-      /*
-       * ★ `player_panel_dark_and_boundary_test.dart:140-152` 与
-       *   `episode_strip_test.dart:407` 都会 `find.text('选集')` ⇒
-       *   这个字面量在两支里都必须**恰好一份**（多一份就是 findsOneWidget 红）。
-       * ★ 红度证明：把选集 TextButton 从 compactRow 删掉 ⇒ 第 2 条红。
-       */
-      final iCompact = _page.indexOf('final compactRow = Column(');
-      final iRow = _page.indexOf('final row = Row(');
-      final compact = _page.substring(iCompact, iRow);
-      // ⚠️ 真实写法是 `label: const Text('选集',` 后换行接 `style: ...` ⇒
-      //    needle 只能取到 `Text('选集'`（带上 `label: const ` 就永远 0 命中）。
-      final iEp = indexOfExactly(compact, "Text('选集'", want: 1);
-      final iScroll = compact.indexOf('SingleChildScrollView(');
-      expect(iEp, greaterThan(iScroll),
-          reason: '★ 选集仍然在滚动容器里（没被删掉）');
-      /*
-       * ★ 2026-10-05 **反转**（原判据把缺陷钉成了契约）：
-       *   改前这里是 `expect(compact.indexOf('Icons.photo_camera'),
-       *   greaterThan(iEp))` —— 它要求相机排在**选集之后**，于是
-       *   `上一集/下一集/线路/换源/选集` 先把 328dp 的视口占满：
-       *   相机中心 ≈ 312dp（最乐观）、齿轮中心 ≈ 360dp > 328dp
-       *   ⇒ 首屏点不到齿轮 —— 正是本轮要修的那个 bug。测试绿、产品错。
-       * ★ 红度证明：用重排前的源码（`.probe/yamby/
-       *   player_page_before_e_reorder.dart`）跑这条 ⇒ `cam < iEp` = False。
-       */
-      expect(compact.indexOf('Icons.photo_camera'), lessThan(iEp),
-          reason: '★ 相机必须排在「选集」**之前**（恒存在的入口优先）');
-      expect(compact.indexOf('Icons.settings'), lessThan(iEp),
-          reason: '★ 齿轮同理 —— 它是用户报的那一个，绝不能排到条件项后面');
-    });
-
-    test('E⑥ 相机/齿轮/更多 是第三行那个 Row 的**最前三个子项**（顺序 + 算术，非渲染几何）', () {
-      /*
-       * ★ 为什么用「计数 + 配平切片」而不是 `contains`：
-       *   `contains` 只回答「有没有」，回答不了「是不是最前面三个」。
-       *   这里把 `SingleChildScrollView(` 的实参切出来 → 里面的
-       *   `child: Row(` → 再切它的 `children: [` 列表，然后在**同一个
-       *   切片坐标**里数子项（跨坐标系比下标会恒真，本项目踩过）。
-       * ★ 诚实标注：这条是**顺序 + 算术**，不是真渲染几何。
-       *   3 个 IconButton 各 48dp ⇒ 相机 0..48、齿轮 48..96（中心 ≈ 72dp
-       *   ≪ 视口 328dp = 360 − 2×Sp.x4）。真机几何由 uiautomator dump
-       *   在新 APK 上验收（见 `.probe/player/TASK25-REPORT.md` §5）。
-       * ★ 红度证明：用重排前的源码跑 ⇒ head(cam) 里 TextButton=7、
-       *   Icons.=5，且 TextButton.icon 的首个下标 < 更多 的下标 ⇒
-       *   第 2、3、4 条一起红。
-       */
-      final iCompact = indexOfExactly(_page, 'final compactRow = Column(');
-      final iRow = indexOfExactly(_page, 'final row = Row(');
-      final compact = _page.substring(iCompact, iRow);
-
-      final iScroll = indexOfExactly(compact, 'SingleChildScrollView(');
-      final scroll = sliceBalanced(compact, iScroll, '(', ')');
-      final iChildRow = indexOfExactly(scroll, 'child: Row(');
-      final rowNode = sliceBalanced(scroll, iChildRow, '(', ')');
-      final iChildren = indexOfExactly(rowNode, 'children: [');
-      final kids = sliceBalanced(rowNode, iChildren, '[', ']');
-
-      final iCam = indexOfExactly(kids, 'Icons.photo_camera');
-      final iGear = indexOfExactly(kids, 'Icons.settings');
-      final iMore = indexOfExactly(kids, 'Icons.more_vert');
-      expect(iCam, lessThan(iGear));
-      expect(iGear, lessThan(iMore));
-
-      // ① 相机之前**只有**它自己的 IconButton —— 没有任何条件项、没有别的 Icons
-      final headCam = kids.substring(0, iCam);
-      indexOfExactly(headCam, 'IconButton(', why: '★ 相机之前只该有它自己的 IconButton');
-      expect(headCam.contains('TextButton'), isFalse,
-          reason: '★ 相机之前不许有 TextButton（上一集/下一集/线路/换源/选集）');
-      expect(headCam.contains('Icons.'), isFalse, reason: '★ 相机之前不许有别的图标');
-      // ② 齿轮之前只有两个 IconButton（相机 + 它自己），仍然没有任何 TextButton
-      final headGear = kids.substring(0, iGear);
-      indexOfExactly(headGear, 'IconButton(', want: 2,
-          why: '★ 齿轮之前只该有 相机 + 齿轮 这两个 IconButton');
-      expect(headGear.contains('TextButton'), isFalse, reason: '★ 齿轮之前不许有 TextButton');
-      expect(headGear.contains('PopupMenuButton'), isFalse,
-          reason: '★ 齿轮不能在「更多」里面（t63 要求 findsOneWidget）');
-      // ③ 五个 TextButton.icon（上一集/下一集/线路/换源/选集）全在 更多 **之后**
-      final tb = <int>[];
-      var f = 0;
-      while (true) {
-        final i = kids.indexOf('TextButton.icon(', f);
-        if (i < 0) break;
-        tb.add(i);
-        f = i + 1;
+      final i = _page.indexOf('List<MoreMenuGroup> _moreMenuGroups(');
+      expect(i, greaterThan(0), reason: '★「更多」浮层的分组清单不见了');
+      final body = sliceBalanced(_page, i, '{', '}');
+      for (final label in [
+        '截图', // 改前：底栏相机按钮
+        '播放设置', // 改前：底栏齿轮
+        '换源', // 改前：底栏「换源」文字按钮
+        '片头片尾', // 改前：底栏文字按钮（直播时不显示）
+        '弹幕设置', // 改前：底栏 tune 图标
+        '画中画', // 改前：底栏图标
+        '画面缩放', // 改前：底栏缩放按钮 / 紧凑档「更多」菜单项
+        '字幕搜索', // 改前：设置面板里的入口，仍然可达
+        '上一集', // 改前：底栏上一集按钮
+        '下一集', // 改前：底栏下一集按钮
+      ]) {
+        expect(
+          body.contains("'$label'"),
+          isTrue,
+          reason:
+              '★★「$label」在改前是底栏上的可见入口，'
+              '本轮**只允许换入口、不许删功能**',
+        );
       }
-      expect(tb.length, 5,
-          reason: '★ 五个 TextButton.icon 都要还在（两个受 hasStreams/hasEpisodes 门控）');
-      expect(tb.first, greaterThan(iMore),
-          reason: '★ 全部条件项都要排到 截图/设置/更多 **之后** —— 这才是 E 的修法');
+      // ★ 投屏那一项由 `castEntry` 这个 getter 提供（它要放**真的 CastButton**，
+      //   那个控件自己管代理与电视扫描，见 cast_button.dart 的类文档），
+      //   所以它在 `_moreMenuGroups` 外面 —— 判据也跟着分开写。
+      expect(
+        _page.contains("label: '投屏'"),
+        isTrue,
+        reason: '★★「投屏」在改前是底栏上的可见入口，不许删',
+      );
+      expect(
+        _page.contains('CastButton('),
+        isTrue,
+        reason: '★ 投屏要用**真的 CastButton**，不是一枚自己画的图标',
+      );
+    });
+
+    test('E④ 音量滑杆仍然恰好一根，且是 0..100', () {
+      /*
+       * ★ 这是硬约束（`player_capability_test` 用 `find.byType(Slider).first`
+       *   钉「全页恰好一根 0..8/8 滑杆」）。
+       * ★ 红度证明：在底栏里再加一根 Slider ⇒ 本条红。
+       */
+      // ★ 只数 `_VolumeControl` 那一段：缩放滑条（PlayerZoomSliderCard）
+      //   与进度拖条（PlayerProgressSlider 是自定义手势，不是 Slider）不算。
+      final iv = bar.indexOf('class _VolumeControl');
+      expect(iv, greaterThan(0), reason: '★ `_VolumeControl` 不见了');
+      final vol = sliceBalanced(bar, iv, '{', '}');
+      indexOfExactly(vol, 'Slider(', want: 1, why: '★ 音量控件里恰好一根滑杆');
+      indexOfExactly(vol, 'max: 100,');
+      indexOfExactly(bar, 'max: 100,', want: 1, why: '★ 全底栏只有音量那一处用 0..100 量程');
+    });
+
+    test('E⑤ 选集入口仍是底栏上的**第一个**条件项（首屏够得到）', () {
+      /*
+       * ★ 承自 2026-10-05 那条反转过的判据：恒存在的入口必须排在条件项前面，
+       *   否则在窄屏上会被挤出视口点不到。
+       * ★ 红度证明：把「选集」那枚挪到条件项列表末尾 ⇒ 本条红。
+       */
+      final iEp = bar.indexOf("label: '选集'");
+      expect(iEp, greaterThan(0), reason: '★ 底栏上要有「选集」入口');
+      for (final other in <String>["label: '更多'", "label: '弹幕'"]) {
+        final i = bar.indexOf(other);
+        expect(i, greaterThan(0), reason: '★ 条件项 $other 必须在');
+        expect(iEp, lessThan(i), reason: '★「选集」要排在其它条件项**之前**（窄屏首屏可达）');
+      }
+    });
+
+    test('E⑥ popover 层由**页面**整屏 Stack 承载，不是底栏的子件', () {
+      /*
+       * ★★★ 这条是本轮踩过的**真坑**，写下来防止回退：
+       * ```text
+       * 底栏在页面里是 Positioned(bottom:0)、高约 106px 的盒子。
+       * 面板挂在它内部时，能长到的上界被那 106px 卡死 ——
+       * 实测（无头截图）：popover 展开后的 PNG 与「没展开」的 PNG
+       * **md5 完全相同**，一像素都没画出来。
+       * ⇒ 提到页面那个整屏 Stack 里当兄弟（`buildPopoverLayer()`）。
+       * ```
+       * ★ 红度证明：把挂载点挪回 `_BottomBar` 内部 ⇒ 本条红。
+       */
+      indexOfExactly(bar, 'Widget buildPopoverLayer()');
+      // ⚠️ 判据用「两段都出现」而不是**整行逐字**匹配：
+      //   `dart format` 会把 `=>` 后面那行折断，整行匹配会假红。
+      expect(
+        _page.contains('Widget buildPopoverLayer()'),
+        isTrue,
+        reason: '★ 页面要有 popover 层的构造入口',
+      );
+      expect(
+        _page.contains('buildPopoverLayer(),'),
+        isTrue,
+        reason: '★★ 页面必须在整屏 Stack 里挂那一层（`ListenableBuilder` 的 builder）',
+      );
+      expect(
+        _page.contains('bottom: _kPlayerBottomBarHeight'),
+        isTrue,
+        reason: '★ 面板要从底栏上沿往上长，不是贴着屏幕底',
+      );
+      indexOfExactly(
+        _page,
+        'const double _kPlayerBottomBarHeight = 96;',
+        why: '★ 面板定位用的底栏高度必须是命名常量（两处要能对得上）',
+      );
     });
   });
 }
