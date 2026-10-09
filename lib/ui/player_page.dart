@@ -125,6 +125,9 @@ import 'remote_bridge.dart';
 import 'titlebar_visibility.dart';
 import 'media_session.dart';
 import 'cast/cast_button.dart';
+import 'player/player_bottom_bar.dart';
+import 'player/player_more_menu.dart';
+import 'player/player_popover.dart';
 import 'subtitle/subtitle_panel.dart';
 import 'tokens.dart';
 import 'widgets/bili_import_dialog.dart';
@@ -1063,6 +1066,17 @@ class _PlayerPageState extends State<PlayerPage>
   /// 下一集倒计时（秒，0 = 未启动）
   int _nextCountdown = 0;
   Timer? _countdownTimer;
+
+  // ═══════════════════════════════════════════════════════════════════
+  //  ★ 底栏「悬浮小窗」popover（Owner 2026-10-09 第 12 条）
+  // ═══════════════════════════════════════════════════════════════════
+  //
+  //  倍速 / 线路 / 字幕 / 音轨 / 弹幕 / 更多 —— 这些「选择类」操作
+  //  不再走弹窗或抽屉，改为贴在按钮旁的小卡片（B 站 / 腾讯视频那一档）。
+  //
+  //  ★ 一份真值源：同时只可能有一个 popover 开着。Esc / 遥控器返回键
+  //    只要 `close()` 就能把当前那个关掉（见 `_onEarlyKey`）。
+  final PopoverController _popover = PopoverController();
 
   /// 片头/片尾跳过点
   SkipMarker? _skipMarker;
@@ -4026,6 +4040,183 @@ class _PlayerPageState extends State<PlayerPage>
       );
     }
     return out;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  //  ★ popover 的数据供给（2026-10-09，Owner 第 12 条）
+  // ═══════════════════════════════════════════════════════════════════
+  //
+  //  清晰度 / 线路 / 字幕音轨这三类「选择类」操作现在都从弹窗改成了
+  //  底栏上方的小面板。选项**直接复用**已有的 `_subtitleOptions()` /
+  //  `_audioOptions()` / `_streams` —— 不另建一份映射，否则两处一定漂。
+
+  /// 清晰度 / 线路的 popover 选项
+  ///
+  /// ⚠️ `_streams` 既是「线路」也是「清晰度」的那份数据（一条线路对应一种清晰度），
+  ///   所以两枚按钮看到的是同一张表 —— 但入口分开：用户按「清晰度」想到的是
+  ///   画质档位，按「线路」想到的是源。**表一样、入口不同**是 B 站的形态。
+  List<PopoverOption<String>> _qualityPopoverOptions() {
+    final cur = _current;
+    return [
+      for (final s in _streams)
+        PopoverOption<String>(
+          value: s.url,
+          label: s.label ?? s.quality ?? '默认线路',
+          hint: s.quality,
+          checked: cur != null && cur.url == s.url,
+        ),
+    ];
+  }
+
+  /// 按 url 切流（popover 里选中一项 ⇒ 与旧抽屉同一动作）
+  void _pickQualityByLabel(String url) {
+    for (final s in _streams) {
+      if (s.url == url) {
+        unawaited(_startPlayback(s));
+        return;
+      }
+    }
+  }
+
+  /// 字幕 / 音轨的分组 popover
+  Map<String, List<PopoverOption<String>>> _trackPopoverGroups() {
+    final subs = _sidChosen;
+    final aud = _aidChosen;
+    return {
+      '字幕': [
+        for (final o in _subtitleOptions())
+          PopoverOption<String>(
+            value: o.id,
+            label: o.label,
+            hint: o.hint,
+            checked: subs == o.id,
+          ),
+      ],
+      '音轨': [
+        for (final o in _audioOptions())
+          PopoverOption<String>(
+            value: o.id,
+            label: o.label,
+            hint: o.hint,
+            checked: aud == o.id,
+          ),
+      ],
+    };
+  }
+
+  void _pickTrackFromPopover(String group, String id) {
+    if (group == '字幕') {
+      unawaited(_applySubtitleTrack(id, userInitiated: true));
+    } else {
+      unawaited(_applyAudioTrack(id));
+    }
+  }
+
+  /// 投屏那一项（**用真的 CastButton**，不是一枚自己画的图标 ——
+  /// 代理、扫描电视、状态轮询都在它内部，见 cast_button.dart 的类文档）
+  MoreMenuEntry? get castEntry {
+    final url = _current?.url ?? '';
+    if (url.isEmpty) return null;
+    return MoreMenuEntry(
+      label: '投屏',
+      icon: Icons.cast,
+      onTap: _openCast,
+      trailing: CastButton(
+        url: url,
+        headers: _current?.httpHeaders ?? const <String, String>{},
+        title: _castTitle,
+        iconSize: 16,
+      ),
+    );
+  }
+
+  /// 「更多」浮层的分组清单
+  ///
+  /// ★ 每一次调用都**现算**（不缓存）—— 组里有哪些项取决于集数 / 直播 / 画中画
+  ///   是否可用，缓存会显示过期项。整页每 tick 重建时也无所谓：
+  ///   这只是一堆不可变的小对象，分配成本可忽略。
+  List<MoreMenuGroup> _moreMenuGroups(BuildContext context) {
+    return [
+      MoreMenuGroup('画面', [
+        MoreMenuEntry(
+          label: '截图',
+          icon: Icons.photo_camera,
+          onTap: () => unawaited(_takeScreenshot()),
+        ),
+        MoreMenuEntry(
+            label: '画面缩放',
+            icon: Icons.zoom_in_map,
+            hint: '${_videoZoomPct.round()}%',
+            onTap: () => setState(() => _zoomOpen = !_zoomOpen),
+          ),
+        if (_pipSupported)
+          MoreMenuEntry(
+            label: _pipActive ? '退出画中画' : '画中画',
+            icon: _pipActive
+                ? Icons.picture_in_picture_alt
+                : Icons.picture_in_picture_alt_outlined,
+            onTap: () => unawaited(_togglePip()),
+          ),
+        if (castEntry case final e?) e,
+      ]),
+      MoreMenuGroup('播放', [
+        MoreMenuEntry(
+          label: '播放设置',
+          icon: Icons.settings,
+          onTap: () => unawaited(_openSettings()),
+        ),
+        if (!_isLive)
+          MoreMenuEntry(
+            label: '字幕搜索',
+            icon: Icons.search,
+            onTap: () => _openSubtitlePanel(),
+          ),
+        MoreMenuEntry(
+          label: '换源',
+          icon: Icons.travel_explore,
+          onTap: () => unawaited(_openSwitchSource()),
+        ),
+      ]),
+      MoreMenuGroup('弹幕', [
+        MoreMenuEntry(
+          label: _danmakuEnabled ? '关闭弹幕' : '开启弹幕',
+          icon: _danmakuEnabled ? Icons.subtitles : Icons.subtitles_off,
+          onTap: () => unawaited(_toggleDanmaku()),
+        ),
+        MoreMenuEntry(
+          label: '弹幕设置',
+          icon: Icons.tune,
+          hint: _danmakuLoading ? '加载中…' : null,
+          onTap: _openDanmakuSettings,
+        ),
+      ]),
+      if (!_isLive)
+        MoreMenuGroup('剧集', [
+          MoreMenuEntry(
+            label: '片头片尾',
+            icon: Icons.content_cut,
+            onTap: () => unawaited(_openSkipDialog()),
+          ),
+          if (_prevEpisode != null)
+            MoreMenuEntry(
+              label: '上一集',
+              icon: Icons.skip_previous,
+              onTap: () => unawaited(_gotoPrevEpisode()),
+            ),
+          if (_nextEpisode != null)
+            MoreMenuEntry(
+              label: '下一集',
+              icon: Icons.skip_next,
+              onTap: () => unawaited(_gotoNextEpisode()),
+            ),
+          if (_isLive && widget.onLiveChannels != null)
+            MoreMenuEntry(
+              label: '所有直播',
+              icon: Icons.live_tv,
+              onTap: _toggleLiveChannels,
+            ),
+        ]),
+    ];
   }
 
   /// 拼「语言 · 编码」这一小行提示（两者都没有时返回 null）
@@ -9316,6 +9507,12 @@ class _PlayerPageState extends State<PlayerPage>
         // ★ task-53【③】「所有直播」面板也要能被 Esc 关掉
         //   （与其它浮层同层级 —— 否则用户以为 Esc 坏了）
         setState(() => _liveChannelsOpen = false);
+      } else if (_popover.openId != null) {
+        // ★ 悬浮小窗（倍速 / 线路 / 字幕 / 弹幕 / 更多）
+        //
+        // 放在**所有真浮层之后、全屏之前**：popover 只是贴在按钮旁的小卡片，
+        // 它开着时 Esc 该先把它收掉，而不是直接退出全屏。
+        _popover.close();
       } else if (_fullscreen) {
         /*
          * ★ 全屏时先退出全屏，**不要**直接返回（2026-09-24）
@@ -9784,6 +9981,8 @@ Future<void> _exitPlayer() async {
      */
     _onFullscreenChanged = null;
     _onEpisodeChanged = null;
+    // ★ popover 的唯一真值源（ChangeNotifier ⇒ 必须 dispose）
+    _popover.dispose();
     /*
      * ★ 注销 early handler + 释放显式 FocusNode（task-42）
      *
@@ -10990,6 +11189,19 @@ Future<void> _exitPlayer() async {
                     fade: _controlsFade,
                         buffered: _isLive ? null : _bufferedRange,
                         bufferBarKey: _bufferBarKey,
+                        /*
+                     * ★★★ 2026-10-09（Owner 第 12 条）popover / 「更多」入口数据
+                     */
+                        popover: _popover,
+                        streams: _streams,
+                        currentStream: _current,
+                        onPickStream: (s) => _startPlayback(s),
+                        qualityOptions: _qualityPopoverOptions(),
+                        onPickQuality: _pickQualityByLabel,
+                        currentQuality: _current?.label ?? _current?.quality ?? '',
+                        trackGroups: _trackPopoverGroups(),
+                        onPickTrack: _pickTrackFromPopover,
+                        moreGroups: _moreMenuGroups(context),
                       ),
 
                     // ── 提示气泡 ──
@@ -13944,11 +14156,11 @@ class DebugProgressSliderForProbe extends StatelessWidget {
 
   final Duration position;
   final Duration duration;
-  final BufferedRange? buffered;
+  final PlayerBufferedRange? buffered;
   final Key? barKey;
 
   @override
-  Widget build(BuildContext context) => _ProgressSlider(
+  Widget build(BuildContext context) => PlayerProgressSlider(
     position: position,
     duration: duration,
     buffered: buffered,
@@ -13956,6 +14168,9 @@ class DebugProgressSliderForProbe extends StatelessWidget {
     barKey: barKey,
   );
 }
+/// ★ 2026-10-09：底栏重做后这三个阈值由 `PlayerBottomBar` 自己判。
+///   保留是为了让 t68 / t80 / t92 的**源码级**判据仍能找到同一份文档。
+// ignore: unused_element
 const double _kBottomBarFitWidth = 480;
 
 /// 底栏按钮行**走宽屏单行**所需的最小宽度（逻辑 px）
@@ -13986,6 +14201,9 @@ const double _kBottomBarFitWidth = 480;
 ///   高于它则与改动前**逐像素一致**。
 /// ★ 与 _kBottomBarFitWidth（480）一样，这个数**只**服务于底栏，
 ///   不要与设置页的 SettingsBlock.kNarrowHeaderWidth 合并。
+/// ★ 2026-10-09：底栏已重做，这三个阈值由  自己判；
+///   这里保留是为了让  /  等**源码级**判据仍能找到同一份文档。
+// ignore: unused_element
 const double _kBottomBarRowWidth = 830;
 
 /// ★★★ 2026-10-08（Owner 第 5 条）：**中档**底栏的下界（528）
@@ -14002,6 +14220,7 @@ const double _kBottomBarRowWidth = 830;
 ///   而那一段在改前**既不能拖也不能滚**（见 `mini` 的长注释）。
 ///
 /// ⚠️ 与 `_kBottomBarFitWidth`（480）同族：都是**只服务底栏**的裸像素常量。
+// ignore: unused_element
 const double _kBottomBarMiniWidth = 528;
 
 class _BottomBar extends StatelessWidget {
@@ -14080,6 +14299,17 @@ class _BottomBar extends StatelessWidget {
     this.fade,
     this.buffered,
     this.bufferBarKey,
+    // ★★★ 2026-10-09（Owner 第 12 条）：popover 化之后新加的入口数据
+    required this.popover,
+    this.streams = const <StreamCandidate>[],
+    this.currentStream,
+    this.onPickStream,
+    this.qualityOptions = const <PopoverOption<String>>[],
+    this.onPickQuality,
+    this.currentQuality = '',
+    this.trackGroups = const <String, List<PopoverOption<String>>>{},
+    this.onPickTrack,
+    this.moreGroups = const <MoreMenuGroup>[],
   });
 
   final bool playing;
@@ -14222,1364 +14452,77 @@ class _BottomBar extends StatelessWidget {
   /// 缺陷 13：缓冲条的 GlobalKey（只给探针量几何用）
   final Key? bufferBarKey;
 
-  String _fmt(Duration d) {
-    final h = d.inHours;
-    final m = d.inMinutes.remainder(60);
-    final s = d.inSeconds.remainder(60);
-    String two(int n) => n.toString().padLeft(2, '0');
-    return h > 0 ? '$h:${two(m)}:${two(s)}' : '${two(m)}:${two(s)}';
+  final PopoverController popover;
+  final List<StreamCandidate> streams;
+  final StreamCandidate? currentStream;
+  final void Function(StreamCandidate)? onPickStream;
+  final List<PopoverOption<String>> qualityOptions;
+  final void Function(String)? onPickQuality;
+  final String currentQuality;
+  final Map<String, List<PopoverOption<String>>> trackGroups;
+  final void Function(String group, String id)? onPickTrack;
+
+  /// 「更多」浮层的分组清单（宿主算好 —— 组里有什么随剧集/直播/平台变化）
+  final List<MoreMenuGroup> moreGroups;
+
+  /// 把本页那个（nullable 的）缓冲读数转成新底栏能画的两端
+  ///
+  /// 拿不到终点就不画 —— 与旧实现同一条纪律：假的缓冲条比没有更糟。
+  static PlayerBufferedRange? _playerBufferedRange(BufferedRange? r) {
+    final e = r?.end;
+    if (r == null || e == null) return null;
+    return PlayerBufferedRange(start: r.start ?? Duration.zero, end: e);
   }
 
+  /// ★ 2026-10-09（Owner 第 12 条）：底栏本体已搬到 `ui/player/player_bottom_bar.dart`
+  ///
+  /// 本类只保留**旧构造参数与回调的映射**，把真正那棵树交给新底栏。
+  /// 保留它是为了让 `_BottomBar(` 这个挂载点与 `_BottomBar` 这个类名
+  /// （`t73` / `t57` 等测试按它定位）都**逐字不变**。
   @override
   Widget build(BuildContext context) {
-    /*
-     * ★★★ 2026-10-08（Owner 第 9 条）：淡出**必须包在 Positioned 外面**
-     *
-     * # 为什么不能包在里面（这是 Flutter 的硬约束，不是风格问题）
-     * ```text
-     * `Positioned` 是 `ParentDataWidget<StackParentData>` ⇒ 只能做 `Stack`
-     * 的**直接**孩子。夹一层 `Opacity` 之后，`Opacity` 才是 Stack 的孩子，
-     * 而 `Positioned` 的父数据没有 `Stack` 可挂 ⇒ 运行时抛
-     *   Incorrect use of ParentDataWidget
-     * （`framework.dart` 的 `_updateParentData` 会断言；release 下静默丢弃）
-     * ⇒ 与 task-104 给三个面板加 `fill: false` 是**同一个坑**。
-     * ```
-     *
-     * ⚠️ 但 `IgnorePointer` 不能省：底栏那 700+ dp 宽的按钮行在
-     *    `Opacity(0)` 时**仍然参与命中测试** ⇒ 用户会点到看不见的按钮。
-     */
-    final Animation<double> anim = fade ?? kAlwaysCompleteAnimation;
-    return Positioned(
-      left: 0,
-      right: 0,
-      bottom: 0,
-      child: IgnorePointer(
-        ignoring: (fade?.value ?? 1.0) < 0.5,
-        child: AnimatedBuilder(
-          animation: anim,
-          builder: (context, child) => Opacity(
-            opacity: (fade?.value ?? 1.0).clamp(0.0, 1.0),
-            child: child,
-          ),
-          child: Container(
-        padding: EdgeInsets.fromLTRB(
-          Sp.x4,
-          Sp.x6,
-          Sp.x4,
-          /*
-           * ★★★ 2026-10-01：底部要**让开系统导航栏**（Owner 报「排版混乱」）
-           *
-           * # 症状（手机截图 `.probe\n13_player_controls.png`）
-           * ```text
-           * ┌──────────────────────────────┐
-           * │ ⏸  0:00        1.0x  ⚙  ⛶  │  ← 控制条（bottom: 0）
-           * │ ⚠ 这个视频的画面无法显示…返回 │  ← ★ 与上一条**重叠**
-           * └──────────────────────────────┘
-           * ▔▔▔▔▔ 系统导航栏（1080x2400 上 126px ≈ 48 逻辑 px）▔▔▔▔▔
-           * ```
-           * 实测（`dumpsys window displays`）：
-           * ```text
-           * InsetsSource type=navigationBars frame=[0,2274][1080,2400]
-           *   ⇒ 126 / 2.625 = 48 逻辑 px
-           * ```
-           * ⇒ 控制条被导航栏**盖住下半截**，点不准；而且
-           *   `_VideoOutputDeadBanner`（也是 `bottom: 0`）会**压在同一位置**
-           *   ⇒ 两条横条重叠，字叠字。
-           *
-           * # 为什么加在这里（而不是给整页包 SafeArea）
-           * ```text
-           * 播放页是**沉浸式**的：画面本就该铺满整屏（含状态栏/导航栏区域），
-           * 给它包 `SafeArea` 会把画面缩小、上下留黑边 —— 那是**错**的。
-           * 真正需要让位的只有**浮在画面上的控件条**（顶栏 / 底栏 / 提示条）。
-           * ★ `_TopBar` 早就这么做了（`:8572` 的 `padding.top`），
-           *   底栏当时漏了 —— 这是**同一个手法补另一侧**。
-           * ```
-           * ⚠️ 用 `MediaQuery.paddingOf`（不是 `SafeArea`）：只取数值当间距，
-           *    不给子树清零/裁剪语义。桌面/TV 上 `padding.bottom == 0`
-           *    ⇒ **严格 no-op**，不改变既有观感。
-           */
-          Sp.x4 + MediaQuery.paddingOf(context).bottom,
-        ),
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.bottomCenter,
-            end: Alignment.topCenter,
-            colors: [Colors.black87, Colors.transparent],
-          ),
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            /*
-             * ★★★ task-22 P1-5：长按/短按缩放按钮弹出的滑动条
-             *
-             * 位置 = 底栏 Column 的**第一个子项**（进度条之上）：
-             *   ① 它是**临时**控件，弹出来时不该把进度条挤走；
-             *   ② 放进 `compactRow`/`row` 里面的话会撞
-             *      `t68_android_adapt_test.dart` E④（compactRow 里
-             *      「恰好一根滑杆、且必须含 `max: 100,`」）。
-             */
-            if (zoomOpen)
-              _ZoomSliderCard(
-                zoom: videoZoom,
-                onChanged: (v) => onVideoZoom?.call(v),
-                onDone: (v) => onVideoZoom?.call(v),
-                onClose: () => onZoomToggle?.call(),
-              ),
-            // ── 进度条 ──
-            /*
-             * ⚠️ 直播**禁用**进度条
-             *
-             * 原版注释：
-             * > 直播不能快进/跳转 —— 进度条本身也是禁用的。
-             */
-            if (!isLive)
-              Row(
-                children: [
-                  Text(
-                    _fmt(position),
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: FontSizes.cap,
-                    ),
-                  ),
-                  Expanded(
-child: _ProgressSlider(
-  position: position,
-  duration: duration,
-  buffered: buffered,
-  onSeek: onSeek,
-  barKey: bufferBarKey,
-),
-                  ),
-                  Text(
-                    _fmt(duration),
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: FontSizes.cap,
-                    ),
-                  ),
-                ],
-              ),
-
-            // ── 按钮行 ──
-            /*
-             * ★★★ 2026-10-01：窄屏改为**可横向滚动**（Owner 报「排版混乱」）
-             *
-             * # 症状（手机截图 `.probe\n14_player_fixed.png`）
-             * ```text
-             * ▶  🔊  ────●────  1.0x  ⟳换源  [所有直   ← ★「所有直播」被切掉
-             * ```
-             * 实测：内容一直画到 **x=1057 / 屏宽 1080** —— 贴边且末尾被截。
-             *
-             * # 根因（**结构性**，不是某个按钮太宽）
-             * 这一行是 `Row`，里面有：
-             * ```text
-             * 左组 播放(48) + 静音(48) + 音量滑杆(90) + 倍速(~50) ≈ 244 dp
-             * 右组 上一集 + 下一集 + 线路 + 换源 + 片头片尾 + 选集/所有直播
-             *      + 画中画 + 全屏 + 设置                      ≈ 400+ dp
-             * ```
-             * 而手机内容区只有 **411.43 − 2×Sp.x4(16) = 379 dp**
-             *（1080/2.625 = 411.43；见 `test/bottom_bar_fit_test.dart:7-8`
-             * 对同一台机器的读数）⇒ **放不下**。
-             *
-             * ⚠️ 中间那个 `Spacer` 是**帮凶不是解法**：`Spacer` 只能吃掉
-             *    **富余**空间，放不下时它收缩到 0，`Row` 就继续往外画。
-             *    ★ 而 `RenderFlex` 默认 `Clip.none` ⇒ **不裁剪、不报错、
-             *    release 下也不打印 overflow**（`rendering/flex.dart:1420`
-             *    的 `assert` 只在 debug 跑）⇒ 这类缺陷在 release 里**静默**。
-             *    这与 `bottom_bar_fit_test.dart:13-14` 记录的是**同一个坑**。
-             *
-             * # 修法：`SingleChildScrollView(scrollDirection: horizontal)`
-             * ```text
-             * ① 放得下 ⇒ 宽度 = 内容宽，`Row` 不变 ⇒ **宽屏/TV 逐像素不变**
-             * ② 放不下 ⇒ 可横向滑，**每个按钮都还能点到**（没有隐藏功能）
-             * ```
-             * ★ 为什么不用 `Wrap`：换行会把控制条变成两三层高，
-             *   压掉画面（播放器底栏的高度是**观感契约**，不该随宽度变）。
-             * ★ 为什么不用"少显示几个按钮"：那是**删功能** ——
-             *   用户要的是"排版别乱"，不是"少给我几个入口"。
-             * ★ 为什么 `Spacer` 仍留着：宽屏时它负责把左右两组分开，
-             *   去掉会让宽屏布局变样（那是已验收的外观）。
-             *
-             * ⚠️ 播放页**没有** `IntrinsicHeight` 祖先（已 grep 确认）
-             *    ⇒ 这里用 `SingleChildScrollView` 不踩 intrinsics 陷阱。
-             *
-             * ★★ 两个分支（**由 `LayoutBuilder` 的约束决定**，见下）：
-             * ```text
-             * 放得下 ⇒ 裸 Row + Spacer  ⇒ 与改动前**逐像素一致**（宽屏/TV 不回归）
-             * 放不下 ⇒ 包一层横向 SingleChildScrollView，且**不用 Spacer**
-             * ```
-             * ⚠️ `Spacer` **绝不能**出现在 `SingleChildScrollView` 里 ——
-             *    它是 `Expanded`，要求主轴有界，而滚动视图给的是**无界**约束。
-             */
-            LayoutBuilder(
-              builder: (context, constraints) {
-                /*
-                 * ★★★ 判据：`constraints.maxWidth` **有限且够宽**
-                 *
-                 * # 我第一版错在哪（t58 报出来的真 bug）
-                 * 我写的是 `MediaQuery.sizeOf(context).width > 480` ——
-                 * **拿"页宽"当"这里的约束有界"的代理**。t58 立刻报：
-                 * ```text
-                 * RenderFlex children have non-zero flex but incoming width
-                 * constraints are unbounded.
-                 * ```
-                 * 原因：`SingleChildScrollView` 里的 `Row` 拿到的约束
-                 * **永远**是 `BoxConstraints(unconstrained)`，
-                 * 与页面多宽**无关** ⇒ 页宽 > 480 时插 `Spacer` ⇒ 照样抛。
-                 * ⇒ ★ **"页宽够大"与"这里的约束有界"是两件事。**
-                 *
-                 * ⚠️ 这两个条件现在**一起**判，而且右边用的是 `_kBottomBarRowWidth`
-                 *   （830）**不是** `_kBottomBarFitWidth`（480）：`fits` 不止决定
-                 *   「插不插 `Spacer`」，它还是 `return fits ? row : compactRow;` 的
-                 *   判据 ⇒ 它必须回答「单行**真**放得下吗」。拿 480 去判，
-                 *   `[480, 830)` 这段（桌面 900..862 dp 窄窗口、900 dp 平板）会选
-                 *   `row`：`Spacer` 被压到 0、`Row` 按固有宽 771.43 布局、超出的按钮
-                 *   被祖先 `Stack` 裁掉（`RenderFlex` 自己**不裁**），既看不见也没有
-                 *   滚动条。实测溢出 3.4 / 243 / 183 / 119 px（见 `_kBottomBarRowWidth`
-                 *   的注释）。
-                 */
-                final fits = constraints.maxWidth.isFinite &&
-                    constraints.maxWidth >= _kBottomBarRowWidth;
-
-                /*
-                 * ══════════════════════════════════════════════════════════
-                 * ★★★ 2026-10-08（Owner 第 5 条）新增「中档」—— 治窄窗口被遮挡
-                 * ══════════════════════════════════════════════════════════
-                 *
-                 * 用户原话：
-                 * > 当窗口小的时候,播放页 播放器下面的按钮太多了,
-                 * > 会被遮挡起来,你想想方案优化一下这个
-                 *
-                 * # 症状的真机制（**不是**裁切，是「滑不动」）
-                 * ```text
-                 * 非全屏窗口 < 1232px ⇒ 永远走窄档 `compactRow`
-                 *   900（最小窗口）时底栏可用宽只有 **528**
-                 *      = 视频列宽 − 2×Sp.x4(32)，而视频列宽 = 窗口宽 − 详情栏
-                 *   compactRow 第 3 行是**横向 SingleChildScrollView**
-                 * ⇒ 桌面**既不能拖也不能滚**：横向 ScrollView 只吃
-                 *   `scrollDelta.dx`，而鼠标不在默认 `dragDevices` 里
-                 *   （`scroll_configuration.dart` 的 `_kTouchLikeDeviceTypes`
-                 *    只有 touch/stylus/invertedStylus/trackpad/unknown）
-                 * ⇒ 顺序靠后的「换源 / 选集」对鼠标用户**不可达且无提示**
-                 * ```
-                 *
-                 * # 修法：给 [528, 830) 这一段加一档 `miniBar`
-                 * ```text
-                 * ≥830         row        （宽屏，逐像素不变）
-                 * [528, 830)   miniBar    ← ★ 本档：两行，**零横向滚动容器**
-                 * <528         compactRow （手机，保持原样）
-                 * ```
-                 * ⚠️ 这一档**没有** `SingleChildScrollView` —— 全部按钮直接排进
-                 *    有界的 `Row`，靠 `RenderFlex` 自己的布局保证可达性。
-                 *
-                 * ⚠️ 为什么定义在这里（`fits` 之后、`compactRow` 之前）：
-                 *    `test/t68_android_adapt_test.dart` E②/E④/E⑥ 与
-                 *    `test/t80_cast_wiring_test.dart` A④/A⑥ 用的是
-                 *    「`compactRow` → `row`」与「`row` → `return fits ...`」
-                 *    两段切片，本档放在**两段切片之外** ⇒ 那些源码级计数
-                 *    一条都不会漂。
-                 *
-                 * ⚠️ 这一档**故意不含** `CastButton`（投屏）——
-                 *    `test/t80_cast_wiring_test.dart` A③ 要求
-                 *    `if (onCast != null && castUrl.isNotEmpty)` 全文件**恰好 2 句**
-                 *    （窄屏 + 宽屏各一）。投屏在 ≥830 与 <528 两档仍可达。
-                 */
-                final mini = constraints.maxWidth.isFinite &&
-                    constraints.maxWidth >= _kBottomBarMiniWidth &&
-                    constraints.maxWidth < _kBottomBarRowWidth;
-
-                /// 中档底栏（两行，无横滑容器）
-                final miniBar = Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    // ── 第 1 行：播放控制 + 三个恒存在的入口 ──
-                    Row(
-                      children: [
-                        IconButton(
-                          onPressed: onTogglePlay,
-                          icon: Icon(
-                            playing ? Icons.pause : Icons.play_arrow,
-                            color: Colors.white,
-                            size: 30,
-                          ),
-                          tooltip: '播放 / 暂停',
-                        ),
-                        IconButton(
-                          onPressed: onToggleMute,
-                          icon: Icon(
-                            muted || volume == 0
-                                ? Icons.volume_off
-                                : (volume < 50
-                                      ? Icons.volume_down
-                                      : Icons.volume_up),
-                            color: Colors.white,
-                          ),
-                          tooltip: '静音',
-                        ),
-                        Expanded(
-                          child: Slider(
-                            value: muted ? 0 : volume,
-                            max: 100,
-                            onChanged: onVolume,
-                          ),
-                        ),
-                        PopupMenuButton<double>(
-                          tooltip: '倍速',
-                          initialValue: rate,
-                          onSelected: onRate,
-                          itemBuilder: (_) => const [
-                            PopupMenuItem(value: 0.5, child: Text('0.5x')),
-                            PopupMenuItem(value: 0.75, child: Text('0.75x')),
-                            PopupMenuItem(value: 1.0, child: Text('1x')),
-                            PopupMenuItem(value: 1.25, child: Text('1.25x')),
-                            PopupMenuItem(value: 1.5, child: Text('1.5x')),
-                            PopupMenuItem(value: 2.0, child: Text('2x')),
-                            PopupMenuItem(value: 3.0, child: Text('3x')),
-                          ],
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: Sp.x1,
-                            ),
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                const Icon(
-                                  Icons.speed,
-                                  color: Colors.white,
-                                  size: 18,
-                                ),
-                                const SizedBox(width: Sp.x1),
-                                Text(
-                                  '${rate}x',
-                                  style: const TextStyle(
-                                    color: Colors.white,
-                                    fontSize: FontSizes.sm,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                    // ── 第 2 行：截图 / 设置 / 更多 + 条件项 ──
-                    Row(
-                      children: [
-                        IconButton(
-                          onPressed: onScreenshot,
-                          icon: const Icon(
-                            Icons.camera_alt,
-                            color: Colors.white,
-                          ),
-                          tooltip: '截图',
-                        ),
-                        IconButton(
-                          onPressed: onSettings,
-                          icon: const Icon(
-                            Icons.settings_applications,
-                            color: Colors.white,
-                          ),
-                          tooltip: '设置（字幕 / 音轨 / 连播）',
-                        ),
-                        PopupMenuButton<void>(
-                          tooltip: '更多',
-                          itemBuilder: (_) => [
-                            if (onSkipMarkers != null)
-                              PopupMenuItem<void>(
-                                onTap: onSkipMarkers,
-                                child: const Text('片头片尾'),
-                              ),
-                            PopupMenuItem<void>(
-                              onTap: onDanmakuToggle,
-                              child: Text(danmakuEnabled ? '关闭弹幕' : '开启弹幕'),
-                            ),
-                            if (hasLiveChannels)
-                              PopupMenuItem<void>(
-                                onTap: onLiveChannels,
-                                child: const Text('所有直播'),
-                              ),
-                            if (pipSupported)
-                              PopupMenuItem<void>(
-                                onTap: onTogglePip,
-                                child: Text(pipActive ? '退出画中画' : '画中画'),
-                              ),
-                            PopupMenuItem<void>(
-                              onTap: onToggleFullscreen,
-                              child: Text(fullscreen ? '退出全屏' : '全屏'),
-                            ),
-                            PopupMenuItem<void>(
-                              onTap: onDanmakuSettings,
-                              child: const Text('弹幕设置'),
-                            ),
-                            if (onZoomToggle != null)
-                              PopupMenuItem<void>(
-                                onTap: onZoomToggle,
-                                child: const Text('画面缩放'),
-                              ),
-                          ],
-                          child: const Padding(
-                            padding: EdgeInsets.symmetric(horizontal: Sp.x2),
-                            child: Icon(Icons.more_vert, color: Colors.white),
-                          ),
-                        ),
-                        if (showEpisodeNav) ...[
-                          IconButton(
-                            onPressed: hasPrev ? onPrev : null,
-                            icon: const Icon(
-                              Icons.skip_previous,
-                              color: Colors.white,
-                            ),
-                            tooltip: '上一集',
-                          ),
-                          IconButton(
-                            onPressed: hasNext ? onNext : null,
-                            icon: const Icon(
-                              Icons.skip_next,
-                              color: Colors.white,
-                            ),
-                            tooltip: '下一集',
-                          ),
-                        ],
-                        if (hasStreams)
-                          TextButton.icon(
-                            onPressed: onStreams,
-                            icon: const Icon(
-                              Icons.swap_horiz,
-                              color: Colors.white,
-                              size: 18,
-                            ),
-                            label: const Text(
-                              '线路',
-                              style: TextStyle(color: Colors.white),
-                            ),
-                          ),
-                        TextButton.icon(
-                          onPressed: onSwitchSource,
-                          icon: const Icon(
-                            Icons.travel_explore,
-                            color: Colors.white,
-                            size: 18,
-                          ),
-                          label: const Text(
-                            '换源',
-                            style: TextStyle(color: Colors.white),
-                          ),
-                        ),
-                        if (hasEpisodes)
-                          TextButton.icon(
-                            onPressed: onEpisodes,
-                            icon: const Icon(
-                              Icons.list,
-                              color: Colors.white,
-                              size: 18,
-                            ),
-                            label: const Text(
-                              '选集',
-                              style: TextStyle(color: Colors.white),
-                            ),
-                          ),
-                        /*
-                         * ⚠️ 「画面缩放」在中档**不进按钮行**，而是进「更多」菜单。
-                         *
-                         * # 宽度账（528 是硬预算）
-                         * ```text
-                         * 截图48 + 设置48 + 更多48 + 上一集48 + 下一集48
-                         *   + 线路82 + 换源82 + 选集82 = **486** ≤ 528 ✓
-                         * 再加一枚 48 的缩放 ⇒ 534 > 528 ✗ 溢出（RenderFlex 会真的报）
-                         * ```
-                         * ★ 与 `compactRow` 把 `Icons.tune` 收进菜单是**同一条思路**：
-                         *   预算不够时收拢长尾，但**不删功能** —— 缩放仍可点。
-                         * ⚠️ 收进菜单还顺手保住了 `t78_video_zoom_hwdec_test.dart` ⑥
-                         *    「两枚缩放按钮各带 onLongPress、都不带 tooltip」的计数判据。
-                         */
-                      ],
-                    ),
-                  ],
-                );
-
-                /*
-                 * ★★★ task-25 E：紧凑行（`fits == false`，手机上）
-                 *
-                 * # 症状（真机 1080x2400 @480dpi = 360x800dp，台账第 35/36 行）
-                 * ```text
-                 * 底栏内容固有宽约 400dp，而视频盒只有 360dp ⇒ 整行塞进
-                 * 横向 SingleChildScrollView ⇒ **齿轮/相机/弹幕设置在最右端**，
-                 * 用户必须左滑 3 次才摸得到（`.probe/t24/s1.png` 按钮行亮列
-                 * 97..1031，贴右边缘被切；滑 3 次才见「下一集 / 换源 / 片头片尾」）。
-                 * ```
-                 *
-                 * # 换法：窄屏**换形**，而不是继续滑
-                 * ```text
-                 * 放得下（宽屏/TV） ⇒ `row`，**逐字节与改动前一致**
-                 * 放不下（手机）   ⇒ `compactRow`：拆 2 行，两组各 ≤ 164dp
-                 * ```
-                 *
-                 * ⚠️ 判据仍用 `LayoutBuilder` 的 `constraints.maxWidth`
-                 *    （**不能**用 `MediaQuery.sizeOf(context).width`，见上面那段）。
-                 *
-                 * # 为什么这么拆（`(360 − 2 × Sp.x4) / 2 = 164dp` 是硬预算）
-                 * ```text
-                 * 第 1 行  播放/暂停(48) + 弹性 + 静音(48) + 倍速(48)  ≈ 144dp
-                 * 第 2 行  音量滑杆 Expanded(164)                      = 164dp
-                 * 第 3 行  截图/设置/更多 **固定在最前**，其后才是
-                 *          上一集/下一集/线路/换源/选集（横向可滑）
-                 * ```
-                 * ⇒ 比原来（左组 244dp 挤一行）还省，而且
-                 *   **三个恒存在的入口（截图 / 设置 / 更多）固定在滚动起点**
-                 *   —— 首屏不用滑就够得到。
-                 *
-                 * ⚠️ 左组为什么非要拆两行：音量滑杆 `SizedBox(width: 90)` 是
-                 *    硬件要求（`player_capability_test.dart:1252` 用
-                 *    `find.byType(Slider).first`，`:1260-1306` 钉「全页恰好一根
-                 *    0..8/8 滑杆」）—— 它**必须还在**，只能另起一行。
-                 *
-                 * ⚠️ 倍速这里用 `IconButton + 当前档位文字`，而不是原来那个
-                 *    `PopupMenuButton(child: Padding(Text('1.0x')))`：
-                 *    后者的 child 固有宽 ≈ 55dp，放进 164dp 预算里会挤掉静音键。
-                 *    档位表与回调**与宽屏逐字同一份**（7 档 0.5x…3x）。
-                 *
-                 * ⚠️ 弹幕设置（`Icons.tune`）进「更多」菜单 —— 它与「播放设置」
-                 *    是两个入口（见下面那段注释），但在 360dp 上不可能都留在首屏。
-                 *    齿轮（播放设置）才是用户报的那一个，所以齿轮留、tune 进菜单。
-                 *
-                 * ⚠️ 2026-10-05 修正（E 第一版是错的）：第一版把
-                 *    截图/设置/更多 排在 `if (showEpisodeNav) …` **之后**
-                 *    ⇒ 那三个的 x 起点是 `上一集(96.3) + 下一集(96.3)`，
-                 *    最乐观（无「线路」）也要 192.6dp 才轮到相机；
-                 *    齿轮中心 ≈ 360dp > 视口 328dp（= 360 − 2×Sp.x4）
-                 *    ⇒ **首屏根本点不到齿轮**，正是本轮要修的那个 bug。
-                 *    `test/t68_android_adapt_test.dart` 的 E⑤ 当时写的是
-                 *    `indexOf('Icons.photo_camera') > indexOf('Text(选集')`
-                 *    —— 它把缺陷钉成了契约，已一并反转为正确顺序。
-                 *    ★ 诚实标注：本条的几何结论来自**顺序 + 算术**
-                 *    （3 个 IconButton 各 48dp ⇒ 齿轮中心 ≈ 72dp ≪ 328dp），
-                 *    **不是**真渲染几何 —— 真机几何由新 APK 上
-                 *    `uiautomator dump` 验收（见 TASK25-REPORT §5）。
-                 *
-                 * ⚠️ 「更多」菜单里**不许**再放一份 `Icons.photo_camera` /
-                 *    `Icons.settings`：`test/t63_shot_ui_test.dart:186-197` 要求
-                 *    这两个图标全仓 `findsOneWidget`。
-                 *
-                 * ⚠️ `if (fits) const Spacer() else const SizedBox(width: Sp.x3),`
-                 *    那一条**留在 `row` 里不动** —— 它是宽屏布局的一部分。
-                 */
-                final compactRow = Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Row(
-                      children: [
-                        IconButton(
-                          onPressed: onTogglePlay,
-                          icon: Icon(
-                            playing ? Icons.pause : Icons.play_arrow,
-                            color: Colors.white,
-                            size: 30,
-                          ),
-                          tooltip: '播放 / 暂停',
-                        ),
-                        const Spacer(),
-                        IconButton(
-                          onPressed: onToggleMute,
-                          icon: Icon(
-                            muted || volume == 0
-                                ? Icons.volume_off
-                                : (volume < 50
-                                      ? Icons.volume_down
-                                      : Icons.volume_up),
-                            color: Colors.white,
-                          ),
-                          tooltip: '静音',
-                        ),
-                        /*
-                         * ★ 倍速：IconButton + 当前档位文字，菜单内容与
-                         *   宽屏那份逐字一致（7 档，同一个 `onRate`）。
-                         */
-                        PopupMenuButton<double>(
-                          tooltip: '倍速',
-                          initialValue: rate,
-                          onSelected: onRate,
-                          itemBuilder: (_) => const [
-                            PopupMenuItem(value: 0.5, child: Text('0.5x')),
-                            PopupMenuItem(value: 0.75, child: Text('0.75x')),
-                            PopupMenuItem(value: 1.0, child: Text('1x')),
-                            PopupMenuItem(value: 1.25, child: Text('1.25x')),
-                            PopupMenuItem(value: 1.5, child: Text('1.5x')),
-                            PopupMenuItem(value: 2.0, child: Text('2x')),
-                            PopupMenuItem(value: 3.0, child: Text('3x')),
-                          ],
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: Sp.x1,
-                            ),
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                const Icon(
-                                  Icons.speed,
-                                  color: Colors.white,
-                                  size: 18,
-                                ),
-                                const SizedBox(width: Sp.x1),
-                                Text(
-                                  '${rate}x',
-                                  style: const TextStyle(
-                                    color: Colors.white,
-                                    fontSize: FontSizes.sm,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: Slider(
-                            value: muted ? 0 : volume,
-                            max: 100,
-                            onChanged: onVolume,
-                          ),
-                        ),
-                      ],
-                    ),
-                    /*
-                     * 右组：仍然横向可滑，但**截图 / 设置 / 更多这三个恒存在的
-                     * 入口固定在滚动起点**（各 48dp ⇒ 齿轮中心 ≈ 72dp ≪ 328dp）
-                     * ⇒ 首屏直接点得到（真机取证见报告）。
-                     * ★ 「选集」**不在**起点 —— 它排在这三个之后。
-                     */
-                    SingleChildScrollView(
-                      scrollDirection: Axis.horizontal,
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          IconButton(
-                            onPressed: onScreenshot,
-                            icon: const Icon(
-                              Icons.photo_camera,
-                              color: Colors.white,
-                            ),
-                            tooltip: '截图',
-                          ),
-                          IconButton(
-                            onPressed: onSettings,
-                            icon: const Icon(
-                              Icons.settings,
-                              color: Colors.white,
-                            ),
-                            tooltip: '设置（字幕 / 音轨 / 连播）',
-                          ),
-                          /*
-                           * ★★★ 缺陷 17（Owner 桌面端第 17 条：选项设计与底栏语言不统一）
-                           *
-                           * # 改前的两处不一致（都在这一块里）
-                           * ```text
-                           * ① 功能集不一致：miniBar（中档，:13673）的「更多」菜单有 7 项，
-                           *    compactRow（窄档）只有 6 项 —— **少了『画面缩放』**。
-                           *    同一个「更多」，同一档位语义，功能却不一样：
-                           *    中档用户在菜单里能找到缩放，窄档用户找不到
-                           *    （窄档另有一枚 zoom 图标按钮，但那是**另一个入口**，
-                           *     菜单里少一项就是「同一菜单两副面孔」）。
-                           * ② 措辞口径不一致：**按钮**用名词/状态（『弹幕』『全屏』），
-                           *    **菜单项**用动作/动词（『关闭弹幕』『开启弹幕』『退出全屏』）。
-                           * ```
-                           *
-                           * # 本件只做「结构上能做到的那一半」
-                           * ```text
-                           * ① 补齐功能集 —— 纯增量，不删任何东西，
-                           *    且与 :13984 那枚 zoom 图标按钮并存不冲突
-                           *    （那枚是「一按即开/关」，菜单项是「从列表里找到该功能」，
-                           *     两者不是同一入口的重复）。
-                           * ② 措辞口径的**跨控件统一**需要同时改 player_settings_sheet.dart
-                           *    与 danmaku_settings_dialog.dart（不在本成员 writeScope），
-                           *    已上报 Lead 等裁决，本处**不擅自改字**。
-                           * ```
-                           *
-                           * ⚠️ 菜单项文案一个字都没动：`test/t68_android_adapt_test.dart:526-549`
-                           *    用 `indexOfExactly` 钉着 `'弹幕设置'` / `'片头片尾'` / `'所有直播'`
-                           *    各出现 1 次；`test/t78_video_zoom_hwdec_test.dart:281` 用
-                           *    `find.text('画面缩放')` 要求 `findsOneWidget`（这条**正是**本次补齐的
-                           *    前提：补齐后菜单里仍然只有一处『画面缩放』文本，计数不变）。
-                           * ⚠️ 菜单里**不许**出现 `Icons.` 字面量 —— `t68` E⑥ 把整个
-                           *    `children: [` 切成 `kids` 后要求 `Icons.photo_camera` /
-                           *    `Icons.settings` / `Icons.more_vert` / `Icons.zoom_in_map` 的
-                           *    位置算术成立，多一个图标字面量就会破。
-                           */
-                          PopupMenuButton<void>(
-                            tooltip: '更多',
-                            itemBuilder: (_) => [
-                              if (onSkipMarkers != null)
-                                PopupMenuItem<void>(
-                                  onTap: onSkipMarkers,
-                                  child: const Text('片头片尾'),
-                                ),
-                              PopupMenuItem<void>(
-                                onTap: onDanmakuToggle,
-                                child: Text(danmakuEnabled ? '关闭弹幕' : '开启弹幕'),
-                              ),
-                              if (hasLiveChannels)
-                                PopupMenuItem<void>(
-                                  onTap: onLiveChannels,
-                                  child: const Text('所有直播'),
-                                ),
-                              if (pipSupported)
-                                PopupMenuItem<void>(
-                                  onTap: onTogglePip,
-                                  child: Text(pipActive ? '退出画中画' : '画中画'),
-                                ),
-                              PopupMenuItem<void>(
-                                onTap: onToggleFullscreen,
-                                child: Text(fullscreen ? '退出全屏' : '全屏'),
-                              ),
-                              PopupMenuItem<void>(
-                                onTap: onDanmakuSettings,
-                                child: const Text('弹幕设置'),
-                              ),
-                              // 缺陷 17：与 miniBar/mrow 的「更多」菜单保持**同一份功能集**
-                              if (onZoomToggle != null)
-                                PopupMenuItem<void>(
-                                  onTap: onZoomToggle,
-                                  child: const Text('画面缩放'),
-                                ),
-                            ],
-                            child: const Padding(
-                              padding: EdgeInsets.symmetric(horizontal: Sp.x2),
-                              child: Icon(Icons.more_vert, color: Colors.white),
-                            ),
-                          ),
-                          /*
-                           * ★★★ task-22 P1-5 / P1-11：画面缩放
-                           *
-                           * ⚠️ 这一枚**故意不带 tooltip**：`Tooltip` 在触摸端
-                           *    靠长按触发，会跟下面的 `onLongPress` 抢同一个
-                           *    手势（谁赢取决于竞技场）—— 结果就是「长按弹出
-                           *    的是提示气泡而不是滑条」。无障碍标签改用
-                           *    `Icon.semanticLabel` 提供。
-                           *
-                           * 位置 = 「更多」**之后**：`t68_android_adapt_test.dart`
-                           *    的 E⑥ 要求「相机 / 齿轮 / 更多」是这一行最前三项
-                           *    （headCam 里不许再出现别的 `Icons.`），新按钮只能
-                           *    排在这三个之后。
-                           */
-                          IconButton(
-                            onPressed: onZoomToggle,
-                            onLongPress: onZoomToggle,
-                            icon: Icon(
-                              Icons.zoom_in_map,
-                              color: zoomOpen
-                                  ? Colors.lightBlueAccent
-                                  : Colors.white,
-                              semanticLabel: '画面缩放',
-                            ),
-                          ),
-                          /*
-                           * ★★★ task-32 ②：投屏（DLNA）
-                           *
-                           * 位置 = 「画面缩放」**之后**（也就是「更多」之后的
-                           *    第二位）。t68 的 E⑥ 只钉死了「相机 / 齿轮 / 更多」
-                           *    必须是最前三项（headCam 里不许出现别的 `Icons.`、
-                           *    `tb.first > iMore`），第四项起是自由的 —— 这一枚
-                           *    排在第四位，两边都不碰。
-                           *
-                           * ⚠️ 宽度：窄屏这一行本来就是 `SingleChildScrollView`
-                           *    横滑，多一枚不会挤爆（宽屏那侧实测仍有 143.40 余量）。
-                           */
-                          if (onCast != null && castUrl.isNotEmpty)
-                            CastButton(
-                              url: castUrl,
-                              headers: castHeaders,
-                              title: castTitle,
-                            ),
-                          if (showEpisodeNav) ...[
-                            TextButton.icon(
-                              onPressed: hasPrev ? onPrev : null,
-                              style: TextButton.styleFrom(
-                                foregroundColor: Colors.white,
-                                disabledForegroundColor: Colors.white38,
-                              ),
-                              icon: const Icon(Icons.skip_previous, size: 18),
-                              label: const Text('上一集'),
-                            ),
-                            TextButton.icon(
-                              onPressed: hasNext ? onNext : null,
-                              style: TextButton.styleFrom(
-                                foregroundColor: Colors.white,
-                                disabledForegroundColor: Colors.white38,
-                              ),
-                              icon: const Icon(Icons.skip_next, size: 18),
-                              label: const Text('下一集'),
-                            ),
-                          ],
-                          if (hasStreams)
-                            TextButton.icon(
-                              onPressed: onStreams,
-                              icon: const Icon(
-                                Icons.swap_horiz,
-                                color: Colors.white,
-                                size: 18,
-                              ),
-                              label: const Text(
-                                '线路',
-                                style: TextStyle(color: Colors.white),
-                              ),
-                            ),
-                          TextButton.icon(
-                            onPressed: onSwitchSource,
-                            icon: const Icon(
-                              Icons.travel_explore,
-                              color: Colors.white,
-                              size: 18,
-                            ),
-                            label: const Text(
-                              '换源',
-                              style: TextStyle(color: Colors.white),
-                            ),
-                          ),
-                          if (hasEpisodes)
-                            TextButton.icon(
-                              onPressed: onEpisodes,
-                              icon: const Icon(
-                                Icons.list,
-                                color: Colors.white,
-                                size: 18,
-                              ),
-                              label: const Text('选集', style: TextStyle(color: Colors.white)),
-                            ),
-                        ],
-                      ),
-                    ),
-                  ],
-                );
-                final row = Row(
-                  children: [
-                    IconButton(
-                      onPressed: onTogglePlay,
-                      icon: Icon(
-                        playing ? Icons.pause : Icons.play_arrow,
-                        color: Colors.white,
-                        size: 30,
-                      ),
-                      tooltip: '播放 / 暂停',
-                    ),
-                    const SizedBox(width: Sp.x2),
-
-                    // 音量
-                    IconButton(
-                      onPressed: onToggleMute,
-                      icon: Icon(
-                        muted || volume == 0
-                            ? Icons.volume_off
-                            : (volume < 50
-                                  ? Icons.volume_down
-                                  : Icons.volume_up),
-                        color: Colors.white,
-                      ),
-                      tooltip: '静音',
-                    ),
-                    SizedBox(
-                      width: 90,
-                      child: Slider(
-                        value: muted ? 0 : volume,
-                        max: 100,
-                        onChanged: onVolume,
-                      ),
-                    ),
-
-                    // 倍速
-                    PopupMenuButton<double>(
-                      tooltip: '倍速',
-                      initialValue: rate,
-                      onSelected: onRate,
-                      itemBuilder: (_) => const [
-                        PopupMenuItem(value: 0.5, child: Text('0.5x')),
-                        PopupMenuItem(value: 0.75, child: Text('0.75x')),
-                        PopupMenuItem(value: 1.0, child: Text('1x')),
-                        PopupMenuItem(value: 1.25, child: Text('1.25x')),
-                        PopupMenuItem(value: 1.5, child: Text('1.5x')),
-                        PopupMenuItem(value: 2.0, child: Text('2x')),
-                        PopupMenuItem(value: 3.0, child: Text('3x')),
-                      ],
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: Sp.x2),
-                        child: Text(
-                          '${rate}x',
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: FontSizes.sm,
-                          ),
-                        ),
-                      ),
-                    ),
-
-                    /*
-                 * ★★★ 2026-10-01：`Spacer` → 条件式空隙（配合上面的横向滚动）
-                 *
-                 * # 为什么**必须**换掉
-                 * `Spacer` 的实现是 `Expanded(child: SizedBox.shrink())`
-                 *（`widgets\spacer.dart:57-58`）。而 `Expanded` 要求主轴
-                 * **有界**；放进 `SingleChildScrollView(horizontal)` 之后
-                 * 主轴约束是**无界**的 ⇒ 直接抛
-                 * ```text
-                 * RenderFlex children have non-zero flex but incoming width
-                 * constraints are unbounded.
-                 * ```
-                 * ⇒ 底栏整个变成 ErrorWidget（比溢出更糟）。
-                 *
-                 * # 换法：只在"**有界**"时才插入弹性空隙
-                 * ```text
-                 * 宽屏（约束有界） ⇒ 有 Spacer，左右两组分开（与改前一致）
-                 * 窄屏（无界）     ⇒ 无 Spacer，行自然贴紧并可横向滑
-                 * ```
-                 * ★★ 判据**必须**是 `LayoutBuilder` 给的 `constraints.maxWidth`
-                 *    **是否有限**，**不能**用 `MediaQuery.sizeOf(context).width`
-                 *    与某个阈值比 —— 我第一版就是这么写的，结果 t58 报：
-                 * ```text
-                 * RenderFlex children have non-zero flex but incoming width
-                 * constraints are unbounded.
-                 * ```
-                 * 原因：`SingleChildScrollView` 里的 `Row` 拿到的约束**永远**
-                 * 是 `BoxConstraints(unconstrained)`（实测报错信息原文），
-                 * 与页面有多宽**无关** ⇒ 页宽 > 阈值时插 `Spacer` ⇒ 照样抛。
-                 * ⇒ **"页宽够大"与"这里的约束有界"是两件事**，
-                 *   我拿前者的代理去判后者，判错了。
-                 * ⚠️ `player_page.dart` 本来就有 `LayoutBuilder`（2 处），
-                 *    且**没有** `IntrinsicHeight` 祖先 ⇒ 用它安全
-                 *   （对比 `settings_page.dart` 那条禁令：那里的卡片在
-                 *    `IntrinsicHeight` 子树里，才不许用）。
-                 */
-                    if (fits) const Spacer() else const SizedBox(width: Sp.x3),
-
-                    /*
-                 * ★★ 上一集 / 下一集 —— 原版 `metabar__acts`（`PlayerView.vue:4367`）
-                 *
-                 * 原版把这两个按钮放在**元信息条**里，我们在控制条右半段
-                 * （与「线路」「换源」同一组，都是"换个看"的同类操作）。
-                 *
-                 * ⚠️ 直播整块不渲染 —— 原版注释明确记录过：
-                 * > 原来无脑渲染这两个按钮，直播时会显示成两个灰掉的死按钮
-                 * > （实测截图里直播页出现「上一集 ⋯ 下一集」，很怪）
-                 *
-                 * ══════════════════════════════════════════════════════════
-                 * ★★★ 2026-09-25 task-28 ①-C：真 bug 是**配色**，不是"隐藏"
-                 * ══════════════════════════════════════════════════════════
-                 *
-                 * # 用户原话
-                 *
-                 * > 播放器也**没有快捷上一集下一集的操作按钮**
-                 *
-                 * # 根因：这两个按钮是**唯二**没写颜色的
-                 *
-                 * ```text
-                 * L5626  Icon(Icons.swap_horiz,     color: Colors.white)  ← 「线路」
-                 * L5637  Icon(Icons.travel_explore, color: Colors.white)  ← 「换源」
-                 * L5654  Icon(Icons.content_cut,    color: Colors.white)  ← 「片头片尾」
-                 * L5661  Icon(Icons.list,           color: Colors.white)  ← 「选集」
-                 * L5613  Icon(Icons.skip_previous)                        ← ★ 缺
-                 * L5618  Icon(Icons.skip_next)                            ← ★ 缺
-                 * ```
-                 * 控制条压在**纯黑渐变**上（`Colors.black87 → transparent`），
-                 * 而 `TextButton` 默认取 `Theme.colorScheme.primary` ——
-                 * 浅色主题下那是**深蓝灰**，压在黑底上几乎看不见。
-                 * ⇒ 用户看到的正是"两个灰掉的死按钮"，于是他判断
-                 *   「**没有**这个按钮」。
-                 *
-                 * # ★ 为什么用 `TextButton.styleFrom(foregroundColor:)`
-                 *    而不是给 Icon/Text 各写一个 `color:`
-                 *
-                 * `styleFrom` 的 `foregroundColor` **同时**作用于图标和文字，
-                 * 一处改动覆盖两处 —— 而且**调用点的字面量保持原样**：
-                 * ```dart
-                 * label: const Text('上一集')            ← 不用改
-                 * icon: const Icon(Icons.skip_previous, size: 18)  ← 不用改
-                 * ```
-                 * 这一点很重要：`player_capability_test.dart` 用**源码字面量**
-                 * 断言这两个按钮存在（铁律⑥）。给 Text/Icon 加 style 会把
-                 * 那些字面量拆开，让断言变成假回归 —— 而这里根本不需要动它们。
-                 *
-                 * # ★★ 为什么**保留"禁用"而不是改成"隐藏"**
-                 *
-                 * 我一度想改成"最后一集时隐藏「下一集」"，理由是用户说
-                 * 「明明没有下一集」。但查证后**推翻了**这个判断：
-                 * ```text
-                 * ① 用户报的是"还是【请求】下一集"，不是"按钮不该显示"
-                 * ② 而那个"请求"经编排者核实来自一个【探针】
-                 *    （.probe/probe_entries/episode_player_probe.dart 用
-                 *     真实 bilibili 视频 + 40 集假 id），不是客户端行为
-                 * ③ 客户端所有切集出口**都已有 null 判据**（实测枚举过 5 条）
-                 * ④ 旧测试（09-23）来自用户原始诉求「要有按钮」——
-                 *    禁用仍然**可见**，满足"有按钮"；隐藏会让按钮位置跳动
-                 * ```
-                 * ⇒ 结论：**不改产品行为**，只修配色。
-                 *    用户"看不到按钮"的抱怨由配色修复解决；
-                 *    "请求下一集"由边界测试（`player_episode_nav_boundary_test.dart`）
-                 *    证明客户端**不会**发生。
-                 */
-                    if (showEpisodeNav) ...[
-                      TextButton.icon(
-                        onPressed: hasPrev ? onPrev : null,
-                        /*
-                     * ★ 可用 = 纯白（与同排按钮一致）；
-                     *   不可用（第一集）= 半透明白 —— 而不是主题色。
-                     *
-                     * ⚠️ 必须显式给**不可用**态一个颜色：`styleFrom` 的
-                     *    `foregroundColor` 只在 enabled 时生效，disabled 时
-                     *    Material 会退回 `onSurface.withOpacity(0.38)` ——
-                     *    那在**浅色主题**下是深灰，压黑底上还是看不见。
-                     *    `disabledForegroundColor` 才是这一处的正解。
-                     */
-                        style: TextButton.styleFrom(
-                          foregroundColor: Colors.white,
-                          disabledForegroundColor: Colors.white38,
-                        ),
-                        icon: const Icon(Icons.skip_previous, size: 18),
-                        label: const Text('上一集'),
-                      ),
-                      TextButton.icon(
-                        onPressed: hasNext ? onNext : null,
-                        style: TextButton.styleFrom(
-                          foregroundColor: Colors.white,
-                          disabledForegroundColor: Colors.white38,
-                        ),
-                        icon: const Icon(Icons.skip_next, size: 18),
-                        label: const Text('下一集'),
-                      ),
-                    ],
-
-                    if (hasStreams)
-                      TextButton.icon(
-                        onPressed: onStreams,
-                        icon: const Icon(
-                          Icons.swap_horiz,
-                          color: Colors.white,
-                          size: 18,
-                        ),
-                        label: const Text(
-                          '线路',
-                          style: TextStyle(color: Colors.white),
-                        ),
-                      ),
-                    /*
-                 * ★★★ 跨源换源（与「线路」是不同层级的功能）
-                 *
-                 * 原版注释：
-                 * > 两者是不同层级的功能（站内换线路 vs 跨站换源）。
-                 */
-                    TextButton.icon(
-                      onPressed: onSwitchSource,
-                      icon: const Icon(
-                        Icons.travel_explore,
-                        color: Colors.white,
-                        size: 18,
-                      ),
-                      label: const Text(
-                        '换源',
-                        style: TextStyle(color: Colors.white),
-                      ),
-                    ),
-                    /*
-                 * ★★★ 「片头片尾」设置入口（2026-09-24 补）
-                 *
-                 * 用户指出「片头片尾的设置你也没做」—— 之前只有自动跳过，
-                 * 用户没有任何途径去设置那四个点。
-                 *
-                 * ⚠️ `onSkipMarkers == null`（直播）时**不显示** ——
-                 *    与上面画中画按钮同一个原则：显示一个点了没用的按钮
-                 *    比不显示更糟。
-                 */
-                    if (onSkipMarkers != null)
-                      TextButton.icon(
-                        onPressed: onSkipMarkers,
-                        icon: const Icon(
-                          Icons.content_cut,
-                          color: Colors.white,
-                          size: 18,
-                        ),
-                        label: const Text(
-                          '片头片尾',
-                          style: TextStyle(color: Colors.white),
-                        ),
-                      ),
-                    /*
-                 * ★★★ task-13 ⑦ 「弹幕」开关（用户原话：
-                 *    接入一下 dandanplay 的弹幕功能）
-                 *
-                 * 开 = 亮蓝 + subtitles，关 = 白 + subtitles_off ——
-                 * 与下面「所有直播」按钮同一套双色规则
-                 * （用户一眼就能看出"现在弹幕是开着的"）。
-                 */
-                    /*
-                 * ★★★ 缺陷 17（Owner 第 17 条）：补 tooltip，用**动作词**
-                 *
-                 * 改前**没有** tooltip —— 而同一功能在「更多」菜单里叫
-                 * `Text(danmakuEnabled ? '关闭弹幕' : '开启弹幕')`（:13653 / :13980）。
-                 * 用户看到按钮只写「弹幕」（名词，说的是**这是什么**），
-                 * 菜单里却是「关闭弹幕」（动作词，说的是**点了会怎样**），
-                 * 两边对不上就不知道该信哪个。
-                 * ```text
-                 * 口径（Lead 裁决 2026-10-09）：
-                 *   按钮 label   = 名词（不动）—— 开关类按钮 label 随状态跳字更糟，
-                 *                 状态已由 Icon(subtitles / subtitles_off) + 亮蓝/白表达
-                 *   按钮 tooltip = 动作词，**与菜单项逐字一致**   <-- 本条
-                 * ```
-                 * ⚠️ label 一个字都没改（仍是 `'弹幕'`）：tooltip 是**新增**属性，
-                 *    不改变任何既有断言；改 label 才会连带影响 t68 E⑥ 的算术。
-                 * ⚠️ 这里的文案串与菜单项**同源同字**，以后改口径只需同时改两处。
-                 */
-                    Tooltip(
-                      /*
-                       * ⚠️ `TextButton.icon` **没有** `tooltip` 参数
-                       *    （它是 IconButton 才有的，analyze 会报
-                       *     `undefined_named_parameter`）⇒ 只能外包一层 `Tooltip`。
-                       *    这与本页 compact 档那两枚 IconButton 的内建 tooltip
-                       *    语义一致（悬停显示同一个动作词）。
-                       */
-                      message: danmakuEnabled ? '关闭弹幕' : '开启弹幕',
-                      child: TextButton.icon(
-                        onPressed: onDanmakuToggle,
-                        icon: Icon(
-                          danmakuEnabled ? Icons.subtitles : Icons.subtitles_off,
-                          color: danmakuEnabled
-                              ? Colors.lightBlueAccent
-                              : Colors.white,
-                          size: 18,
-                        ),
-                        label: Text(
-                          '弹幕',
-                          style: TextStyle(
-                            color: danmakuEnabled
-                                ? Colors.lightBlueAccent
-                                : Colors.white,
-                          ),
-                        ),
-                      ),
-                    ),
-                    if (hasEpisodes)
-                      TextButton.icon(
-                        onPressed: onEpisodes,
-                        icon: const Icon(
-                          Icons.list,
-                          color: Colors.white,
-                          size: 18,
-                        ),
-                        label: const Text('选集', style: TextStyle(color: Colors.white)),
-                      ),
-                    /*
-                 * ★★★ task-53【③】「所有直播」按钮（用户第 3 条）
-                 *
-                 * ```text
-                 * 用户原话：> 我无法在直播的播放器页面，查看所有的直播，就跟选集一样
-                 * ```
-                 * ★ 与「选集」按钮**并排、同款式** —— 用户说的就是"就跟选集一样"
-                 *   ⇒ 位置和长相都该对齐他的心理模型，而不是另发明一个入口。
-                 * ★ 直播时 `hasEpisodes` 恒 false ⇒ 两个按钮**不会同时出现**
-                 *   （不会让用户困惑"这俩有什么区别"）。
-                 */
-                    if (hasLiveChannels)
-                      TextButton.icon(
-                        onPressed: onLiveChannels,
-                        icon: Icon(
-                          Icons.live_tv,
-                          color: liveChannelsOpen
-                              ? Colors.lightBlueAccent
-                              : Colors.white,
-                          size: 18,
-                        ),
-                        label: Text(
-                          '所有直播',
-                          style: TextStyle(
-                            color: liveChannelsOpen
-                                ? Colors.lightBlueAccent
-                                : Colors.white,
-                          ),
-                        ),
-                      ),
-                    /*
-                 * ★ 画中画按钮（仅支持的平台显示）
-                 *
-                 * ⚠️ 不支持时**不显示**而不是灰掉 ——
-                 *    灰按钮会让人以为是"暂时不可用"，
-                 *    而实际是这个平台根本没有这个能力。
-                 */
-                    if (pipSupported)
-                      IconButton(
-                        onPressed: onTogglePip,
-                        icon: Icon(
-                          pipActive
-                              ? Icons.picture_in_picture_alt
-                              : Icons.picture_in_picture_alt_outlined,
-                          color: pipActive
-                              ? Colors.lightBlueAccent
-                              : Colors.white,
-                        ),
-                        tooltip: pipActive ? '退出画中画' : '画中画',
-                      ),
-                    IconButton(
-                      onPressed: onToggleFullscreen,
-                      icon: Icon(
-                        fullscreen ? Icons.fullscreen_exit : Icons.fullscreen,
-                        color: Colors.white,
-                      ),
-                      /*
-                       * ★★★ 缺陷 17（Owner 第 17 条）：tooltip 用**动作词**
-                       *
-                       * 改前恒为 `'全屏'`（名词）—— 与同一页「更多」菜单里的
-                       * `Text(fullscreen ? '退出全屏' : '全屏')`（:13667 / :13994）
-                       * **同一功能两种叫法**。
-                       * 口径（Lead 裁决 2026-10-09）：
-                       * ```text
-                       * 按钮 label  = 名词（图标已表达状态，label 随状态跳字更糟）
-                       * 按钮 tooltip = 动作词，**与菜单项逐字一致**  <-- 本条
-                       * ```
-                       * ⚠️ `test/t63_shot_ui_test.dart:181 / :322` 用
-                       *    `find.byTooltip('全屏')` 只作**阳性对照**（确认底栏渲染出来了），
-                       *    而该用例挂在 1280x800 且 fullscreen 初始为 false ⇒ 新表达式
-                       *    求值仍是 `'全屏'` ⇒ 那两条断言**逐字不变、仍然绿**。
-                       */
-                      tooltip: fullscreen ? '退出全屏' : '全屏',
-                    ),
-                    /*
-                 * ★★★ task-22 P1-5 / P1-11：画面缩放（宽屏/TV 分支）
-                 *
-                 * 与 compactRow 那一枚是**同款**（同样不带 tooltip，理由见
-                 * 那边的长注释）—— 两个分支各自自足，是本文件既有范式
-                 * （相机 / 齿轮也是这样各写一份）。
-                 *
-                 * 宽度（task-33 探针**重测**，旧账已过期）：1280x800 下按钮行
-                 * `getMaxIntrinsicWidth` = **771.43**（含这一枚），可用 864.00
-                 * ⇒ 余 92.57，不溢出（`.probe/android_fix/diag_bar11.txt`）。
-                 * ⚠️ 真正兜住溢出的不是「余量够」而是 `fits` 用的
-                 *   `_kBottomBarRowWidth`（830）：低于它就走 `compactRow`
-                 *   （t92 盯的是这条）。`t63_shot_ui_test.dart:222` 的⑭查 1280x800。
-                 */
-                    IconButton(
-                      onPressed: onZoomToggle,
-                      onLongPress: onZoomToggle,
-                      icon: Icon(
-                        Icons.zoom_in_map,
-                        color: zoomOpen ? Colors.lightBlueAccent : Colors.white,
-                        semanticLabel: '画面缩放',
-                      ),
-                    ),
-                    /*
-                 * ★★★ 「设置」—— 字幕 / 音轨 / 连播策略的入口
-                 *
-                 * # 为什么放在**最后**（全屏按钮右边）
-                 *
-                 * 原版 ArtPlayer 的齿轮也在控制条最右端（它的 controls 顺序是
-                 * `播放 → 进度 → 音量 → 倍速 → ... → 全屏 → 设置`）。
-                 * 放在同一位置 = 肌肉记忆一致。
-                 *
-                 * # 为什么直播也显示
-                 *
-                 * 直播**没有连播**（面板里那一段会自动隐藏），但**有字幕和音轨**
-                 * （直播流的字幕轨是常见的），所以入口不能少。
-                 * 这与「片头片尾」按钮不同 —— 那个在直播下**整个功能都不存在**。
-                 */
-                    /*
-                 * ★ task-21 P1-30：截图（相机）
-                 *
-                 * 为什么放在齿轮**左边**：它是**动作**，齿轮是**入口** ——
-                 * 原版 ArtPlayer 的控制条次序也是「… → 全屏 → 截图 → 设置」。
-                 *
-                 * 为什么直播也显示：直播同样有画面可截（截的就是当前这一帧）。
-                 *
-                 * 宽度（task-33 探针**重测**，旧账 960.60 已过期）：1280x800 下
-                 * 按钮行固有宽 **771.43** / 可用 864.00 ⇒ 加这一枚后仍余 92.57
-                 * ⇒ 不会 RenderFlex overflow（`.probe/android_fix/diag_bar11.txt`）。
-                 */
-                    IconButton(
-                      onPressed: onScreenshot,
-                      icon: const Icon(Icons.photo_camera, color: Colors.white),
-                      tooltip: '截图',
-                    ),
-                    IconButton(
-                      onPressed: onSettings,
-                      icon: const Icon(Icons.settings, color: Colors.white),
-                      tooltip: '设置（字幕 / 音轨 / 连播）',
-                    ),
-                    /*
-                 * ★★★ task-13 ⑦ 弹幕设置
-                 *
-                 * 与左边那个齿轮是**两个**入口：那个是"播放设置"
-                 * （字幕 / 音轨 / 连播），这个是"弹幕设置"。
-                 * 分开是因为弹幕有 4 个滑杆 + 2 个文本框，
-                 * 塞进播放设置面板会把那个面板撑成两页。
-                 */
-                    IconButton(
-                      onPressed: onDanmakuSettings,
-                      icon: const Icon(Icons.tune, color: Colors.white),
-                      /*
-                       * ★★★ 缺陷 17：tooltip 截成**动作词**
-                       *
-                       * 改前是 `'弹幕设置（AppId / 字号 / 透明度）'` ——
-                       * 括号里那串细节本该属于**面板里**，写在 tooltip 上有两个毛病：
-                       * ```text
-                       * ① 与同一页菜单项 `Text('弹幕设置')`（:13671 / :13998）**不是同一个叫法**；
-                       * ② tooltip 是鼠标悬停一瞬才出现的提示，承载 3 个参数名太长，
-                       *    而且「AppId / 字号 / 透明度」**还不是**面板里全部内容
-                       *    （面板实际有：状态 / 显示开关 / AppId+AppSecret / 字号 /
-                       *      透明度 / 速度 / 占用区域 / 重新获取）⇒ 是**误导性**摘要。
-                       * ```
-                       * ⇒ 细节挪进面板标题（见 `danmaku_settings_dialog.dart` 的
-                       *    `_sectionTitle('弹幕库凭证', note: 'dandanplay 开放平台')` 等处），
-                       *    tooltip 只留与菜单项逐字一致的 `'弹幕设置'`。
-                       * ⚠️ `danmakuBusy` 时的 `'弹幕加载中…'` **保留** —— 那是**进度**
-                       *    而不是叫法，删了会让用户以为卡死。
-                       * ⚠️ 全 test/ 目录 grep `'弹幕设置（` / `AppId / 字号 / 透明度`
-                       *    **0 命中** ⇒ 无测试钉住这个长串。
-                       */
-                      tooltip: danmakuBusy ? '弹幕加载中…' : '弹幕设置',
-                    ),
-                    /*
-                 * ★★★ task-32 ②：投屏（DLNA）
-                 *
-                 * 为什么摆在**最右端**（弹幕设置之后）：它与弹幕那枚一样，
-                 * 是「对**这一路流**做的事」，不是「对这一页做的事」——
-                 * 与它同类的都排在动作区末尾。
-                 *
-                 * 宽度账（task-33 探针**重测**，旧账 1056.60 / 1248.00 已过期）：
-                 * 1280×800 下按钮行固有 **771.43**（含这一枚）/ 可用 864.00
-                 * ⇒ 余 92.57，不会 RenderFlex overflow（t63 的 ⑭ 在盯这条；
-                 *   t92 盯的是「低于 830 必须换形」这条兜底）。
-                 *
-                 * ⚠️ 宽屏这一侧**没有** t68 的 E⑥ 那类位置约束（那是
-                 *    compactRow 专属的），只要不引入 `Icons.photo_camera` /
-                 *    `Icons.settings` / `Icons.tune` 字面量就不会打红 ——
-                 *    投屏用的是 `Icons.cast`，不在那三个里。
-                 */
-                    if (onCast != null && castUrl.isNotEmpty)
-                      CastButton(
-                        url: castUrl,
-                        headers: castHeaders,
-                        title: castTitle,
-                      ),
-                  ],
-                );
-
-                /*
-                 * 放不下 ⇒ 返回 `compactRow`（手机上换形，不再靠横滑）。
-                 * 放得下 ⇒ 原样返回 `row`（**宽屏/TV 与改动前逐像素一致**）。
-                 */
-                // ★ 2026-10-09（缺陷 2 验收修正）：宽档行（row）里也有 PopupMenuButton<double>（倍速），
-                // 它需要 MaterialLocalizations。缺则 row 在 build 期抛 'No MaterialLocalizations found.'，
-                // _BottomBar 整条不进树（不是隐藏）—— 被 t1 静音探针实测抓到：A 行读数出得来，
-                // 紧接的 [E] 抛的就是这一条。生产里 MaterialApp 自带委托，探针宿主缺 ⇒ 归探针，不是产品缺陷。
-                if (mini) return miniBar;
-                return fits ? row : compactRow;
-              },
-            ),
-          ],
-        ),
-      ),
-    ),
-  ),
-  );
+    return PlayerBottomBar(
+      controller: popover,
+      playing: playing,
+      position: position,
+      duration: duration,
+      isLive: isLive,
+      rate: rate,
+      volume: volume,
+      muted: muted,
+      fullscreen: fullscreen,
+      onTogglePlay: onTogglePlay,
+      onSeek: onSeek,
+      onVolume: onVolume,
+      onToggleMute: onToggleMute,
+      onRate: onRate,
+      onToggleFullscreen: onToggleFullscreen,
+      hasEpisodes: hasEpisodes,
+      onEpisodes: onEpisodes,
+      showEpisodeNav: showEpisodeNav,
+      hasNext: hasNext,
+      onNext: onNext,
+      more: PlayerMoreMenuData(groups: moreGroups),
+      streams: streams,
+      currentStream: currentStream,
+      onPickStream: onPickStream,
+      qualityOptions: qualityOptions,
+      onPickQuality: onPickQuality,
+      currentQuality: currentQuality,
+      trackGroups: trackGroups,
+      onPickTrack: onPickTrack,
+      danmakuEnabled: danmakuEnabled,
+      danmakuBusy: danmakuBusy,
+      onDanmakuToggle: onDanmakuToggle,
+      onDanmakuSettings: onDanmakuSettings,
+      zoomOpen: zoomOpen,
+      videoZoom: videoZoom,
+      onVideoZoom: onVideoZoom,
+      onZoomToggle: onZoomToggle,
+      fade: fade,
+      buffered: _playerBufferedRange(buffered),
+      bufferBarKey: bufferBarKey,
+    );
   }
 }
 
@@ -15674,295 +14617,6 @@ class _BufferPoller {
     if (ms == _lastMs) return;
     _lastMs = ms;
     onChanged(Duration(milliseconds: ms), state, spanSec);
-  }
-}
-/// ★★★ 缺陷 13：底栏进度条 —— 在**已有 Slider 之上**叠一条缓冲条
-///
-/// # 错在哪（改前）
-/// ```text
-/// 底栏进度条就是一根裸 Slider（见 `_BottomBar` 的 `if (!isLive) Row(...)`）
-/// ⇒ 用户看不到"已经缓冲到哪里"，只有中央一个转圈告诉你"在等"。
-/// Owner 原话：进度条必须显示缓冲区间。
-/// ```
-///
-/// # 为什么不替换 Slider，而是在它上面叠一层
-/// ```text
-/// 替换 Slider ⇒ 就失去 M3 Slider 的拖动 / 无障碍 / 键盘焦点 /
-///   水波纹，全部要自己重写一遍（且必然与其它档不一致）。
-/// 叠一层     ⇒ 拖动、焦点、语义**一个字节都不变**；
-///   而且 `buffered == null` 时直接 `return slider` —— 无缓冲读数时
-///   渲染结果与改动前**逐像素相同**（这是本条的回归保护）。
-/// ```
-///
-/// # ★★ 两个实测出来的硬约束（踩过，别再走一遍）
-/// ```text
-/// ① M3 Slider 的轨道**两侧各内缩 24dp**。
-///   material_ui-1.6.0/lib/src/slider_parts.dart:244-258：
-///     trackLeft  = offset.dx + (padding==null ? max(overlayWidth/2, thumbWidth/2) : 0)
-///     trackRight = trackLeft + parentBox.size.width - (padding==null ? max(thumbWidth, overlayWidth) : 0)
-///   默认 overlayWidth=48、thumbWidth=20 ⇒ inset = 24。
-///   实测（300dp 盒子里 value=0.5）：drawRRect(RRect.fromLTRBR(24.0,297.0,152.0,303.0))
-///     + drawRRect(RRect.fromLTRBR(148.0,298.0,276.0,302.0)) + drawCircle(Offset(150.0,300.0), 10.0)
-///   ⇒ 轨道 = [24, 276]、thumb 中心 = 24 + 0.5*(276-24) = 150。
-///   ★ 首版让缓冲条铺满整宽 ⇒ 每端多伸 24dp，肉眼可见错位。
-/// ② **绝不能用 Row + FractionallySizedBox 摆这条缓冲条**：
-///   Row 给非 flex 孩子的宽度约束是**无界**的 ⇒ FractionallySizedBox
-///   会抛 `BoxConstraints forces an infinite width.`
-///  （RenderFractionallySizedBoxOverflowBox.performLayout, shifted_box.dart:1298），
-///   随后底栏整条布局挂掉（RenderBox was not laid out: hasSize）。
-///   ★ 生产里外层 `Row > Expanded` 只保证**本控件**拿到有界宽，
-///     不保证 Row 里的比例孩子拿到有界宽 —— 两者无关。
-///   ⇒ 一律用 LayoutBuilder 算**像素值**再 Positioned。
-/// ```
-///
-/// ⚠️ 叠加层必须 `IgnorePointer`：否则它挡死 Slider 的拖动 ——
-///    缓冲条只负责"显示"，不参与命中测试。
-class _ProgressSlider extends StatelessWidget {
-  const _ProgressSlider({
-    required this.position,
-    required this.duration,
-    required this.buffered,
-    required this.onSeek,
-    this.barKey,
-  });
-
-  final Duration position;
-  final Duration duration;
-  final BufferedRange? buffered;
-  final ValueChanged<Duration> onSeek;
-
-  /// ★ 只给探针用（用 GlobalKey 取缓冲条的真实几何）
-  final Key? barKey;
-
-  /// 缓冲条高度（3dp：与轨道同量级，不抢 active track 的视觉）
-  static const double _kBarHeight = 3;
-
-  /*
-   * ══════════════════════════════════════════════════════════════════
-   * ★★★ task-8 ②：四样颜色必须**在黑底上可辨**（Owner 2026-10-09 第三批）
-   * ══════════════════════════════════════════════════════════════════
-   *
-   * Owner 原话：
-   * > 播放进度条,预加载的那个条的颜色没有,还是一个进度条,已观看的变成黑色,
-   * > 预加载到哪里看不到,需要加上
-   *
-   * # 改前为什么四样都不可辨（实测读数，不是推断）
-   * ```text
-   * 本类用的是**裸 Slider**，**没有** SliderTheme ⇒ 走的全是 M3 默认值。
-   * 探针在播放页主题下把「显式值」读出来是：
-   *   SliderTheme 显式值 active=null inactive=null thumb=null
-   * 于是实际绘制用的是这些**默认**：
-   *   activeTrack   = primary @38%   (alpha 0.38)
-   *   inactiveTrack = onSurface @12% (alpha 0.12)
-   * ```
-   * 而播放页是**纯黑**底（`Scaffold(backgroundColor: Colors.black)`，见 build）：
-   * ```text
-   * · activeTrack alpha 0.38 压在黑底 => 几乎纯黑 => 用户说「已观看的变成黑色」
-   * · inactiveTrack alpha 0.12 => 比黑更黑都不到 => 用户说「没有颜色」
-   * · 缓冲条是写死的白 38%（0x61）=> 比 inactive 亮，但**比 active 暗**
-   *   => 叠在 active 段上前者反而更亮，看不出「预加载到哪里」
-   * ```
-   *
-   * # 为什么用 SliderTheme **局部**包一层（不改全局主题）
-   * ```text
-   * 进度条是**唯一**压在视频画面上的控件，它的对比要求与 App 其余部分
-   * （浅色底）完全相反。改全局 ThemeData 会波及所有页面 —— 那是过大的爆炸半径。
-   * 包一层 SliderTheme 只影响本子树，且 SliderTheme 是**就近生效**的，
-   * 正是为这种场景设计的。
-   * ```
-   *
-   * # 四样的分配（都是「对黑底的对比度」标定，不是拍脑袋的色号）
-   * ```text
-   * inactive track  白 24%  —— 可见但不抢眼，负责「整条轨道在哪」
-   * active   track  白 92%  —— 最亮，负责「已看到哪」（对比度 >> 3:1）
-   * buffer          白 55%  —— ★ 严格夹在 inactive(24%) 与 active(92%) **之间**
-   *                              => 三段亮度单调递增，一眼看出三段边界
-   * thumb           纯白   —— 拖拽点必须一眼找到
-   * ```
-   * ⚠️ 三段的**亮度单调性**是硬约束（探针判据 C 钉着）：
-   *    `luminance(inactive) < luminance(buffer) < luminance(active)`。
-   *    任何一段被改成「夹不住」，三段就退化成两段，Owner 报的问题会回来。
-   *
-   * ⚠️ 只动**颜色**：下面 `_kTrackInset` / `_kBarHeight` 等几何量一个字不变 ——
-   *    `test/zz_t13_geom_probe_test.dart` 钉着它们（TRACK=[24,276] / BUFFER=[49.2,150] /
-   *    高 3.0 / 右内缩 24 / thumb 中心 150）。
-   */
-  /// 已观看段（最亮）
-  static const Color _kActiveColor = Color(0xEBFFFFFF); // 白 92%
-
-  /// 整条轨道底色（可见但不抢眼）
-  static const Color _kInactiveColor = Color(0x3DFFFFFF); // 白 24%
-
-  /// 缓冲条颜色（★ 必须夹在上面两者之间：24% < 55% < 92%）
-  static const Color _kBarColor = Color(0x8CFFFFFF); // 白 55%
-
-  /// 拖拽点
-  static const Color _kThumbColor = Color(0xFFFFFFFF);
-
-  /// ★ M3 轨道两侧的内缩（24 = max(overlayWidth 48, thumbWidth 20) / 2）
-  ///
-  /// 实测来源见类注释 ① —— 这个数不是估的，是从 paints 显示列表反解出来的。
-  /// 改成别的值缓冲条就会与轨道错位。
-  static const double _kTrackInset = 24;
-
-  @override
-  Widget build(BuildContext context) {
-    final total = duration.inMilliseconds;
-    /*
-     * ★★★ task-8 ②：局部 SliderTheme（只影响本子树，见上面的长注释）
-     *
-     * ⚠️ 必须包在 `slider` 变量上、且**所有 return 分支都返回它** ——
-     *    改前有 4 个 `return slider` 的早退分支（无缓冲读数 / 时长未知 /
-     *    盒子太窄 / 区间为空）。若只给主路径包主题，那些分支会退回 M3 默认色，
-     *    表现为「有缓冲时是白的、没缓冲时又变黑」——比改前更难懂。
-     */
-    final slider = SliderTheme(
-      data: SliderTheme.of(context).copyWith(
-        activeTrackColor: _kActiveColor,
-        inactiveTrackColor: _kInactiveColor,
-        thumbColor: _kThumbColor,
-        // 覆盖层（按住 thumb 时那圈光晕）跟着拇指走，避免又冒出一个浅色调
-        overlayColor: _kThumbColor.withValues(alpha: 0.12),
-        /*
-         * ★ 必须显式钉住**几何**相关值 —— `copyWith` 只换了颜色，
-         *   但 M3 的 `activeTrackColor` 若被设成不透明色，Slider 可能改用
-         *   `RoundedRectSliderTrackShape` 的「画两段」路径，从而改变轨道端点。
-         *   实测：显式传 `trackHeight` 并把 `trackShape` 钉成默认类之后，
-         *   轨道矩形与改前**逐值相同**（zz_t13 的 TRACK/BUFFER/内缩 24 全部不变）。
-         */
-        trackHeight: null,
-        trackShape: const RoundedRectSliderTrackShape(),
-      ),
-      child: Slider(
-        value: total > 0
-            ? (position.inMilliseconds / total).clamp(0.0, 1.0)
-            : 0.0,
-        onChanged: (v) => onSeek(duration * v),
-      ),
-    );
-
-    final end = buffered?.end;
-    // ★ 没有读数 / 时长未知 ⇒ 逐像素回到改动前
-    if (end == null || total <= 0) return slider;
-
-    final startMs = (buffered?.start?.inMilliseconds ?? 0).clamp(0, total);
-    final endMs = end.inMilliseconds.clamp(0, total);
-    if (endMs <= startMs) return slider;
-
-    return LayoutBuilder(
-      builder: (context, c) {
-        final w = c.maxWidth;
-        // 盒子小到装不下轨道 ⇒ 不画（否则会算出负数宽）
-        if (!w.isFinite || w <= 2 * _kTrackInset) return slider;
-        final trackW = w - 2 * _kTrackInset;
-        final leftPx = _kTrackInset + (startMs / total) * trackW;
-        final rightPx = _kTrackInset + (endMs / total) * trackW;
-        final barW = (rightPx - leftPx).clamp(0.0, trackW);
-        if (barW <= 0) return slider;
-        return Stack(
-          alignment: Alignment.center,
-          children: [
-            Positioned.fill(
-              child: IgnorePointer(
-                child: Stack(
-                  children: [
-                    Positioned(
-                      left: leftPx,
-                      width: barW,
-                      top: 0,
-                      bottom: 0,
-                      child: Align(
-                        alignment: Alignment.center,
-                        child: Container(
-                          key: barKey,
-                          height: _kBarHeight,
-                          decoration: BoxDecoration(
-                            color: _kBarColor,
-                            borderRadius: BorderRadius.circular(_kBarHeight / 2),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            slider,
-          ],
-        );
-      },
-    );
-  }
-}
-class _ZoomSliderCard extends StatelessWidget {
-  const _ZoomSliderCard({
-    required this.zoom,
-    required this.onChanged,
-    required this.onDone,
-    required this.onClose,
-  });
-
-  /// 当前缩放百分比（100 = 原始比例）
-  final double zoom;
-
-  /// 拖动中（每一帧）
-  final ValueChanged<double> onChanged;
-
-  /// 松手（宿主在这里才写偏好）
-  final ValueChanged<double> onDone;
-
-  /// 收起这条滑条
-  final VoidCallback onClose;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: Sp.x2),
-      child: Container(
-        padding: const EdgeInsets.fromLTRB(Sp.x3, Sp.x2, Sp.x1, Sp.x2),
-        decoration: BoxDecoration(
-          color: Colors.black.withValues(alpha: 0.55),
-          borderRadius: Radii.rMd,
-          border: Border.all(color: Colors.white24),
-        ),
-        child: Row(
-          children: [
-            const Icon(Icons.zoom_in_map, color: Colors.white70, size: 18),
-            const SizedBox(width: Sp.x2),
-            /*
-             * 读数宽度固定 46dp：不固定的话「100%」→「125%」会让滑条
-             * 左右抖一下（拖动时每帧都在变）。
-             */
-            SizedBox(
-              width: 46,
-              child: Text(
-                '${zoom.round()}%',
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: FontSizes.sm,
-                ),
-              ),
-            ),
-            Expanded(
-              child: Slider(
-                value: zoom.clamp(50.0, 200.0).toDouble(),
-                min: 50,
-                max: 200,
-                // 5% 一档：任意比例靠拖动本身（divisions 只是吸附粒度）
-                divisions: 30,
-                onChanged: onChanged,
-                onChangeEnd: onDone,
-              ),
-            ),
-            IconButton(
-              onPressed: onClose,
-              icon: const Icon(Icons.close, color: Colors.white70, size: 18),
-              tooltip: '收起',
-            ),
-          ],
-        ),
-      ),
-    );
   }
 }
 
