@@ -260,7 +260,28 @@ class SettingsBlock extends StatelessWidget {
                 borderRadius: Radii.rLg,
                 border: Border.all(color: colors.outlineVariant),
               ),
-              child: inner,
+              /*
+               * ★★ 2026-10-10：内框自带 `Material`（**不**改变视觉）
+               *
+               * 区块里不少控件是 `ListTile` 家族（`SwitchListTile` /
+               * `CheckboxListTile` …），它们把底色与**涟漪画在最近的
+               * `Material` 祖先**上。改动前这个 `Container`（一个
+               * `DecoratedBox`）就是那个祖先之外更近的一层有底色的盒子
+               * ⇒ Flutter 直接在 debug 下断言：
+               * ```text
+               * ListTile background color or ink splashes may be invisible.
+               * ```
+               * 在 release 下不报，但**点开关时看不到任何涟漪反馈** ——
+               * 用户以为没点到。
+               *
+               * ⇒ 这里补一层 `Material`（透明，不画任何底色）作为
+               *    `ListTile` 的绘制面。外层 `Container` 的底色与边框
+               *    一像素不变，只是涟漪终于有地方画了。
+               */
+              child: Material(
+                type: MaterialType.transparency,
+                child: inner,
+              ),
             ),
         ],
       ),
