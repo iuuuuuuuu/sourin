@@ -457,6 +457,43 @@ pub struct StreamCandidate {
     /// `None` = 音视频已合并在 `url` 里（绝大多数源的正常情况）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio_url: Option<String>,
+
+    /// 直播源的原始标签（tvg-id / group-title / tvg-logo 等）
+    ///
+    /// # 为什么需要它（缺陷 5，Owner 原话）
+    ///
+    /// Owner 原话：tvbox 插件恢复为原始链接 + tag（自有平台 vs tvbox 兼容）。
+    ///
+    /// 也就是说：IPTV 插件把频道从 m3u 解析出来后，原始 m3u 里那几个 tag 必须
+    /// 一路带到客户端，客户端才能区分这是自有平台的频道还是
+    /// tvbox 兼容源的频道，并按各自的方式处理。
+    ///
+    /// # 错在哪（改前）
+    ///
+    /// 插件侧 rust/sourin_core/plugins/iptv.js 的 liveStream() 只返回
+    /// {url, kind, label}（label 是 displayGroup() 的归一化结果），
+    /// tag 在插件出口就丢了。
+    ///
+    /// 更隐蔽的一层：即便插件把 tag 发出来，本结构体没有这个字段，
+    /// serde 默认忽略未知字段（本文件与 JSON 层都没写 deny_unknown_fields），
+    /// 于是 tag 会在桥接出口静默消失 —— 不报错、不警告，查起来极难。
+    /// 实测读数（rust/sourin_core/tests/zz_t5_tags_probe.rs）：
+    ///   · 桥接后 JSON = {...,tags:{group-title:China,
+    ///        tvg-id:CCTV1@SD,tvg-logo:...}}   <- 键名完好（连字符不受
+    ///        plugins/mod.rs:129 camel_to_snake 影响）
+    ///   · StreamCandidate 回序列化 = {kind:hls,label:综合,
+    ///        not_web_ready:false,url:...}          <- tags 没了
+    /// 结论：光改插件不够，必须在这里补字段。
+    ///
+    /// # 为什么是 Map<String, String> 而不是固定几个字段
+    ///
+    /// m3u 的 tag 是开放集合（tvg-id / tvg-name / tvg-logo /
+    /// group-title / tvg-shift / radio / catchup ...），tvbox 生态还在加。
+    /// 固定字段每加一个都要改 Rust + Dart + 桥接三处；开放 map 只透传。
+    ///
+    /// None = 该源没有 tag（本地测试流、自有平台流等）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags: Option<std::collections::BTreeMap<String, String>>,
 }
 
 impl StreamCandidate {
@@ -478,6 +515,7 @@ impl StreamCandidate {
             not_web_ready: false,
             drm_protected: false,
             audio_url: None,
+            tags: None,
         }
     }
 

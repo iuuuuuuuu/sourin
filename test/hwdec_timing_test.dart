@@ -357,12 +357,20 @@ void main() {
        * 验收是 `Select-String out.txt -Pattern "hwdec-current"`。
        * 前缀一旦被改动，脚本就抓不到 —— 这条把格式钉住。
        */
-      expect(
-        src.contains("debugPrint('[PLAYER] hwdec-current = \$cur'"),
-        isTrue,
-        reason: '★ 硬指标①的证据行前缀必须是 `[PLAYER] hwdec-current = ` ——\n'
-            '  独立验收脚本按这个 grep。改格式前请先确认脚本已同步更新。',
-      );
+      // ★ 2026-10-10：这条原来钉的是 `debugPrint('[PLAYER] hwdec-current = $cur')`
+      //   这么**一行**的字面量。player agent 只是把那行按 80 列折成两行
+      //   （相邻字符串字面量拼接，输出**逐字节相同**），判据就假红了。
+      //   ⇒ 判据改为「输出里有那个前缀、且前缀后面跟着实际取值」——
+      //     这才是独立验收脚本 grep 的东西，也是本条真正要守的不变量。
+      // ⚠️ 必须**剥掉注释**再找：player_page.dart 顶部的注释里也写着同一句话
+      //   （举例说明「空值长什么样」），全文件 indexOf 会先匹配到那处注释
+      //   —— 实测踩过：`substring` 取到的是注释里那个示例，不是真正的日志行。
+      final at = stripComments(src).indexOf('[PLAYER] hwdec-current = ');
+      expect(at, greaterThan(0),
+          reason: '硬指标①的证据行前缀必须是 `[PLAYER] hwdec-current = ` ——\n'
+              '  独立验收脚本按这个 grep。改格式前请先确认脚本已同步更新。');
+      expect(stripComments(src).substring(at + 20, at + 70), contains('cur'),
+          reason: '★ 前缀之后必须输出实际的 hwdec 取值');
     });
   });
 }

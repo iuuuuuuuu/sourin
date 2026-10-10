@@ -243,7 +243,7 @@ class SettingsSubPage extends StatelessWidget {
   /// ★ 抽出来是因为两种结构都要用它（见 [scrollBody] 的说明）。
   ///   内容与**改前逐字相同**。
   ///
-  /// ⚠️ 参数用 `ColorScheme`（不是 forui 的 `FColors`）——
+  /// ⚠️ 参数用 `ColorScheme`（不是 forui 的 `AppPalette`）——
   ///    改动前的原代码用的就是 `Theme.of(context).colorScheme`，
   ///    这里**不改配色来源**，避免引入视觉差异。
   ///    （也顺带免掉给本文件 import forui —— 少一个依赖面。）

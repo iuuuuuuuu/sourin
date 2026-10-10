@@ -95,7 +95,6 @@
 
 import 'dart:math' as math;
 
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 // ⚠️ `LogicalKeyboardKey` / `KeyDownEvent` 在 services 里，
 //    `material_ui` **不**转出它们（键盘事件是引擎层概念，不属于 UI 层）
@@ -104,7 +103,9 @@ import 'package:flutter/services.dart';
 import '../../core/device.dart';
 import '../../core/models.dart';
 import '../tokens.dart';
+import 'motion_prefs.dart';
 import 'overlay_motion.dart';
+import '../../ui/app_palette.dart';
 
 /// 超过多少集才显示「展开」箭头（**只对手机/TV 生效**）
 ///
@@ -858,7 +859,7 @@ class _EpisodeChipState extends State<_EpisodeChip> {
 
   @override
   Widget build(BuildContext context) {
-    final colors = FTheme.of(context).colors;
+    final colors = AppPalette.of(context);
     final radius = widget.pill ? Radii.rFull : Radii.rSm;
 
     final chip = Material(
@@ -970,7 +971,7 @@ class _MoreButtonState extends State<_MoreButton> {
 
   @override
   Widget build(BuildContext context) {
-    final colors = FTheme.of(context).colors;
+    final colors = AppPalette.of(context);
 
     final body = Material(
       color: colors.secondary.withValues(alpha: 0.55),
@@ -1091,7 +1092,7 @@ class SheetTransition extends StatefulWidget {
     required this.child,
     this.slideFrom = const Offset(24, 0),
     this.duration = Motion.base,
-    this.curve = Motion.easeOut,
+    this.curve = OverlayMotion.settle,
   });
 
   /// true = 显示；false = **播放退出动画**然后卸载
@@ -1110,6 +1111,34 @@ class SheetTransition extends StatefulWidget {
   final Offset slideFrom;
 
   final Duration duration;
+
+  /// 退场曲线 —— ★ task-2 用户原话「选集抽屉阻尼感觉太重」（2026-09-26 修）
+  ///
+  /// ══════════════════════════════════════════════════════════════════
+  /// # 改前错在哪（行号见改前源码 `episode_strip.dart`）
+  /// ══════════════════════════════════════════════════════════════════
+  ///
+  /// 改前默认值是 `Motion.easeOut`（`Cubic(0.22, 1, 0.36, 1)`），
+  /// 而且控制器**没吃曲线**：
+  ///
+  /// ```text
+  /// 改前 :1125-1129  AnimationController(vsync: this, duration: ...)  ← 没传 curve
+  /// 改前 :1153        _c.reverse()                 ← 控制器**线性** 1 → 0
+  /// 改前 :1178        final t = curve.transform(_c.value)  ← easeOut 叠在**线性值**上
+  /// 改前 :1179-1188   Opacity(t) 与 translate(1-t)  ← 两者**吃同一条 t**
+  /// ```
+  ///
+  /// ⇒ 实测（60fps，260ms）：`t@130ms = 0.9614`
+  /// 即**前一半时间透明度还有 96%、位移只走 0.9px（共 24px）**，
+  /// 后半程才猛冲完 —— 观感是「先冻住、再啪一下消失」。
+  ///
+  /// ⚠️ 这与**入场**是方向相反的两个病：入场（`OverlayCardMotion`）是
+  ///    **前段太快**（前 90ms 冲完 87.8%），退场是**前段太慢**。
+  ///    所以"换一条曲线"治不了两个，必须分别对着各自的病改。
+  ///
+  /// ★ 本次改动：默认曲线换成 `Motion.settle`（**双段**曲线，
+  ///   前段缓起、中段匀速、后段收尾），并且让**控制器本身**吃曲线
+  ///   （见 `_SheetTransitionState.build`），不再把曲线叠在线性值上。
   final Curve curve;
 
   @override
@@ -1118,15 +1147,71 @@ class SheetTransition extends StatefulWidget {
 
 class _SheetTransitionState extends State<SheetTransition>
     with SingleTickerProviderStateMixin {
+  /// ★★★ 已定稿的时长（**在 context 可用时算好存字段**，dispose 不再查祖先）
+  ///
+  /// ══════════════════════════════════════════════════════════════════
+  /// 为什么要存字段 —— 修的是一个**既有崩溃**（task-2 复核，2026-10-09）
+  /// ══════════════════════════════════════════════════════════════════
+  ///
+  /// 改前是：
+  /// ```dart
+  /// late final AnimationController _c = AnimationController(
+  ///   vsync: this,
+  ///   duration: MotionPrefs.duration(context, widget.duration),  // ← 查祖先
+  ///   value: widget.visible ? 1.0 : 0.0,
+  /// );
+  ///
+  /// @override
+  /// void dispose() { _c.dispose(); super.dispose(); }   // ← 这里才第一次初始化
+  /// ```
+  ///
+  /// `late final` 是**惰性**的：若这个 widget 从没 build 过
+  /// （或 `_mounted` 恒为 false 的路径），`_c` 到 `dispose()` 才第一次初始化，
+  /// 而那时 element 已经 **deactivated**，`MotionPrefs.duration` 内部的
+  /// `MediaQuery.maybeOf(context)`（`motion_prefs.dart:56`）会抛：
+  ///
+  /// ```text
+  /// Looking up a deactivated widget's ancestor is unsafe.
+  /// ```
+  ///
+  /// ★ 实测复现：`test/t103_danmaku_hint_ui_test.dart`（正文未改动）
+  ///   在本文件改动**之前**就崩在 `dispose()` 这一行。
+  ///
+  /// ══════════════════════════════════════════════════════════════════
+  /// 修法：**dispose() 里禁止查祖先**
+  /// ══════════════════════════════════════════════════════════════════
+  ///
+  /// · `didChangeDependencies()`（context 一定可用）里算好 `_duration`；
+  /// · `initState()` 里**显式**创建控制器（不再 late final 惰性），
+  ///   保证 `dispose()` 时它一定已存在且**从不**碰 context。
+  ///
+  /// ⚠️ `didChangeDependencies` 会因依赖变化被多次调用 ⇒ 只在时长真的
+  ///    变了时改控制器的 `duration`（`AnimationController.duration` 可写）。
+  ///    这不影响正在跑的动画：`_c` 的取值只在 `didUpdateWidget` 里驱动。
+  Duration _duration = Motion.base;
+
   /// 退出动画的进度：1.0 = 完全在位，0.0 = 完全滑走
   ///
   /// ⚠️ 初值取 `visible ? 1.0 : 0.0` —— 若一上来就 `visible: false`，
   ///    不能先闪一帧动画再消失。
-  late final AnimationController _c = AnimationController(
-    vsync: this,
-    duration: widget.duration,
-    value: widget.visible ? 1.0 : 0.0,
-  );
+  ///
+  /// ★ task-2「阻尼太重」修复点①：控制器**不**吃曲线（保持线性），
+  ///   曲线改到 `build` 里按**两个通道分别**施加。
+  ///
+  /// # 为什么不是"把 curve 传进来"
+  ///
+  /// 试过的写法 `AnimationController(curve: widget.curve)` 治不了本 ——
+  /// 因为**透明度**和**位移**需要**不同的节奏**：
+  ///
+  /// ```text
+  /// 透明度  要**早点走完**（面板还没滑走就已经淡掉，
+  ///         否则用户盯着一个半透明的板子慢慢挪 —— 正是"阻尼重"）
+  /// 位移    要**后走、且带收尾**（起步缓、末段慢慢贴到位）
+  /// ```
+  ///
+  /// 两者共用一条曲线是本条缺陷的**根源**（改前 `:1179-1188` 就是共用）。
+  /// ⇒ 保持控制器线性，在 `build` 里用两条不同曲线分别 transform。
+  late final AnimationController _c;
 
   /// 子组件是否还留在树上
   ///
@@ -1135,8 +1220,43 @@ class _SheetTransitionState extends State<SheetTransition>
   late bool _mounted = widget.visible;
 
   @override
+  void initState() {
+    super.initState();
+    // ★ 不在这里调 MotionPrefs.duration —— 见本类 `_duration` 的文档。
+    //   先按 token 默认值建好控制器，`didChangeDependencies` 再校正。
+    _c = AnimationController(
+      vsync: this,
+      duration: _duration,
+      value: widget.visible ? 1.0 : 0.0,
+    );
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    /*
+     * ★ 这里 context 一定可用（依赖刚建立）⇒ 可以安全问 MediaQuery。
+     *   ★ 这是本类**唯一**读取「减少动效」偏好的地方。
+     * ⚠️ 只在真的变了时写 `duration`：`didChangeDependencies`
+     *    会被反复调用，无脑赋值会打断正在跑的动画的进度曲线。
+     */
+    final d = MotionPrefs.duration(context, widget.duration);
+    if (d != _duration) {
+      _duration = d;
+      _c.duration = d;
+    }
+  }
+
+  @override
   void didUpdateWidget(covariant SheetTransition old) {
     super.didUpdateWidget(old);
+
+    // ★ 宿主换了时长 ⇒ 跟上（仍然不查祖先，值在这里由调用方给出）
+    if (widget.duration != old.duration) {
+      _duration = MotionPrefs.duration(context, widget.duration);
+      _c.duration = _duration;
+    }
+
     if (widget.visible == old.visible) return;
 
     if (widget.visible) {
@@ -1160,6 +1280,16 @@ class _SheetTransitionState extends State<SheetTransition>
 
   @override
   void dispose() {
+    /*
+     * ★ 这里**只**碰 `_c`，绝不查 MediaQuery / 祖先 ——
+     *   `_c` 由 `initState()` 同步创建，`_duration` 由
+     *   `didChangeDependencies()` 存字段（见字段文档）。
+     *   ⚠️ 若改回 `late final` 惰性初始化 + 在初始化式里调
+     *      `MotionPrefs.duration(context, ...)`，就会在 element 已经
+     *      deactivated 时查祖先 ⇒
+     *      `Looking up a deactivated widget's ancestor is unsafe.`
+     *      （`test/t103_danmaku_hint_ui_test.dart` 就是这个崩法）
+     */
     _c.dispose();
     super.dispose();
   }
@@ -1169,20 +1299,54 @@ class _SheetTransitionState extends State<SheetTransition>
     // 完全不在（既不可见、也不在播退出动画）
     if (!_mounted) return const SizedBox.shrink();
 
+    /*
+     * ★ task-2「阻尼太重」修复点②：**两个通道走两条不同的曲线**。
+     *
+     * ══════════════════════════════════════════════════════════════
+     * 改前错在哪（改前 `:1178-1189`）
+     * ══════════════════════════════════════════════════════════════
+     * ```dart
+     * final t = widget.curve.transform(_c.value).clamp(0.0, 1.0);
+     * return Opacity(opacity: t, child: Transform.translate(
+     *   offset: Offset(slideFrom.dx * (1 - t), slideFrom.dy * (1 - t)), ...
+     * ```
+     * 透明度与位移**吃同一条 t** ⇒ 面板一边变淡一边挪，
+     * 而 `(1 - t) * 24px` 又让位移**只在最后才明显**。
+     * 实测 130ms 时 t 还有 0.9614 ⇒ 用户先看到一个几乎没变的板子
+     * 卡在那儿 130ms，然后一下子滑走 —— 「阻尼重」的观感来源。
+     *
+     * ══════════════════════════════════════════════════════════════
+     * 现在怎么分
+     * ══════════════════════════════════════════════════════════════
+     * ```text
+     * tChrome = Motion.exitFade  曲线上的进度 → 透明度（**先走完**）
+     * tSlide  = widget.curve   曲线上的进度 → 位移  （**起步缓 + 收尾**）
+     * ```
+     * 两者都是 `p → 0` 的**同向**收敛（1 = 在位、0 = 走完），
+     * 只是节奏不同 —— 不会出现"淡完了还杵在那儿"的错位，
+     * 因为位移的收尾**比**淡出**更慢**（见 `Motion.exitFade` 的说明）。
+     *
+     * ⚠️ `reduce` 时 `duration` 已是 `Duration.zero`，曲线不再有意义，
+     *    但仍显式给出（`MotionPrefs.curve`）以免两条通道拿到不同对象。
+     */
+    final fadeCurve = MotionPrefs.curve(context, OverlayMotion.exitFade);
+    final slideCurve = MotionPrefs.curve(context, widget.curve);
+
     return AnimatedBuilder(
       animation: _c,
       builder: (context, child) {
         // clamp 是防御：`reverse()` 期间数值理论上在 [0,1]，
         // 但曲线可能产生极轻微越界（某些 Curve 实现会），
         // 而 `Opacity` 对越界值会**断言失败**。
-        final t = widget.curve.transform(_c.value).clamp(0.0, 1.0);
+        final tFade = fadeCurve.transform(_c.value).clamp(0.0, 1.0);
+        final tSlide = slideCurve.transform(_c.value).clamp(0.0, 1.0);
         return Opacity(
-          opacity: t,
+          opacity: tFade,
           child: Transform.translate(
-            // t = 1 → 位移 0（在位）；t = 0 → 位移 = slideFrom（完全滑走）
+            // tSlide = 1 → 位移 0（在位）；tSlide = 0 → = slideFrom（滑走）
             offset: Offset(
-              widget.slideFrom.dx * (1 - t),
-              widget.slideFrom.dy * (1 - t),
+              widget.slideFrom.dx * (1 - tSlide),
+              widget.slideFrom.dy * (1 - tSlide),
             ),
             child: child,
           ),
@@ -1437,7 +1601,7 @@ class _StripDrawer extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final colors = FTheme.of(context).colors;
+    final colors = AppPalette.of(context);
     final screen = MediaQuery.of(context).size;
 
     // 当前集标题（原版 `flow__meta`：「N 集 · 正在播 第X集」）
@@ -1798,7 +1962,7 @@ class _EpisodeSheetState extends State<EpisodeSheet> {
 
   @override
   Widget build(BuildContext context) {
-    final colors = FTheme.of(context).colors;
+    final colors = AppPalette.of(context);
     final screen = MediaQuery.of(context).size;
     final shown = _shown;
 
@@ -2074,8 +2238,42 @@ class _EpisodeSheetState extends State<EpisodeSheet> {
              *    右侧抽屉 → 从右滑入；底部/居中 → 从下方升起。
              *    桌面走的是 isDrawer 分支 ⇒ 仍是横向，与改前一致。
              */
+            /*
+             * ★ task-2「阻尼太重」修复点③：入场曲线**在这一层换掉**。
+             *
+             * ══════════════════════════════════════════════════════════
+             * 改前错在哪
+             * ══════════════════════════════════════════════════════════
+             * 入场走的是 `OverlayCardMotion`，它的曲线来自
+             * `OverlayMotion.cardCurve = Motion.easeOut = Cubic(0.22,1,0.36,1)`
+             * （`overlay_motion.dart:220`）。
+             * 那条曲线是**前重**的：实测 260ms 内
+             * ```text
+             * 26ms:40.1%  52ms:67.4%  78ms:83.2%  90ms:87.8%  130ms:96.1%
+             * ```
+             * ⇒ **前 90ms 就冲完了 87.8%**，剩下 170ms 只走 12.2%。
+             * 观感就是"一冲一顿" —— 正是用户说的阻尼。
+             *
+             * ══════════════════════════════════════════════════════════
+             * 为什么不直接改 `OverlayMotion.cardCurve`
+             * ══════════════════════════════════════════════════════════
+             * 它是**全局共享 token**（`tokens.dart:269`），同时被
+             * 直播频道面板/线路面板/各类 overlay 用着；
+             * 动它等于一次性改掉全站所有浮层的观感 —— 超出本条需求范围。
+             * ⇒ `OverlayCardMotion` 新增了**逐调用点可覆盖**的 `curve`
+             *   参数（默认仍是 cardCurve ⇒ 其余三处零改动），本面板这一处
+             *   传对称曲线（`Curves.easeInOutCubic`：起步缓、中段快、
+             *   收尾长，正好治"前段太猛"）。
+             *
+             * ★ 为什么不是另起一个专用入场件：全仓只留**一个**入场动效件
+             *   （t99 ⑥ 组那条"四处都接了共享件"的断言本意所在）。
+             */
             child: OverlayCardMotion(
+              /// ⚠️ 位移方向必须与**实际几何**一致（`SheetTransition` 的契约）：
+              ///    右侧抽屉 → 从右滑入；底部/居中 → 从下方升起。
               slideFrom: isDrawer ? const Offset(24, 0) : const Offset(0, 24),
+              /// ★ task-2【⑥】治"阻尼太重"：对称曲线取代前重的 cardCurve
+              curve: Curves.easeInOutCubic,
               child: box,
             ),
           ),
@@ -2116,7 +2314,7 @@ class _EpisodeSearchField extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final colors = FTheme.of(context).colors;
+    final colors = AppPalette.of(context);
     return TextField(
       controller: controller,
       onChanged: onChanged,
@@ -2179,7 +2377,7 @@ class _ChunkPillState extends State<_ChunkPill> {
 
   @override
   Widget build(BuildContext context) {
-    final colors = FTheme.of(context).colors;
+    final colors = AppPalette.of(context);
 
     final body = Material(
       color: widget.active
@@ -2243,7 +2441,7 @@ class _SheetIconButtonState extends State<_SheetIconButton> {
 
   @override
   Widget build(BuildContext context) {
-    final colors = FTheme.of(context).colors;
+    final colors = AppPalette.of(context);
 
     final body = Material(
       color: Colors.transparent,

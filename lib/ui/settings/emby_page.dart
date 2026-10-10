@@ -842,12 +842,11 @@ class _EmbySettingsPageState extends State<EmbySettingsPage> {
           title: '服务器列表',
           children: [
             const _Hint(
-              '每一台 Emby 服务器是一个**独立的源**（插件实例），'
-              '各自有自己的地址 / 账号 / 登录凭据。'
-              '点一行 = 把下面「服务器配置 / 连接自检」切到它。',
+              '每一台 Emby 服务器是一个独立的源，各自保存自己的地址、'
+              '账号与登录状态。点一行即可切换到那台服务器的配置。',
             ),
             const _Hint(
-              '装好之后回首页**下拉刷新**：新源会出现在首页顶部的源栏里，'
+              '装好之后回首页下拉刷新，新源会出现在首页顶部的源栏里，'
               '在那里点一下才是「切当前看的源」。',
             ),
             if (_instances.isEmpty)
@@ -892,17 +891,16 @@ class _EmbySettingsPageState extends State<EmbySettingsPage> {
           title: '安装',
           children: [
             const _Hint(
-              'emby.js 没有打进 App 的 asset，本页不能一键装。'
-              '把仓库里 rust/sourin_core/plugins/emby.js 的内容贴进下面，'
-              '或填一个 http(s) 直链。',
+              'Emby 源需要先装上才能配置。填一个插件直链，或把插件源码'
+              '直接粘贴到下面的输入框，两种方式都可以。',
             ),
             if (_instances.isEmpty)
-              const _Hint('现在一个源都没有 —— 下面「粘贴源码安装」会装成第一个源（@id emby）。')
+              const _Hint('现在一个源都没有 —— 下面「粘贴源码安装」会装成第一个源。')
             else
               const _Hint(
                 '已经装了源 —— 再粘一次同样的源码不会变成第二个源：'
-                '本页会自动把它派生成 emby-2 / emby-3 …（改掉 @id、@name 与三个内容条目 id），'
-                '所以同一个 emby.js 贴几次就有几个源。',
+                '本页会自动把它派生成第二个、第三个源，'
+                '所以同一个插件贴几次就有几个源。',
               ),
             TextField(
               controller: _installUrl,
@@ -951,8 +949,7 @@ class _EmbySettingsPageState extends State<EmbySettingsPage> {
                   : '下面这些会写进「$_selectedLabel」（$_selectedId）',
             ),
             const _Hint(
-              '写进宿主的插件配置（plugin_config_set），插件下次请求时就能读到。'
-              '保存成功后可以回到首页点 Emby 卡片验证：能列出影片 = 配置已生效。',
+              '保存后回到首页点 Emby 卡片验证：能列出影片就说明配置已生效。',
             ),
             const _Hint(
               '每台服务器一套地址 / 账号 / 密码 —— 换一台就点上面列表里那一行，'
@@ -1052,29 +1049,15 @@ class _EmbySettingsPageState extends State<EmbySettingsPage> {
           ],
         ),
         const SettingsBlock(
-          title: '历史：曾经挡住这条路的三条宿主 bug（现已修复）',
+          title: '使用提示',
           children: [
             _Hint(
-              'task-35 在 2026-10-05 用真 DLL + 真 Emby 服务器做了 A/B/C 三组对照，'
-              '坐实了三条；task-33 于 2026-10-06 在正式包上复核，三条的现状是：',
-            ),
-            _Bullet(
-              '① 控件类型读不到 —— 已修：lib/core/models.dart:399 现在读 '
-              'normalizeKind(kind 优先、type 兜底)，密码框与开关都正常。',
-            ),
-            _Bullet(
-              '② 保存开关整批失败 —— 已修（同上：switch 的 kind 现在能识别，'
-              '传 bool 不再被 config_value_ok 拒绝）。',
-            ),
-            _Bullet(
-              '③ 插件读不到设置页写的配置 —— 已修：'
-              'rust/sourin_core/src/commands_remote.rs:62 起 plugin_data_dir() '
-              '统一到 <dataDir>/plugins/.data，与插件 host.config 同一处。',
+              '连接成功后，Emby 内容源会出现在首页与「发现」里，'
+              '可直接点开浏览影片。',
             ),
             _Hint(
-              '2026-10-06 真机端到端：填地址+账号+密码 → 保存 → 插件登录成功并把 '
-              'token / userId / views 写回同一份 emby.json → 首页 Emby 卡片点进去'
-              '能列出影片。若列表为空，先回本页点「测试连接」排除配置问题。',
+              '如果列表是空的，回到本页点「测试连接」检查地址、账号与密码，'
+              '确认连接正常后再重新进入内容源。',
             ),
           ],
         ),

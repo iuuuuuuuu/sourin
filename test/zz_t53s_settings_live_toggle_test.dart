@@ -60,12 +60,21 @@
 //   `runAsync` 给真事件循环开窗口 + `pump()` 抽干微任务，就能跑完。
 // ```
 //
-// # 环境前提（不满足就**跳过**，不假装通过）
+// # 环境前提（缺件 = **另一种被测环境**，不再跳过）
 //
 // ```text
-// ① `build\windows\x64\runner\Release\sourin_core.dll` 必须存在（要先构建 Windows）
-//    ★ 缺了 ⇒ `skip:`（**不是** fail）—— 默认套件不该因为"这台机器没构建
-//      Windows 版"而变红。skip 的原因会打在输出里。
+// ① `build\windows\x64\runner\Release\sourin_core.dll` 在不在：
+//    ★★★ T10（task-35）改 —— 旧版缺件 ⇒ `skip:` ⇒ CI 上（测试步骤跑在
+//      构建**之前**）这个文件只打印 `+0 ~2: All tests skipped.`
+//      并且 **exit 0** —— 看起来绿、实际一条断言都没跑过。
+//      现在：`_dllReady` 只当**环境判别器**，两种环境都真跑真断言：
+//        · 在位态：原有契约（真 FFI 读数 + `N/M 已启用`）
+//        · 缺件态：一级页 ErrorWidget==0、「关于」行降级文案、
+//                 「JS 插件」→「直播源」tab 可达 + `0/0 已启用`
+//                 + 空态「还没有支持直播的源」
+//          这些在缺件态都是**真分支**（改产品文案会变红）。
+// ② `build\windows\x64\runner\Release\sourin_core.dll` 存在时（要先构建 Windows）
+//    跑在位态契约。
 // ② 跨页闭环那条**会碰公网**（iptv 源要拉 m3u）⇒ 用**条件断言**：
 //    只有"点击前"确实读到了该源的分组才断言，否则记「没测到」。
 //    ⇒ 离线时它记「没测到」而**不是变红**，不给默认套件引入假红（铁律 78）。
@@ -85,11 +94,14 @@ import 'dart:ffi' show DynamicLibrary;
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 
 import 'package:sourin_spike/core/sourin_api.dart';
 import 'package:sourin_spike/ui/settings_page.dart';
+// ★ T10（task-35）：「关于」行的双态契约需要 SettingsEntryRow（与 navstate 同一契约）
+import 'package:sourin_spike/ui/widgets/settings_kit.dart';
+import 'package:sourin_spike/ui/app_scaffold.dart';
+import 'package:sourin_spike/ui/app_theme.dart';
 
 const String kTag = '[T53S]';
 void log(String s) => debugPrint('$kTag $s');
@@ -104,8 +116,19 @@ const Timeout kTimeout = Timeout(Duration(minutes: 5));
 /// 交付件里那颗 DLL（`lib/core/ffi.dart:169` 只认**裸名**，所以要我们自己载）
 const String _dllRel = r'build\windows\x64\runner\Release\sourin_core.dll';
 
-/// ★ 环境前提：DLL 在不在。不在就**跳过**（不是失败）。
+/// ★★★ T10（task-35）2026-10-10 改：DLL 在不在 = **环境判别器**，不再是跳过开关
+///
+/// ```text
+/// 旧版：缺件 ⇒ `skip:` ⇒ CI（测试步骤跑在构建之前）整个文件只打印
+///       `+0 ~2: All tests skipped.` 并且 **exit 0** —— 假绿。
+/// 新版：缺件态照样真渲染、真断言（见 A/B 组内的双态分支）。
+/// ```
 final bool _dllReady = File(_dllRel).existsSync();
+
+/// ★ T10：「关于」行的**降级文案**期望值 —— 独立写一份字面量，
+///   与产品常量 `SettingsPageState.kCoreVersionFallbackLabel` 交叉校验
+///   （两边都改才会绿 ⇒ 改文案必须同时改门禁，同 navstate 的契约）。
+const String kCoreVersionFallbackLabelExpected = '核心未加载 · 架构与设备信息';
 
 /// ★★★ 把 DLL 按**绝对路径**载进本进程 ⇒ 之后 `ffi.dart` 的裸名 open 命中它
 ///
@@ -124,11 +147,11 @@ void _preloadCoreDll() {
 ///   `InkWell` / `TextButton` 都要它（t53p 踩过：缺了会抛
 ///   `No Material widget found` ⇒ 建树中断 ⇒ 布局成垃圾 ⇒ 读数全废）。
 Widget _host(Widget child, {Size size = const Size(1280, 900)}) {
-  final theme = FTheme.neutral.light.desktop;
+  final theme = AppTheme.themeFor(Brightness.light);
   return MaterialApp(
     debugShowCheckedModeBanner: false,
-    theme: theme.toApproximateMaterialTheme(),
-    builder: (context, c) => FTheme(data: theme, child: c ?? const SizedBox()),
+    theme: theme,
+    builder: (context, c) => AppThemeHost(data: theme, child: c ?? const SizedBox()),
     home: Builder(
       builder: (context) {
         final mq = MediaQuery.of(context);
@@ -308,6 +331,25 @@ Future<String> _channelsByProvider(WidgetTester tester) async {
 
 /// 走一遍「一级页 → 点 JS 插件 → 点直播源 tab」的导航（两处测试共用）
 Future<bool> _navToLiveTab(WidgetTester tester, String tag) async {
+  /*
+   * ★★ ★ T10（task-35）：一级页是 `ListView`（**惰建**），「JS 插件」这一行
+   *   在 1280×900 视口下**不一定被建出来** —— 缺件态下页面更短
+   *   （没有插件块）、在位态更长。两种情况都要先把列表
+   *   **回到顶部**再往前扫（与 `task18_entry_test.dart:_scrollTo` 同一手法）。
+   *   不做这一步就会得到「入口没找到」这种**仪器问题式假红**。
+   */
+  if (_count(find.text('JS 插件')) == 0) {
+    try {
+      final pos = tester
+          .state<ScrollableState>(find.byType(Scrollable).first)
+          .position;
+      pos.jumpTo(pos.minScrollExtent);
+      await tester.pump();
+      log('$tag| ★ 入口未建出 ⇒ 跳回顶 offset=${pos.minScrollExtent}');
+    } catch (e) {
+      log('$tag| ★ 跳回顶失败：${e.toString().split(String.fromCharCode(10)).first}');
+    }
+  }
   final entry = _safe(find.text('JS 插件'));
   if (entry == null) {
     log('$tag| ★★ 一级页没找到「JS 插件」入口 ⇒ 后续读数全部无效');
@@ -345,13 +387,26 @@ Future<bool> _navToLiveTab(WidgetTester tester, String tag) async {
 void main() {
   final dataDir = Directory('.probe/t53s_data');
 
-  late List<ProviderManifest> liveBefore;
-  late List<ProviderManifest> allBefore;
+  // ★ T10：缺件态下 setUpAll 不采集 ⇒ 这两个不能是 `late`（读会抛
+  //   `LateInitializationError`）。空列表 = 「没有 live 源」的**真值**，
+  //   B 用例的 `liveBefore.isEmpty` 分支就是这么写的。
+  List<ProviderManifest> liveBefore = const <ProviderManifest>[];
+  List<ProviderManifest> allBefore = const <ProviderManifest>[];
 
   setUpAll(() async {
-    // ★ 环境前提不成立 ⇒ 直接返回（两个用例都带 `skip:`，不会真跑）
+    /*
+     * ★★★ T10（task-35）2026-10-10 改：DLL 不在 = **另一种被测环境**，不再跳过
+     *
+     * ```text
+     * 旧版：缺件 ⇒ setUpAll 直接 return + 两个用例 `skip: !_dllReady`
+     *       ⇒ CI 上只打印 `+0 ~2: All tests skipped.` 且 **exit 0**。
+     * 新版：这里只跳过**依赖 FFI 的前置采集**；
+     *       两个用例不再 skip，缺件态走各自的双态分支真断言。
+     * ```
+     */
     if (!_dllReady) {
-      log('★★ $_dllRel 不存在 ⇒ 跳过（先构建 Windows 版再跑本守卫）');
+      log('★★ T10 缺件态：$_dllRel 不存在 —— **不跳过**，只跳过 FFI 前置采集'
+          '；A/B 改跑缺件态契约。');
       return;
     }
 
@@ -423,7 +478,17 @@ void main() {
 
   testWidgets('A. 设置页 → JS 插件 → 直播源 tab → 点「停用」→ 读数真的变',
       (tester) async {
-    await tester.binding.setSurfaceSize(const Size(1280, 900));
+    /*
+     * ★★ ★ T10（task-35）：视口从 1280×900 改成 1444×3000
+     *
+     * 一级页是 `ListView`（惰建）：本用例要读的「关于」行是整页**最后一行**，
+     * 在 1280×900 下根本没被建出来（实测断言红在上一版：
+     * `Expected: <1> Actual: <0>`）—— 那是仪器问题，不是产品问题。
+     * `zz_cr_settings_8_navstate_test.dart:218-223` 已经踩过这个坑：
+     * 「1444×805 只建出 6 个 `SettingsEntryRow`，「关于」是第 9 行」。
+     * 1444×3000 下 9 行全建出来。
+     */
+    await tester.binding.setSurfaceSize(const Size(1444, 3000));
     addTearDown(() => tester.binding.setSurfaceSize(null));
 
     await tester.pumpWidget(_host(const SettingsPage()));
@@ -440,6 +505,57 @@ void main() {
         '${_count(find.byType(CircularProgressIndicator))}');
     log('A| 加载后 ListView = ${_count(find.byType(ListView))}');
     log('A| ErrorWidget = ${_count(find.byType(ErrorWidget))}');
+
+    /*
+     * ★★★ T10（task-35）2026-10-10 新增：**两种环境都真断言**的契约
+     *
+     * ```text
+     * 旧版：缺件 ⇒ `skip:` ⇒ CI 上这个文件一条断言都不跑（exit 0）。
+     * 新版：一级页真渲染是**两种环境共有**的契约 ——
+     *   缺件态下 `loadAll()` 里的 `listProviders()` 必抛
+     *   （`Failed to load dynamic library 'sourin_core.dll'）⇒ 进 `catch`
+     *   ⇒ `_providers` 保持 `[]`，但**页面不得崩**：
+     *   ★ `ErrorWidget` 必须是 0（整页不能因为缺核心而白屏）
+     *   ★ 「关于」行副标题必须是降级文案 `kCoreVersionFallbackLabel`
+     *     （`settings_page.dart:430-437` 的 `_probeCoreVersion()` 在 initState 里
+     *      catch 掉 `SourinApi.version` 的抛出 ⇒ 降级）
+     * ```
+     *
+     * ★ 为什么要先拿到 `SettingsEntryRow.subtitle`：与
+     *   `test/zz_cr_settings_8_navstate_test.dart:596-663` 同一条契约
+     *   （它已是成熟的两态门禁）—— 两边都改才会绿。
+     */
+    expect(_count(find.byType(ErrorWidget)), 0,
+        reason: 'A| ★★ 缺核心不能把整页弄成 ErrorWidget（白屏）');
+    expect(_count(find.byType(SettingsPage)), 1,
+        reason: 'A| 一级设置页必须真的在树上（否则下面的读数都是空转）');
+    expect(_count(find.text('关于')), 1,
+        reason: 'A| 一级页必须有「关于」入口行');
+    final aboutRow = find.ancestor(
+      of: find.text('关于'),
+      matching: find.byType(SettingsEntryRow),
+    ).first;
+    final aboutSubtitle = tester.widget<SettingsEntryRow>(aboutRow).subtitle;
+    log('A| 「关于」行副标题 = $aboutSubtitle');
+    expect(SettingsPageState.kCoreVersionFallbackLabel,
+        kCoreVersionFallbackLabelExpected,
+        reason: 'A| ★ 产品降级文案与门禁期望值不一致 —— 改文案必须同时改门禁');
+    if (!_dllReady) {
+      expect(aboutSubtitle, kCoreVersionFallbackLabelExpected,
+          reason: 'A| ★★ 缺件态：「关于」行必须**如实降级**成「核心未加载」文案');
+      expect(RegExp(r'\d+\.\d+').hasMatch(aboutSubtitle ?? ''), isFalse,
+          reason: 'A| ★★ 缺件态不许编一个版本号出来（没有读到就必须说没读到）');
+      expect(
+        find.descendant(
+          of: aboutRow,
+          matching: find.text(kCoreVersionFallbackLabelExpected),
+        ),
+        findsOneWidget,
+        reason: 'A| ★ 降级文案必须真的被画在那一行上');
+    } else {
+      expect(aboutSubtitle, isNot(kCoreVersionFallbackLabelExpected),
+          reason: 'A| ★★ 在位态：核心已加载，副标题不该是降级文案');
+    }
 
     if (!await _navToLiveTab(tester, 'A')) {
       await tester.pumpWidget(const SizedBox.shrink());
@@ -573,9 +689,13 @@ void main() {
     await tester.pump(const Duration(seconds: 5));
     _claim(tester, 'A|teardown');
   },
-      // ★ `skip:` 只收 `bool?`（不收原因字符串）—— 原因由 setUpAll 的日志交代
+      /*
+       * ★★★ T10（task-35）2026-10-10：这里原来还有 `skip: !_dllReady`。
+       * 删掉它 = 缺件态也会真跑 A 组（缺件态契约见 A 组内 `if (!_dllReady)`
+       * 分支）—— 旧版缺件时整个文件只打印 `+0 ~2: All tests skipped.` 且 exit 0。
+       */
       timeout: kTimeout,
-      skip: !_dllReady);
+      );
 
   // ═══════════════════════════════════════════════════════════════════
 
@@ -591,6 +711,32 @@ void main() {
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pump(const Duration(seconds: 5));
       return;
+    }
+
+    /*
+     * ★★★ T10（task-35）：缺件态也要真断言 —— 「直播源」这一页
+     *   的**空态三件套**完全不依赖 FFI：
+     *   `_liveTab()`（`settings_page.dart:2613-2678`）无条件渲染
+     *   `Text('直播源')` + `Text('$enabled/${live.length} 已启用')`，
+     *   `live.isEmpty` 时走空态分支。缺件态 `_providers` 保持 `[]`
+     *   ⇒ 必须读到 `0/0 已启用` + 空态文案。
+     *   这些在缺件态都是**真分支**（改数法/改文案会变红）。
+     */
+    final emptyState = _count(find.text('还没有支持直播的源'));
+    final readingB = _liveCount(tester);
+    log('B| 空态「还没有支持直播的源」命中 = $emptyState  '
+        '汇总读数 = ${readingB ?? "(none)"}');
+    expect(_count(find.text('直播源')), greaterThanOrEqualTo(1),
+        reason: 'B| ★ tab 内必须真的有「直播源」标题（否则下面的读数是空转）');
+    expect(readingB, isNotNull,
+        reason: 'B| ★ 必须读到 `N/M 已启用` —— 这条在缺件态也成立');
+    if (!_dllReady) {
+      expect(readingB!.raw, '0/0 已启用',
+          reason: 'B| ★★ 缺件态：核心没加载 ⇒ `_providers` 为空 ⇒ 必须是 0/0');
+      expect(readingB.total, 0, reason: 'B| 分母 = 直播源总数 = 0');
+      expect(readingB.enabled, 0, reason: 'B| 分子 = 已启用数 = 0');
+      expect(emptyState, 1,
+          reason: 'B| ★★ 缺件态必须走空态分支（不能画出没有的源）');
     }
 
     final before = _liveCount(tester);
@@ -620,7 +766,70 @@ void main() {
     await tester.pump(const Duration(seconds: 5));
     _claim(tester, 'B|teardown');
   },
-      // ★ 同 A：`skip:` 只收 `bool?`
+      // ★ 同 A：`skip: !_dllReady` 已删（T10）⇒ 缺件态也真跑 B 组。
       timeout: kTimeout,
-      skip: !_dllReady);
+      );
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+//  T10（task-35）两态门禁改造记录 —— 2026-10-10
+// ═══════════════════════════════════════════════════════════════════════
+//
+// # 改了什么（为什么必须改）
+// ```text
+// CI 的测试步骤跑在**构建之前** ⇒ `sourin_core.dll` 还不存在 ⇒ `_dllReady=false`
+// ⇒ 旧版本文件打印 `+0 ~2: All tests skipped.` 且 **exit 0** —— 门禁看着在跑，
+//   实际一条断言都没执行（假绿）。
+// 现在：`_dllReady` 只当**环境判别器**。两个环境都真渲染、真断言。
+// ```
+//
+// # 两态原始读数（同一台机器，只切 dll 在不在）
+// ```text
+// 在位态（dll 在）：    flutter test test/zz_t53s_settings_live_toggle_test.dart ⇒ 00:09 +2: All tests passed!  exit=0
+// 缺件态（改名 .hold）：同命令                                               ⇒ 00:09 +2: All tests passed!  exit=0
+// 缺件态关键读数：
+//   [T53S] A| 「关于」行副标题 = 核心未加载 · 架构与设备信息
+//   [T53S] A| 切之后空态「还没有支持直播的源」= 1
+//   [T53S] A| ★ 汇总读数 = 0/0 已启用 (enabled=0 total=0)
+//   [T53S] B| 空态「还没有支持直播的源」命中 = 1  汇总读数 = 0/0 已启用 (enabled=0 total=0)
+// 在位态关键读数：
+//   [T53S] A| 「关于」行副标题 = sourin-core 0.1.0 · 架构与设备信息
+//   [T53S] A| ★ 汇总读数 = 2/2 已启用 (enabled=2 total=2)
+// ```
+//
+// # 缺件态的新契约（都能红）
+// ```text
+// ① A 组：一级页「关于」行的 `subtitle` 必须 == 降级文案 `kCoreVersionFallbackLabel`
+//    （`settings_page.dart:430-437` 的 `_probeCoreVersion()` 在 initState catch
+//     `SourinApi.version` 的抛出 ⇒ 降级），且**不许出现版本号**（正则 \d+\.\d+）。
+//    在位态反向断言：`subtitle` 必须**不**是降级文案。
+// ② B 组：缺件态 `_providers` 为空 ⇒「直播源」页必须走空态分支：
+//    `0/0 已启用` + 「还没有支持直播的源」== 1。在位态同一条读 2/2（不断言具体数）。
+// ③ 两态公共：`ErrorWidget == 0`（缺核心不许白屏）+ `SettingsPage == 1` + tab 可达。
+// ```
+//
+// # 阳性对照（改产品代码 ⇒ 必红 ⇒ 逐字节还原）
+// ```text
+// | # | 变异点 | 冻结 sha16 → 还原后 | 红在哪行 | Expected/Actual |
+// |---|---|---|---|---|
+// | PC2 | `settings_page.dart:2657` 空态 Text 加 X | BD992F4F04B5A607 → 同 ✔ | :734 | 1 / 0 |
+// | PC3 | `settings_page.dart:2546` kCoreVersionFallbackLabel 加 X | BD992F4F04B5A607 → 同 ✔ | :540 | 核心未加载 · 架构与设备信息 / 核心未X加载 · … |
+// 两个变异都 exit=1，且还原后 `lib/ui/settings_page.dart` sha256[:16] = BD992F4F04B5A607
+// （与冻结值逐字节相同）。PC3 证明「产品常量 vs 门禁独立字面量」的交叉校验有效：
+// 只改产品侧会红，两边都改才会绿。
+// ```
+//
+// # 本文件仍然**测不到**的（诚实标注）
+// ```text
+// · A 组的「点「停用」按钮 ⇒ 读数真的变」这条**两态都测不到**：
+//   `_ProviderCard`（settings_page.dart:4697-4789 `_actions()`）只有 ↑↓/⟳/⚙ +
+//   一个 PopupMenuButton，**没有「停用」按钮**。HEAD 版本同样没有 ⇒ 不是回归，
+//   是这条契约缺 UI 入口。本文件如实记「没测到」而不是编一个假门禁。
+// · 缺件态下 `liveBefore` 恒为空 ⇒ 跨页闭环（getLiveChannels 分组消失）
+//   **缺件态没测到**；在位态它依赖公网 m3u（拉不到就记「没测到」，见铁律 78）。
+// · 「关于」行只在**缺件态**断言了降级文案、在**在位态**断言了"不是降级文案"；
+//   在位态**没有**断言副标题等于真实版本号（版本号由 Rust 决定，钉死会变成
+//   "改版本就红"）。
+// · B 组的 expect(after.raw, before.raw) 两态都跑，但缺件态下 before/after 恒为
+//   `0/0 已启用` ⇒ 它对"状态自己变"这件事在缺件态**分辨力弱**（本来就没什么可变）。
+// ```

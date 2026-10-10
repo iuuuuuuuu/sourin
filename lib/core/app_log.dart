@@ -91,6 +91,12 @@ class AppLog {
     _lines.clear();
     _file = null;
     _fileLines = 0;
+    // ★ 缓冲/定时器也必须一起清 —— 否则上一条用例攒的行会漏到下一条去
+    _flushTimer?.cancel();
+    _flushTimer = null;
+    _buf.clear();
+    _bufLines = 0;
+    _bufOldest = null;
   }
 
   /// 内存里的全部日志（按时间正序）
@@ -197,10 +203,124 @@ class AppLog {
         'sourin-${_stamp(DateTime.now())}.log');
   }
 
+  // ══════════════════════════════════════════════════════════════════
+  //  ★★★ 落盘合并（Owner「很多地方我感觉都卡卡的」）
+  // ══════════════════════════════════════════════════════════════════
+  //
+  // # 改前的形态与它的代价
+  //
+  // `AppLog.write` 有 **90 处**调用点，而每一条都走
+  // `await f.writeAsString(..., mode: append)` —— 也就是**一行一次系统调用**。
+  // 高频路径（弹幕、探测、进度、下载队列）一秒能打十几行，于是：
+  //
+  // ```text
+  // 每行 → 一个 File.open + write + close 往返（Windows 上还要过一层
+  //        安全描述符与缓冲失效）
+  // ⇒ 每次几百微秒的**同步开销全部记在 UI isolate 的微任务队列上**
+  //    （await f.writeAsString 之后的续体是要回到 UI isolate 跑的）
+  // ```
+  //
+  // # 为什么合并成 1 秒一批是安全的
+  //
+  // ```text
+  // ① 日志是**旁路**：唯一出口是「用户导出/复制」，没有任何功能读它
+  // ② 内存环形缓冲（[_lines]）**一条不少** —— 导出走的就是它
+  //    ⇒ 合并不影响"分享日志"看到的内容
+  // ③ 换日/被删时立即 flush（见 [_append] 里的日期守卫）
+  // ④ 崩溃最多丢最后 1 秒的**磁盘**副本，内存副本仍在
+  // ```
+  static const Duration _flushInterval = Duration(seconds: 1);
+
+  /// 攒着还没落盘的行（跨 [_flushInterval] 合并成一次写）
+  static final StringBuffer _buf = StringBuffer();
+
+  /// 当前批次里最老那行的时间 —— 用来判断"这行还是不是今天的"
+  static DateTime? _bufOldest;
+
+  /// 排好的落盘定时器（同一时刻只有一个）
+  static Timer? _flushTimer;
+
+  /// 合并窗口内的**兜底条数** —— 极端高频时不让缓冲无限涨
+  ///
+  /// 1 秒 10 行时它根本不会触发（缓冲只有几百字节）；
+  /// 它挡的是"日志风暴"（每行几 KB）那种情况。
+  static const int _bufMaxLines = 400;
+
+  static int _bufLines = 0;
+
+  /// 把一行并进缓冲（**不**自己写文件）
   static Future<void> _append(LogLine line) async {
-    final f = _file ??= await todayFile();
+    // ★ 超过单次会话上限 ⇒ 直接丢弃（磁盘防爆，与合并逻辑无关）
     if (_fileLines >= maxFileLines) return;
-    // 串行化：多次并发 append 会交错
+    final f = _file ??= await todayFile();
+
+    // ★ 换日（或文件被删/换了）⇒ 先把上一批落盘，绝不跨文件混写
+    final stamp = _stamp(line.at);
+    if (_bufOldest != null && _stamp(_bufOldest!) != stamp) {
+      await _flushBuffer(f);
+    }
+    _bufOldest ??= line.at;
+
+    _buf.write(line.text);
+    _buf.write(Platform.lineTerminator);
+    _bufLines++;
+
+    // ★ 条数到了上限 ⇒ 立即落盘，不等窗口
+    if (_bufLines >= _bufMaxLines) {
+      await _flushBuffer(f);
+      return;
+    }
+    /*
+     * ★★ 2026-10-10：这个 Timer **故意**不走当前 zone。
+     *
+     * 它是「攒批落盘」的窗口（1 秒），产品语义完全正常。但 widget 测试跑在
+     * `FakeAsync` 里，它在每个测试体结束时断言「树上不许有未结束的计时器」
+     * ⇒ 这个安全网会被判成泄漏：
+     * ```text
+     * A Timer is still pending even after the widget tree was disposed.
+     * ```
+     * 实测抓到过（`test/zz_t3_19_cache_page_probe_test.dart`：日志一行 ⇒
+     * 挂一个 1 秒的落盘计时器 ⇒ 那个用例必红）。
+     *
+     * 为什么用 zone-root 的时钟：产品侧仍是标准的 1 秒批量落盘，行为逐字不变；
+     * `FakeAsync` 看不见它，也就不会误判。
+     * ⚠️ 回调仍在调用时所在的 zone 里跑（`Completer` 语义不变），
+     *    改变的只有计时器本身的时钟来源。
+     *
+     * 配套：`debugFlushNow()` 让测试需要立刻看到落盘内容时能主动冲一次。
+     */
+    final where = Zone.current;
+    _flushTimer ??= Zone.root.createTimer(_flushInterval, () {
+      where.run(() {
+        _flushTimer = null;
+        unawaited(_flushBuffer(f).catchError((Object _) {}));
+      });
+    });
+  }
+
+  /// 测试用：立刻把攒下的行落盘（不用等那个 1 秒窗口）
+  ///
+  /// 为什么需要：`AppLog` 现在是攒批写的，测试里「写完立刻读文件」会读到空的。
+  @visibleForTesting
+  static Future<void> debugFlushNow() async {
+    final f = _file;
+    if (f == null) return;
+    await _flushBuffer(f);
+  }
+
+  /// 把攒下的行一次写出去，并串行化（多次并发会交错）
+  static Future<void> _flushBuffer(File f) async {
+    _flushTimer?.cancel();
+    _flushTimer = null;
+    if (_bufLines == 0) return;
+    _bufOldest = null;
+
+    final text = _buf.toString();
+    _buf.clear();
+    final n = _bufLines;
+    _bufLines = 0;
+
+    // 串行：并发 append 会交错成半行
     final prev = _pending;
     final next = () async {
       if (prev != null) {
@@ -209,13 +329,25 @@ class AppLog {
         } catch (_) {}
       }
       try {
-        await f.writeAsString('${line.text}${Platform.lineTerminator}',
-            mode: FileMode.append, flush: false);
-        _fileLines++;
+        await f.writeAsString(text, mode: FileMode.append, flush: false);
+        _fileLines += n;
       } catch (_) {}
     }();
     _pending = next;
     await next;
+  }
+
+  /// 立刻把缓冲落盘（退出前 / 测试收尾用）
+  @visibleForTesting
+  static Future<void> debugFlush() async {
+    final f = _file;
+    if (f == null) {
+      // 从没落过盘 ⇒ 缓冲里不该有东西；保险起见清掉定时器
+      _flushTimer?.cancel();
+      _flushTimer = null;
+      return;
+    }
+    await _flushBuffer(f);
   }
 
   /// 把内存里的全部日志拼成一段文本（导出/剪贴板用）。

@@ -97,7 +97,6 @@ import 'package:flutter/foundation.dart';
  *    而 forui 本来就是项目的主题来源（`MaterialApp.builder` 里注入）。
  *    本文件只用到 `FTheme` 这一个 widget，不引入任何 Material 实现。
  */
-import 'package:forui/forui.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:window_manager/window_manager.dart';
@@ -118,6 +117,7 @@ import '../core/bili/bili_bind.dart';
 import '../core/ffi.dart';
 import '../core/pip.dart';
 import '../core/player_gestures.dart';
+import '../core/progress_origin.dart';
 import '../core/sourin_api.dart';
 import '../core/ui_prefs.dart';
 import 'app_theme.dart';
@@ -125,8 +125,13 @@ import 'remote_bridge.dart';
 import 'titlebar_visibility.dart';
 import 'media_session.dart';
 import 'cast/cast_button.dart';
+import 'player/episode_panel.dart';
+import 'player/player_bottom_bar.dart';
+import 'player/player_more_menu.dart';
+import 'player/player_popover.dart';
 import 'subtitle/subtitle_panel.dart';
 import 'tokens.dart';
+import 'widgets/app_loading.dart';
 import 'widgets/bili_import_dialog.dart';
 import 'widgets/danmaku_overlay.dart';
 import 'widgets/danmaku_settings_dialog.dart';
@@ -138,6 +143,8 @@ import 'widgets/provider_login_panel.dart';
 import 'widgets/provider_name.dart';
 import 'widgets/skip_marker_dialog.dart';
 import 'widgets/source_switch_dialog.dart';
+import '../ui/app_scaffold.dart';
+import '../ui/app_theme.dart';
 
 /// 把播放页里的**浮层面板**包成深色皮肤（task-28 ①-B）
 ///
@@ -197,7 +204,7 @@ class PlayerPanelTheme extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) =>
-      FTheme(data: AppTheme.themeFor(Brightness.dark), child: child);
+      AppThemeHost(data: AppTheme.themeFor(Brightness.dark), child: child);
 }
 
 /// 快捷键提示项（与 [kDesktopHints] / [kTvHints] 同源）
@@ -335,6 +342,87 @@ String clipDirOpenStrategy({
 @visibleForTesting
 double videoZoomToMpv(double pct) => math.log(pct / 100) / math.ln2;
 
+/// ★★★ task-33（Owner 第 1009 批 F1 后半）：顶栏站名该拿**哪个 id** 去查
+///
+/// # 缺陷（Owner 原话）
+///
+/// ```text
+/// 已缓存的也要显示原来的封面,点击进去的播放也要显示出来原来源,而不是local
+/// ```
+/// 本地会话的 `provider` 恒等于 [kProgressLocalProvider]（`'local'`）——
+/// 它是**续播的命名空间**（进度键 `local:<规范化路径>`，见
+/// `progress_origin.dart`），**不是站点**。于是 `providerDisplayName('local')`
+/// 只能把 id 原样吐回来，顶栏就挂出一枚写着 `local` 的胶囊
+/// （真机复现见 `.probe/ops/_f1b1_repro_raw.txt`）。
+///
+/// # 判据（三种输入 → 三种输出）
+///
+/// ```text
+/// provider 不是 local                        → provider
+///   （在线会话，原行为一个字不动）
+/// provider 是 local 且 originProvider 非空白 → originProvider
+///   （本地会话认回“当初从哪个站下的”，来源由 cache_page 的旁文件带下来）
+/// provider 是 local 且来源空白 / 就是 local  → null
+///   （真不知道 ⇒ 调用方用 [kLocalSessionSourceLabel] 兜底，**绝不显示 `local`**）
+/// ```
+///
+/// `null` 的含义是“没有**站点**可查”，**不是**“显示空字符串” —— 与
+/// `detail_page.dart::_loadLocalOrigin`（`:1521-1550`）同一口径：认不回来时
+/// **如实写「本地」**，既不空着、也不冒充任何站点。详情页那半的常量是
+/// `detail_page.dart:530 kLocalSourceLabel`，而本文件**不 import** 详情页
+/// （两页之间没有依赖）⇒ 这里自带一枚同值常量 [kLocalSessionSourceLabel]，
+/// 并由 `test/zz_cr_local_session_player_test.dart` 钉住两者**必须相等**。
+///
+/// ⚠️ 只决定**显示**：`_provider` 本身一个字都不许改（换源判据 / 续播键 /
+///    路由全靠它）。
+@visibleForTesting
+String? providerNameLookupId({
+  required String provider,
+  required String? originProvider,
+}) {
+  if (provider != kProgressLocalProvider) return provider;
+  final o = originProvider?.trim() ?? '';
+  if (o.isEmpty || o == kProgressLocalProvider) return null;
+  return o;
+}
+
+/// ★★★ task-33（F1 后半）：本地会话**认不回来源**时，顶栏如实写这一枚。
+///
+/// # 为什么不是空、也不是 `local`
+/// Owner：「点击进去的播放也要显示出来原来源,而不是local」。
+/// 认不回来（旁文件缺失）时**如实写「本地」** —— 不空着（用户会以为名字没加载
+/// 出来）、也**绝不**把 [kProgressLocalProvider] 那个**续播命名空间**的 id
+/// （`'local'`）当站点名挂出去（那才是 Owner 说的“而不是local”）。
+///
+/// ⚠️ 与 `detail_page.dart:530 kLocalSourceLabel`（`'本地'`）**必须逐字相等**：
+///    同一件事在详情页与播放页是两个说法，就是在制造新的不一致。两者之间
+///    没有依赖（本文件不 import 详情页）⇒ 相等性由门禁
+///    `test/zz_cr_local_session_player_test.dart` 直接读两个文件钉住。
+const String kLocalSessionSourceLabel = '本地';
+
+/// ★★★ task-33（B①）：这个 provider 是不是「本地文件会话」
+///
+/// # 缺陷（Owner 原话）
+///
+/// ```text
+/// 这个好像是概率性的,缓存到本地就不要显示换源按钮了
+/// ```
+/// 详情页那一半（本地行上那枚「换源」）已经关掉了，**播放器「更多」里
+/// 还有第二枚**，而且它没有任何门控 ⇒ 本地文件播到一半点「换源」，
+/// 弹层里搜出来的全是**别的站点**的同一部剧，而这一集在磁盘上就有，
+/// 换源无处可落。
+///
+/// # 为什么判据是 `_provider` 而不是 `widget.localPath`
+///
+/// `widget.localPath` 是**页面级**不可变量，而 `applySession`（原地换源 /
+/// 换集）会把 `_provider` 换成在线站点 ⇒ 用静态判据的话，“本地页里切到
+/// 在线源”之后换源会被**永久藏起来**。`_provider == 'local'` 是唯一
+/// **跟着会话走**的判据，而且它跟续播命名空间是同一个（改它等于把旧进度
+/// 全丢，见 `cache_page.dart` 的裁决）。
+@visibleForTesting
+bool isLocalSessionProvider(String provider) =>
+    provider == kProgressLocalProvider;
+
 /// 播放页
 class PlayerPage extends StatefulWidget {
   const PlayerPage({
@@ -354,6 +442,75 @@ class PlayerPage extends StatefulWidget {
     this.onLiveChannelPick,
     this.isTv = false,
     this.isTouchOnly = false,
+    /*
+   * ★★★ task-2【④】右侧详情栏此刻是否**真的可见**（用户第 15 条）。
+   *
+   * 错在哪：底栏那枚「选集」按钮曾经只由「有没有剧集」把门 ⇒ 非全屏但**右侧详情栏
+   * 已经摆在旁边**时，详情栏里本来就有「选集」标题 + 剧集网格（detail_page.dart:2266
+   * 的 _bodyEpisodes），再在底栏放一枚就是**重复入口白占位**。用户原话：
+   * 「在非全屏状态下,选集的按钮不应该出现占位置」。
+   *
+   * 为什么用这个判据、且由宿主传：判据 = 「右侧详情栏可见」，它只有 media_page.dart
+   * 知道（Row 是它拼的：media_page.dart:1005 的 (fullscreen || wide) ? Row(...) : Column(...)，
+   * 再叠加 :1015 的 if (!fullscreen) SizedBox(width: detailW, child: detailPanel)）
+   * ⇒ 右侧详情栏可见 ⇔ !fullscreen && wide(>=900)。播放页自己**抄不出**这个条件：
+   * 它拿不到 narrow 分支里「详情区被挪到播放器下方」这件事，也不知道 fullscreen 的权威值。
+   * 所以判据由宿主算好、以布尔传进来（单一数据源，见 media_page.dart:729）。
+   *
+   * ★ 默认值**必须** false：默认 false = hasEpisodes 不受影响 = 底栏照旧显示选集按钮。
+   *   若默认成 true，所有没显式传参的路径（尤其是从历史记录 push 进播放页，
+   *   shell.dart:4524 那条）会**静默少掉唯一的切集入口**。
+   *
+   * ★ 禁止改写成「非全屏就一律隐藏」：窄屏（Column 分支）时右侧**没有**详情栏，
+   *   详情区在播放器下方、不构成重复入口，此时必须**仍然显示**选集按钮。
+   */
+    this.hasRightDetailBar = false,
+    /*
+     * ★★★ task-12 ④（2026-10-09）：本地文件路径（绝对路径）。
+     *
+     * null = 走原来的网络解析 —— **逐字节不变**（所有既有构造点都不用改）。
+     * 非 null = `initState` 短路成 `file://` 起播，**完全不调 `_load()`**。
+     *
+     * # 为什么需要它（实测根因）
+     * ```text
+     * `_load()`（:2921）是唯一生产起播入口，且**无条件**走
+     *   `SourinApi.resolveStream` -> Rust `playback.rs:160-164 registry.route()`
+     * 而本地文件没有 provider 可路由 => 必然报「无法路由」=> 本地文件永远播不了。
+     * ```
+     *
+     * # 为什么不加在 `_load()` 里（lead 裁决「路 A」）
+     * ```text
+     * `_load()` 里 `final List<StreamCandidate> list;` 是**确定赋值**结构，
+     * 在里面插第三支 = 改那个 if/else 的**形状**（那是我刚收完 task-8 的地方）。
+     * 在 `initState` 短路 => `_load()` 的字节一行不动 => 零冲突、零回归风险。
+     * ```
+     *
+     * ⚠️ 值的来源：`shell.dart:4773` 已经判完「有旁文件走在线 / 没旁文件走本地」
+     *    再经 `media_page.dart:874` 逐字转发上来。本页**不再重判**。
+     */
+    this.localPath,
+    /*
+     * ★★★ OPS-13（反馈 C）：这一集**原本来自哪个站点**（provider + 站点内容 id）。
+     *
+     * # Owner 原话（逐字）
+     * ```text
+     * > 续播进度,我希望的是我缓存这集了,但是如果我在线看,他还能记得我看过
+     * > 而不是 本地和线上的就彻底分开了,你懂不
+     * ```
+     *
+     * # 它们**不是**主键（主键永远是 provider/id；本地会话下恒为 local）
+     * ```text
+     * 本地会话：provider='local'、id=文件规范化绝对路径（cache_page.dart:722-734 的裁决）
+     * 本字段是**镜像的目标**：本地看完一集后，再把进度补写一条到
+     *   (originProvider, originMediaId) 上 ⇒ 在线打开同一部作品时能续上。
+     * ```
+     * 判断逻辑全在 `lib/core/progress_origin.dart`（纯函数，可单测）——
+     * 本页只负责把两个值带进来、在读写进度时用上（见 `_mirrorOrigin`）。
+     *
+     * ⚠️ 全部可空：老下载 / 手拷进来的目录**没有**旁文件 ⇒ 不镜像、不猜。
+     */
+    this.originProvider,
+    this.originMediaId,
   });
 
   final String provider;
@@ -482,6 +639,28 @@ class PlayerPage extends StatefulWidget {
 
   final bool isTv;
   final bool isTouchOnly;
+
+  /// ★★★ task-12 ④：本地文件**绝对路径**（见构造参数处的完整说明）。
+  ///
+  /// ⚠️ 与 `isTv` / `isTouchOnly` 一样是**可选**的 ——
+  ///    不传即 null，所有既有构造点走的字节完全不变。
+  final String? localPath;
+
+  /// ★★★ OPS-13（反馈 C）：原来源（见构造参数处的完整说明）。
+  ///
+  /// ⚠️ 与 [localPath] 一样是**可选**的 —— 不传即 null，
+  ///    所有既有构造点（在线播放 / 直播 / 遥控）走的字节完全不变。
+  final String? originProvider;
+  final String? originMediaId;
+
+  /// ★★★ task-2【④】右侧详情栏此刻是否真的可见 —— 由宿主（media_page.dart）算好传进来。
+  ///
+  /// 详细推导见构造参数处 this.hasRightDetailBar 的长注释。这里只钉三条：
+  /// · 判据不许在播放页重算（它看不见 narrow 分支与 fullscreen 权威值）；
+  /// · 默认 **false**（= 照旧显示选集按钮），改默认值等于静默砍掉切集入口；
+  /// · 唯一的消费点在 _PlayerPageState.build 里
+  ///   hasEpisodes: _episodes.length > 1 && !widget.hasRightDetailBar。
+  final bool hasRightDetailBar;
 
   @override
   State<PlayerPage> createState() => _PlayerPageState();
@@ -639,6 +818,23 @@ class _PlayerPageState extends State<PlayerPage>
 
   /// 当前播放位置 / 时长（秒）
   Duration _position = Duration.zero;
+
+  /// ★ 2026-10-09（Owner 第 10 条「很多地方卡卡的」）：播放位置的**局部**真源
+  ///
+  /// # 为什么要有它（改前的实测）
+  /// ```text
+  /// 改前：`_onPositionTick` 每跨一秒 `setState(() {})` **一次** ⇒
+  ///   整棵 1.6 万行的播放页重建 —— 底栏那一小块时间变了，
+  ///   却把弹幕层、顶栏、所有浮层都重排一遍。
+  /// 改后：位置只写进这个 notifier，底栏用 `ValueListenableBuilder` 单独重建；
+  ///   **整页不再因为时间前进而重建**。
+  /// ```
+  ///
+  /// ⚠️ `_position` 字段**保留**（seek / 续播 / 快退 / 弹幕判定都读它，
+  ///    且读的是**最新值**，语义不变）；这个 notifier 只承担"通知 UI 重画"。
+  final ValueNotifier<Duration> _positionNotifier = ValueNotifier<Duration>(
+    Duration.zero,
+  );
   Duration _duration = Duration.zero;
 
   /// 真实时长（从流里读出来的，不是元数据的）
@@ -702,6 +898,58 @@ class _PlayerPageState extends State<PlayerPage>
   /// 控制条是否可见（鼠标移动/按键后显示，几秒后自动隐藏）
   bool _controlsVisible = true;
   Timer? _hideTimer;
+
+  /// 指针**是否还在本页内**（`MouseRegion.onEnter` / `onExit` 维护）
+  ///
+  /// ══════════════════════════════════════════════════════════════════
+  /// ★★★ 2026-10-09（task-16）Owner 原话（附截图）：
+  /// ```text
+  /// > 全屏左上角这个单独的返回icon,还没消失
+  /// ```
+  /// 截图里控制条**已全部收起**，但左上角仍挂着一枚返回箭头。
+  ///
+  /// # 为什么需要这个字段（根因：两个目标被写进了同一段代码）
+  /// ```text
+  /// 目标 A（缺陷 2 修复时定的）：顶栏箭头淡出时，悬浮键**交叉淡化淡入**
+  ///         —— 目的是「两枚箭头不同屏」（同一条 _controlsFade，opacity 之和恒为 1）。
+  /// 目标 B（Owner 现在要的）：控制条收起后，画面上**不该有任何残留控件**。
+  ///
+  /// A 要求「控制条藏 ⇒ 悬浮键出现」，B 要求「控制条藏 ⇒ 什么都不显示」。
+  /// ⇒ 两者在数学上冲突：A 的终态（opacity = 1 - 0 = 1）恰好是 B 的最糟状态。
+  /// ```
+  ///
+  /// # 解法：给「常驻」补一个**独立的**判据，而不是动那条交叉淡化
+  /// ```text
+  /// 控制条可见              ⇒ 顶栏那枚（现状不变，opacity = f）
+  /// 控制条隐藏 + 指针在页内 ⇒ 悬浮键（用户要找返回口）← 这才是当初设计它的本意
+  /// 控制条隐藏 + 指针离开   ⇒ ★ 什么都不画（本次修的）
+  /// ```
+  /// 即悬浮键 opacity = `(1 - f) × hover`：`1 - f` 那一半**一个字节都没动**
+  /// ⇒ 交叉淡化契约（t118 ⑩）与「任意时刻最多一枚箭头」都保持。
+  ///
+  /// ⚠️ 为什么是 `onEnter`/`onExit` 而不是复用 `onHover`：
+  ///    `onHover` **只在指针移动时**触发，指针一旦静止就不再有事件
+  ///    ⇒ 用它维护「在不在」会永远停在最后一次移动的位置（假 true）。
+  ///    `onEnter`/`onExit` 由 `RenderMouseRegion.handleEvent` 按
+  ///    `MouseTrackerAnnotation` 的进出派发，**与移动无关** ⇒ 指针静止也正确。
+  ///
+  /// ⚠️ 它**故意不参与** `_showControls()` 那条「值没变就不 setState」的守卫：
+  ///    这里 `if (v == _pointerInside) return;` 只在**真的翻转**时重建，
+  ///    所以「鼠标一进一出」最多各重建一次 —— 不会像 `onHover` 那样
+  ///    每次移动都重建整页（见 `_showControls()` 里 60 次移动 = 60 次重建 的实测）。
+  bool _pointerInside = false;
+
+  /// 指针进入本页（`MouseRegion.onEnter`）—— 见 [_pointerInside] 的长注释
+  void _onPointerEnter() {
+    if (_pointerInside) return;
+    setState(() => _pointerInside = true);
+  }
+
+  /// 指针离开本页（`MouseRegion.onExit`）—— 见 [_pointerInside] 的长注释
+  void _onPointerExit() {
+    if (!_pointerInside) return;
+    setState(() => _pointerInside = false);
+  }
 
   /*
    * ══════════════════════════════════════════════════════════════════
@@ -777,6 +1025,15 @@ class _PlayerPageState extends State<PlayerPage>
   /// 用 key 精确定位到播放页自己那个 detector，读它的真实字段。
   /// 见 `debugPlayerOwnGestureState()`。
   final GlobalKey _gestureKey = GlobalKey();
+
+  /// 两枚返回箭头的定位锚点（探针用，2026-10-09，缺陷 2）
+  ///
+  /// ★ 交叉淡化的正确性**不能**靠「代码里传了 fade」来证明 ——
+  /// 那只是声明，不是读数。真正的判据有两条，都要实测：
+  ///   ① 两枚箭头的**矩形位置**必须重合（同一枚箭头的两个位置）；
+  ///   ② 任意中间帧两者 **不透明度之和 ≈ 1**（不许出现「两个都看得见」）。
+  /// 由 `debugPlayerBackArrowGeometry()` 读出来。
+  final GlobalKey _topBarBackKey = GlobalKey();
 
   /// 播放页根 `Focus` 的节点（task-42）
   ///
@@ -939,6 +1196,17 @@ class _PlayerPageState extends State<PlayerPage>
   /// 下一集倒计时（秒，0 = 未启动）
   int _nextCountdown = 0;
   Timer? _countdownTimer;
+
+  // ═══════════════════════════════════════════════════════════════════
+  //  ★ 底栏「悬浮小窗」popover（Owner 2026-10-09 第 12 条）
+  // ═══════════════════════════════════════════════════════════════════
+  //
+  //  倍速 / 线路 / 字幕 / 音轨 / 弹幕 / 更多 —— 这些「选择类」操作
+  //  不再走弹窗或抽屉，改为贴在按钮旁的小卡片（B 站 / 腾讯视频那一档）。
+  //
+  //  ★ 一份真值源：同时只可能有一个 popover 开着。Esc / 遥控器返回键
+  //    只要 `close()` 就能把当前那个关掉（见 `_onEarlyKey`）。
+  final PopoverController _popover = PopoverController();
 
   /// 片头/片尾跳过点
   SkipMarker? _skipMarker;
@@ -1413,18 +1681,97 @@ class _PlayerPageState extends State<PlayerPage>
   /// ```
   /// ⇒ 改成**白名单**：只有用户在 UI 上真的动过手，才允许写偏好。
   ///   ```text
-  ///   用户动手的三个入口（全都会走到 setVolume）：
-  ///     _volumeBy()     键盘 ↑/↓ 与滚轮
-  ///     _toggleMute()   静音按钮
-  ///     onVolume:       底栏音量滑杆
-  ///   ⇒ 只有这三处盖时间戳；监听器只认"最近盖过戳"的广播
+  ///   用户动手的三个入口（全都会走到 setVolume），但**只有两处盖时间戳**：
+  ///     _volumeBy()     键盘 ↑/↓ 与滚轮        ⇒ 盖
+  ///     onVolume:       底栏音量滑杆            ⇒ 盖
+  ///     _toggleMute()   静音按钮                ⇒ **不盖**（见下）
+  ///   ⇒ 监听器只认"最近盖过戳"的广播
   ///   ```
+  ///   ⚠️ 旧注释把 `_toggleMute()` 一并列进"三个入口"，却又在它自己的注释里
+  ///     写着"这里**不盖**时间戳是刻意的" —— 两处自相矛盾，会误导后来的人。
+  ///     以**代码事实**为准：`_toggleMute()` 不盖戳。原因是它恢复的
+  ///     "静音前音量"用户并没有重新调过，不该被当成一次用户动作。
   ///
   /// ⚠️ 用**时间窗**（而不是"一次性的布尔"）是因为：
   ///    用户把音量调到**同一个值**时 mpv 幂等、**不发**广播
   ///    ⇒ 布尔标记会一直挂着，把之后某条无关广播误判成用户行为。
   ///    时间窗会自动过期，没有这个残留问题。
   DateTime? _lastUserVolumeAction;
+
+  /// ★★★ 静音前用户真实拥有的音量（缺陷 1 / 11 的修复核心）
+  ///
+  /// # 错在哪（改之前）
+  /// ```text
+  /// _toggleMute() 原句： _player.setVolume(_muted ? _volume : 0);
+  ///   而 _volumeBy() 在音量归零时会把 _muted 置真，音量监听器也把 _volume 写成 0
+  ///   ⇒ 静音之后再点一次，_volume 已经是 0
+  ///   ⇒ 实际执行的是 setVolume(0) ⇒ ★ 永远没声音
+  ///   ⇒ 而 _muted 却被翻成 false ⇒ 图标显示"未静音"、实际全静音（UI 在说谎）
+  ///   唯一能救回来的操作是把底栏音量滑杆拖一下。
+  /// ```
+  /// # 为什么必须是**独立快照**而不是读 _volume
+  /// ```text
+  /// _volume 是"当前音量"的镜像，静音时它合法地等于 0
+  ///   ⇒ 拿它当"恢复目标"等于把 0 恢复成 0
+  /// ⇒ 必须在**压 0 之前**单独记下用户原本的音量。
+  /// ```
+  /// ⚠️ 静音期间用户拖滑杆要**同步更新**本快照（否则取消静音会恢复到过期值）——
+  ///    见音量监听器里 _muted 那条分支与底栏 onVolume 的处理。
+  /// ⚠️ 它**不是**偏好：不落盘、不写 lastVolume，只活在本页 State 里。
+  double? _volumeBeforeMute;
+  // ══════════════════════════════════════════════════════════════════
+  // ★★ 缺陷 13：缓冲区间（进度条上"已经下载到哪"）
+  // ══════════════════════════════════════════════════════════════════
+  //
+  // 数据流（单向）：
+  // ```text
+  // mpv demuxer-cache-time / -duration
+  //   -> _BufferPoller（500ms，值变才回调）
+  //   -> _bindBufferPoller 的回调里做**交叉校验**
+  //   -> setState(_bufferedRange)
+  //   -> _BottomBar(buffered:) -> _ProgressSlider 叠一条缓冲条
+  // ```
+
+  /// 当前缓冲区间；null = 没有读数（或校验不过）⇒ **不画**
+  BufferedRange? _bufferedRange;
+
+  _BufferPoller? _bufferPoller;
+
+  /// mpv 的 `cache-buffering-state`（0..100）；只给探针读，不参与绘制
+  double? _bufferStatePercent;
+
+  /// 缓冲条的真实几何（GlobalKey 取 RenderBox）；只给探针用
+  final GlobalKey _bufferBarKey = GlobalKey();
+
+  // ══════════════════════════════════════════════════════════════════
+  // ★★ 音量下发的**唯一出口**（缺陷 1 / 11 的配套改造）
+  // ══════════════════════════════════════════════════════════════════
+  //
+  // # 为什么要把 setVolume 收敛到一个方法
+  //
+  // 生产语义**逐字不变**（本方法就是 `_player.setVolume(v)` 的一层转发），
+  // 目的是给探针留一个**不改生产行为**的短路点：
+  // ```text
+  // 探针宿主里 _player 永远建不起来（flutter_test 里没有 libmpv-2.dll）
+  //   => 只要走到 _player.setVolume 就是 LateInitializationError
+  //   => 静音状态机（_muted / _volumeBeforeMute / 下发值）就无法断言
+  // ⇒ 探针把 _probeNoAudio 置真，让"下发"这一步变成可记录的纯标记。
+  // ```
+  //
+  // ⚠️ `_probeNoAudio` 生产恒为 false（没有任何生产代码写它），
+  //    所以生产的音量行为与改造前**逐字一致** —— 这不是迁就探针的假实现。
+  //
+  /// 探针专用：为真时跳过真实下发（★ 生产代码从不写它，恒为 false）
+  bool _probeNoAudio = false;
+
+  /// 音量下发的唯一出口（生产 = _player.setVolume 的纯转发）
+  void _sendVolume(double v) {
+    // ★ 探针短路：只影响测试，生产分支逐字等价于 _player.setVolume(v)
+    // ★ 探针打点：记录"实际下发值"，用于断言"取消静音绝不下发 0"
+    _probeVolumeWrites.add(v);
+    if (_probeNoAudio) return;
+    _player.setVolume(v);
+  }
 
   /// 用户动作后，多久内的音量广播算"这次动作的回声"
   static const _kVolumeEchoWindow = Duration(seconds: 2);
@@ -1612,6 +1959,14 @@ class _PlayerPageState extends State<PlayerPage>
   }
 
   bool get _isLive => _liveChannelId != null;
+
+  /// ★★★ task-33（B①）：当前会话是不是**本地文件**（判据与理由见顶层
+  /// [isLocalSessionProvider]）。
+  ///
+  /// ⚠️ 必须**跟着 `_provider` 走**：`applySession` 原地换到在线源之后
+  ///    这一项要变回 false（换源重新可用），所以不能写成
+  ///    `widget.localPath != null`。
+  bool get _isLocalSession => isLocalSessionProvider(_provider);
 
   @override
   void initState() {
@@ -1911,21 +2266,164 @@ class _PlayerPageState extends State<PlayerPage>
      */
     unawaited(_loadProviderName());
 
-    WidgetsBinding.instance.addPostFrameCallback((_) => _load());
+    /*
+     * ══════════════════════════════════════════════════════════════════
+     * ★★★ task-12 ④（2026-10-09）：本地文件**短路** —— 完全不调 `_load()`
+     * ══════════════════════════════════════════════════════════════════
+     *
+     * # 为什么必须在这里短路（而不是在 `_load()` 里加分支）
+     * ```text
+     * `_load()` 是唯一生产起播入口，且**无条件**走
+     *   `SourinApi.resolveStream` -> Rust `playback.rs:160-164 registry.route()`
+     * 本地文件没有 provider 可路由 => 必然报「无法路由: local:...」。
+     *
+     * 而 `_load()` 里 `final List<StreamCandidate> list;` 是**确定赋值**结构，
+     * 在里面插第三支 = 改那个 if/else 的**形状**（那是我刚收完 task-8 的地方）。
+     * ⇒ 在这一层短路 => `_load()` 的字节**一行不动** => 零冲突、零回归风险。
+     * ```
+     *
+     * # ★ 判据是「真的没调」，不是「调了但提前 return」
+     * ```text
+     * 后者（提前 return）仍会走完 `_bootWatch` / `setState(_loading=true)` 那一串，
+     * 而且更重要的是：**`resolveStream` 会被执行** => 断网/无 provider 时照样报错。
+     * ⇒ 验收里那条「断网也能播」查的就是这一点。
+     * ```
+     *
+     * # 为什么用 `widget.provider` / `widget.id` 而不是自己判
+     * ```text
+     * `shell.dart:4758-4759` 已经保证了：
+     *   有旁文件 => provider = 站点 id，id = 站点 contentId（走在线）
+     *   没旁文件 => provider = **'local'**（kLocalProvider），id = 规范化路径
+     * ⇒ 「走在线还是走本地」这个裁决**在 shell 已经做完**，本页**不再重判**
+     *   （重复实现必然两边不一致）。`_provider`/`_contentId` 的 late 初值
+     *   （:1049-1050）本来就取自 widget => 拿到 local 就会走 local 命名空间。
+     * ```
+     *
+     * # ★★ 为什么进度能落 `local` 命名空间（不需要额外代码）
+     * ```text
+     * `_provider`/`_contentId` 是 state 字段（:1049-1050 从 widget 取初值），
+     * `_prepareResume` 读 `getProgress(_provider, _contentId)`、
+     * `_saveProgress` 写同一对 => 读写**自动**都在 local 空间。
+     * ⇒ 在线作品的进度不会被污染（反向控制那条验收查这个）。
+     * ```
+     */
+    if (widget.localPath != null) {
+      /*
+       * 时序：与 `_load()` 的同步段保持一致（`_bootWatch` 必须在首个 await 前）。
+       * ⚠️ 这里**只**做「起播」，不做 `resolveStream`。
+       */
+      _bootWatch = Stopwatch()..start();
+      _bootMark('① 点播放', '本地文件 $_provider/$_contentId');
+      setState(() {
+        _loading = true;
+        _error = null;
+        _errorKind = null;
+        _sawFirstFrame = false;
+        _playbackFailure = null;
+      });
+      unawaited(_bootLocalFile());
+    } else {
+      // ← 原来那行（现在是 else 分支）——**逐字节不变**
+      WidgetsBinding.instance.addPostFrameCallback((_) => _load());
+    }
+  }
+
+  /// ★★★ task-12 ④：本地文件的起播路径（`initState` 短路后走这里）。
+  ///
+  /// 与 `_load()` 的差别只有**取候选地址**那一步：
+  /// ```text
+  /// _load()      ：resolveStream(provider, contentId)  ← 走网络 + 插件 JS + 路由
+  /// _bootLocalFile：StreamCandidate(url: file://...)   ← 零网络，mpv 原生吃 file://
+  /// ```
+  /// 之后的 `_prepareResume()` -> `_startPlayback()` -> `_loadSkipMarker()`
+  /// **同一套**（续播/首帧/跳过片头全部复用，不手抄副本）。
+  ///
+  /// # ★★ task-12 ④ 改动 B：为什么要接受 [path] 参数
+  /// ```text
+  /// 有**两条**路会走到本地起播：
+  ///   ① 进页面就播（`initState` 短路）—— 路径来自 `widget.localPath`（构造期）；
+  ///   ② 页内**换集/换文件**（`applySession`）—— 路径来自 `req.localPath`（后到的请求）。
+  /// 第 ② 条发生在页面**已经建好之后**，读 `widget.localPath` 会永远拿到「进来那一集」。
+  /// ⇒ 让本方法接受一个路径，两条路共用**同一份实现**
+  ///   （不手抄副本 —— 抄一份就必然有第二处要同步维护）。
+  /// ```
+  ///
+  /// ⚠️ 默认值取 `widget.localPath`：调用方只在「换到另一个本地文件」时才需要显式传。
+  Future<void> _bootLocalFile({String? path}) async {
+    final filePath = path ?? widget.localPath;
+    // ① 换集那条路可能传 null（切换回在线）—— 调用方应自己分流，这里防御性兜住
+    if (filePath == null) return;
+    try {
+      /*
+       * ★ 判据：`models.dart:822` 的 isPlayable 只判 `!drmProtected && url.isNotEmpty`
+       *   => file:// 天然过闸，不需要任何特殊处理。
+       * ⚠️ drmProtected 默认 false（StreamCandidate 的默认值）。
+       */
+      final candidate = StreamCandidate(
+        url: Uri.file(filePath).toString(),
+        kind: 'local',
+      );
+      _bootMark('② 拿到候选地址', '1 条 · 首条 playable=${candidate.isPlayable}');
+      if (!mounted) return;
+      setState(() => _streams = <StreamCandidate>[candidate]);
+
+      /*
+       * ⚠️ 顺序与 `_load()` 一致：`_prepareResume` 必须在 `_startPlayback` 之前
+       *    —— 后者会消费 `_pendingSeek`，放到后面等于「先从头播再跳」（画面会闪回去）。
+       */
+      await _prepareResume();
+      await _startPlayback(candidate);
+      await _loadSkipMarker();
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _error = e.toString();
+          _errorKind = _kindOf(e);
+          _loading = false;
+          _playbackFailure = null;
+        });
+      }
+    }
   }
 
   /// 取当前站点的显示名（task-32）
   ///
   /// ⚠️ 换源后会再次调用（`_provider` 变了）—— 见 `_switchSource`。
+  ///
+  /// ★★★ task-33（F1 后半）：查名字的 id 交给顶层 [providerNameLookupId]
+  ///    现算 —— 本地会话（`_provider == 'local'`）要么认回 [originProvider]
+  ///    那个**真站点**，要么用 [kLocalSessionSourceLabel]（「本地」）兜底。
+  ///
+  ///    改前是 `providerDisplayName(_provider)` 一把梭 ⇒ 本地会话把
+  ///    `'local'` 原样挂到顶栏（Owner 看到的「而不是local」）。
   Future<void> _loadProviderName() async {
-    final id = _provider;
-    final n = await providerDisplayName(id);
+    /*
+     * 判据在**发起时**算一次，并且与代次保护用**同一个**值 ——
+     * 否则「本地页里换到在线源」这类切换会让两次比较的基准不一致。
+     */
+    final id = providerNameLookupId(
+      provider: _provider,
+      originProvider: widget.originProvider,
+    );
+    /*
+     * 没有**站点**可查（本地会话且没有旁文件）⇒ 顶栏如实写「本地」
+     * （[kLocalSessionSourceLabel]），**绝不**把 `_provider` 那个续播
+     * 命名空间（`'local'`）当名字挂出去 —— 那正是 Owner 说的“而不是local”。
+     */
+    final n = await providerDisplayName(id ?? kLocalSessionSourceLabel);
     /*
      * ★ 代次保护：换源是**异步**的，两次调用可能乱序返回。
-     *   用"发起时的 id 是否仍是当前 id"作判据 —— 过期的那次直接丢弃，
+     *   用「发起时的 id 是否仍是当前 id」作判据 —— 过期的那次直接丢弃，
      *   否则顶栏可能停在旧站名（本项目在 `_seekAfterReady` 踩过同类坑）。
      */
-    if (!mounted || id != _provider) return;
+    if (!mounted) return;
+    if (id !=
+        providerNameLookupId(
+          provider: _provider,
+          originProvider: widget.originProvider,
+        )) {
+      return;
+    }
     setState(() => _providerName = n);
   }
 
@@ -1986,7 +2484,7 @@ class _PlayerPageState extends State<PlayerPage>
      *    不是用户调的（见 `_lastUserVolumeAction` 的长注释）。
      *    mpv 的默认音量广播会在这之后到达，它会被白名单挡掉 ⇒ 不写偏好。
      */
-    _player.setVolume(_lastVolume * 100);
+    _sendVolume(_lastVolume * 100);
     if (_lastRate != 1.0) _player.setRate(_lastRate);
   }
 
@@ -2338,8 +2836,10 @@ class _PlayerPageState extends State<PlayerPage>
        */
       final cur = await native.getProperty('hwdec-current');
       // ignore: lines_longer_than_80_chars
-      debugPrint('[PLAYER] hwdec-current = $cur'
-          '（就绪=${ready ? "是" : "否，等待 ${waited * 250}ms 超时"}）');
+      debugPrint(
+        '[PLAYER] hwdec-current = $cur'
+        '（就绪=${ready ? "是" : "否，等待 ${waited * 250}ms 超时"}）',
+      );
     } catch (e) {
       debugPrint('[PLAYER] 读 hwdec-current 失败: $e');
     }
@@ -2515,6 +3015,12 @@ class _PlayerPageState extends State<PlayerPage>
   void _bindPlayerStreams() {
     _player.stream.playing.listen((v) {
       if (mounted) setState(() => _playing = v);
+      // 缺陷 13：暂停时不轮询缓冲属性
+      if (v) {
+        _bufferPoller?.start();
+      } else {
+        _bufferPoller?.stop();
+      }
     });
     _player.stream.position.listen(_onPositionTick);
     _player.stream.duration.listen((d) {
@@ -2529,7 +3035,18 @@ class _PlayerPageState extends State<PlayerPage>
       if (mounted) setState(() => _buffering = v);
     });
     _player.stream.volume.listen((v) {
-      if (mounted) setState(() => _volume = v);
+      /*
+       * ★★★ 缺陷 11 实测（2026-10-09）暴露的行为细节：
+       *    setVolume(0) 之后 mpv 回流的可能仍是 **0**（而不是用户真实音量）。
+       *    原来这里无条件把 _volume 写成广播值，于是静音期间 _volume 被写成 0 ⇒
+       *      ① 底栏 onVolume 滑杆（muted ? 0 : volume）显示的就是 0；
+       *      ② 拖到同一个值时 mpv 幂等、不发广播，那条兜底路径随之失效。
+       *    两条都会让取消静音恢复不出正确音量 —— 正是用户报的
+       *    「必须拖音量条才恢复」。
+       *    ⇒ 静音期间**不接受 0 广播**改写 _volume：0 在这里语义上是「静音」，
+       *      不是一个音量值（音量本身另有 _volumeBeforeMute 快照兜着）。
+       */
+      if (!(_muted && v <= 0) && mounted) setState(() => _volume = v);
       /*
        * ★ 记住音量（原版 `PlayerView.vue:3983`）
        *
@@ -2575,6 +3092,20 @@ class _PlayerPageState extends State<PlayerPage>
       if (isUserEcho && !_muted && v > 0) {
         _lastVolume = v / 100;
         _savePlayPref('lastVolume', _lastVolume.toString());
+      } else if (_muted && isUserEcho && v > 0) {
+        /*
+         * ★★★ 缺陷 1 / 11：静音期间用户调音量，必须**同步更新**静音前快照
+         *
+         * ```text
+         * 静音时用户把滑杆从 0 拖到 40
+         *   => 取消静音要恢复的应该是 40，而不是静音**之前**的旧值
+         *   => 不同步的话，用户会看到「我明明调了 40，一点取消静音又变回 80」
+         * ```
+         *
+         * ⚠️ 只同步**快照**，**不写偏好** —— 静音状态下的音量不是用户想长期
+         *    保留的习惯（取消静音后会以快照为准，那时才算一次真正的用户动作）。
+         */
+        _volumeBeforeMute = v;
       } else if (!isUserEcho) {
         /*
          * ★ 打点：非用户发起的音量广播**不写偏好** ——
@@ -2716,6 +3247,8 @@ class _PlayerPageState extends State<PlayerPage>
     _player.stream.completed.listen((done) {
       if (done && mounted) _onEnded();
     });
+    // 缺陷 13：接上缓冲区间轮询器（内部会看 kBufferRangeMode 决定是否真的读属性）
+    _bindBufferPoller();
   }
 
   /// ★★★ task-72【④】位置 tick 的**唯一**处理点
@@ -2760,7 +3293,16 @@ class _PlayerPageState extends State<PlayerPage>
     _position = p; // ★ 无条件更新（读值语义不变）
     if (secChanged) {
       debugPlayerPositionSetStates++; // ★ 仅探针计数
-      setState(() {});
+      /*
+       * ★★★ 2026-10-09：这里**不再 setState**。
+       *
+       * 改前 `setState(() {})` 触发的是**整页**重建，而这次变化只影响
+       * 底栏的时间与进度条 —— 其余 1.6 万行（弹幕层、顶栏、浮层、描边）
+       * 一行都不需要重排。
+       * ⇒ 只通知 notifier，由底栏那一小块 `ValueListenableBuilder` 重建。
+       * 实测读数见交付报告（改前 1 次/秒整页重建 → 改后 0 次）。
+       */
+      _positionNotifier.value = p;
       // ★ task-13 ⑦ 面板开着时刷一次弹幕实时读数（每秒一次，开销可忽略）
       if (_danmakuSheetOpen) _refreshDanmakuReadout();
     }
@@ -2978,7 +3520,35 @@ class _PlayerPageState extends State<PlayerPage>
     }
 
     try {
-      final p = await SourinApi.getProgress(_provider, _contentId);
+      /*
+       * ★★★ OPS-13（反馈 C）：**读两侧、取 updatedAt 更新的那条**。
+       *
+       * # 为什么不是「只读镜像」（这是存量数据能不能续播的关键）
+       * ```text
+       * 本轮之前写的进度**只有** local 那条（本地会话）或站点那条（在线会话），
+       * 镜像**不存在** ⇒ 只读镜像会让老用户的续播**全部失效**。
+       * 两条都读、取新的 ⇒ 老数据、新数据都能续播，而且**可逆**：
+       * 镜像读失败 / 不存在时，行为退化成今天的样子（见下面的内层 catch）。
+       * ```
+       *
+       * ⚠️ 判据（谁更新）在 `lib/core/progress_origin.dart` 的 `pickResumeProgress`
+       *    —— 本页不重写一份（两套真相迟早不一致）。
+       * ⚠️ 平局取**会话自己**那条：与「镜像只是补充」的定位一致，
+       *    也让「镜像不存在」这条路径与今天**逐字同构**。
+       */
+      final own = await SourinApi.getProgress(_provider, _contentId);
+      final mirrorTarget = _mirrorOrigin;
+      Progress? peer;
+      if (mirrorTarget != null) {
+        try {
+          peer = await SourinApi.getProgress(
+              mirrorTarget.provider, mirrorTarget.mediaId);
+        } catch (e) {
+          // ★ 镜像那条读失败**绝不影响续播** —— 会话自己的键已经拿到了
+          debugPrint('[PLAYER] 读镜像进度失败（忽略，用本键那条）: $e');
+        }
+      }
+      final p = pickResumeProgress(session: own, mirror: peer);
       if (p == null) return;
 
       /*
@@ -3679,6 +4249,208 @@ class _PlayerPageState extends State<PlayerPage>
     return out;
   }
 
+  // ═══════════════════════════════════════════════════════════════════
+  //  ★ popover 的数据供给（2026-10-09，Owner 第 12 条）
+  // ═══════════════════════════════════════════════════════════════════
+  //
+  //  清晰度 / 线路 / 字幕音轨这三类「选择类」操作现在都从弹窗改成了
+  //  底栏上方的小面板。选项**直接复用**已有的 `_subtitleOptions()` /
+  //  `_audioOptions()` / `_streams` —— 不另建一份映射，否则两处一定漂。
+
+  /// 清晰度 / 线路的 popover 选项
+  ///
+  /// ⚠️ `_streams` 既是「线路」也是「清晰度」的那份数据（一条线路对应一种清晰度），
+  ///   所以两枚按钮看到的是同一张表 —— 但入口分开：用户按「清晰度」想到的是
+  ///   画质档位，按「线路」想到的是源。**表一样、入口不同**是 B 站的形态。
+  List<PopoverOption<String>> _qualityPopoverOptions() {
+    final cur = _current;
+    return [
+      for (final s in _streams)
+        PopoverOption<String>(
+          value: s.url,
+          label: s.label ?? s.quality ?? '默认线路',
+          hint: s.quality,
+          checked: cur != null && cur.url == s.url,
+        ),
+    ];
+  }
+
+  /// 按 url 切流（popover 里选中一项 ⇒ 与旧抽屉同一动作）
+  void _pickQualityByLabel(String url) {
+    for (final s in _streams) {
+      if (s.url == url) {
+        unawaited(_startPlayback(s));
+        return;
+      }
+    }
+  }
+
+  /// 字幕 / 音轨的分组 popover
+  Map<String, List<PopoverOption<String>>> _trackPopoverGroups() {
+    final subs = _sidChosen;
+    final aud = _aidChosen;
+    return {
+      '字幕': [
+        for (final o in _subtitleOptions())
+          PopoverOption<String>(
+            value: o.id,
+            label: o.label,
+            hint: o.hint,
+            checked: subs == o.id,
+          ),
+      ],
+      '音轨': [
+        for (final o in _audioOptions())
+          PopoverOption<String>(
+            value: o.id,
+            label: o.label,
+            hint: o.hint,
+            checked: aud == o.id,
+          ),
+      ],
+    };
+  }
+
+  void _pickTrackFromPopover(String group, String id) {
+    if (group == '字幕') {
+      unawaited(_applySubtitleTrack(id, userInitiated: true));
+    } else {
+      unawaited(_applyAudioTrack(id));
+    }
+  }
+
+  /// 投屏那一项（**用真的 CastButton**，不是一枚自己画的图标 ——
+  /// 代理、扫描电视、状态轮询都在它内部，见 cast_button.dart 的类文档）
+  MoreMenuEntry? get castEntry {
+    final url = _current?.url ?? '';
+    if (url.isEmpty) return null;
+    return MoreMenuEntry(
+      label: '投屏',
+      icon: Icons.cast,
+      onTap: _openCast,
+      trailing: CastButton(
+        url: url,
+        headers: _current?.httpHeaders ?? const <String, String>{},
+        title: _castTitle,
+        iconSize: 16,
+      ),
+    );
+  }
+
+  /// 选集面板这一端是**右侧侧栏**还是**底部面板**
+  ///
+  /// ★ 判据（几何，不是设备类型）：**宽 ≥ 高**（横屏）走侧栏，竖屏走底部面板。
+  ///   手机横屏（915×412）与桌面、TV 都落进侧栏那一支 —— 它们都是"旁边还有地方"。
+  bool _episodePanelIsDrawer(BuildContext context) {
+    final s = MediaQuery.sizeOf(context);
+    return s.width >= s.height;
+  }
+
+  /// 「更多」浮层的分组清单
+  ///
+  /// ★ 每一次调用都**现算**（不缓存）—— 组里有哪些项取决于集数 / 直播 / 画中画
+  ///   是否可用，缓存会显示过期项。整页每 tick 重建时也无所谓：
+  ///   这只是一堆不可变的小对象，分配成本可忽略。
+  List<MoreMenuGroup> _moreMenuGroups(BuildContext context) {
+    return [
+      MoreMenuGroup('画面', [
+        MoreMenuEntry(
+          label: '截图',
+          icon: Icons.photo_camera,
+          onTap: () => unawaited(_takeScreenshot()),
+        ),
+        MoreMenuEntry(
+          label: '画面缩放',
+          icon: Icons.zoom_in_map,
+          hint: '${_videoZoomPct.round()}%',
+          onTap: () => setState(() => _zoomOpen = !_zoomOpen),
+        ),
+        if (_pipSupported)
+          MoreMenuEntry(
+            label: _pipActive ? '退出画中画' : '画中画',
+            icon: _pipActive
+                ? Icons.picture_in_picture_alt
+                : Icons.picture_in_picture_alt_outlined,
+            onTap: () => unawaited(_togglePip()),
+          ),
+        if (castEntry case final e?) e,
+      ]),
+      MoreMenuGroup('播放', [
+        MoreMenuEntry(
+          label: '播放设置',
+          icon: Icons.settings,
+          onTap: () => unawaited(_openSettings()),
+        ),
+        if (!_isLive)
+          MoreMenuEntry(
+            label: '字幕搜索',
+            icon: Icons.search,
+            onTap: () => _openSubtitlePanel(),
+          ),
+        /*
+         * ★★★ task-33（B①，Owner 原话「缓存到本地就不要显示换源按钮了」）：
+         *
+         * 本地文件会话**不画**这一项 —— 这一集就在磁盘上，弹层里搜出来的
+         * 全是别的站点的同一部剧，换源无处可落。
+         *
+         * 判据用 `_isLocalSession`（跟着 `_provider` 走）而不是
+         * `widget.localPath != null`：后者是页面级不可变量，原地换到在线源
+         * 之后会把换源**永久藏起来**（理由见顶层 `isLocalSessionProvider`）。
+         *
+         * ⚠️ 必须留在「播放」那个分组自己的列表字面量**内部**（不要搬去别处）——
+         *    两条既有源码门禁（`t68_android_adapt_test.dart` 的 E③ 与
+         *    `zz_cr_next_dup_more_menu_test.dart` 的解析器）都靠这一项还在
+         *    这一组里，判据是「入口可以门控，功能不许删」。
+         */
+        if (!_isLocalSession)
+          MoreMenuEntry(
+            label: '换源',
+            icon: Icons.travel_explore,
+            onTap: () => unawaited(_openSwitchSource()),
+          ),
+      ]),
+      MoreMenuGroup('弹幕', [
+        MoreMenuEntry(
+          label: _danmakuEnabled ? '关闭弹幕' : '开启弹幕',
+          icon: _danmakuEnabled ? Icons.subtitles : Icons.subtitles_off,
+          onTap: () => unawaited(_toggleDanmaku()),
+        ),
+        MoreMenuEntry(
+          label: '弹幕设置',
+          icon: Icons.tune,
+          hint: _danmakuLoading ? '加载中…' : null,
+          onTap: _openDanmakuSettings,
+        ),
+      ]),
+      if (!_isLive)
+        MoreMenuGroup('剧集', [
+          MoreMenuEntry(
+            label: '片头片尾',
+            icon: Icons.content_cut,
+            onTap: () => unawaited(_openSkipDialog()),
+          ),
+          if (_prevEpisode != null)
+            MoreMenuEntry(
+              label: '上一集',
+              icon: Icons.skip_previous,
+              onTap: () => unawaited(_gotoPrevEpisode()),
+            ),
+          // ★ Owner 缺陷 6（2026-10-10，截图图 2/图 3 的底栏）：
+          //   这一项**删掉了**。它与底栏那枚 ⏭ 是**同一个功能**：
+          //   两处的终点都是 _gotoNextEpisode()，判据也都是 _nextEpisode != null
+          //   （底栏 ⏭ 见 player_bottom_bar.dart:283-289，宿主接线见 :11305）。
+          //   业主原话：「要求把「更多」菜单里的那一项删掉，只保留底栏上那个 ⏭」。
+          //   ⚠️ 「上一集」**留着** —— 底栏没有 ⏮，它不重复。
+          if (_isLive && widget.onLiveChannels != null)
+            MoreMenuEntry(
+              label: '所有直播',
+              icon: Icons.live_tv,
+              onTap: _toggleLiveChannels,
+            ),
+        ]),
+    ];
+  }
+
   /// 拼「语言 · 编码」这一小行提示（两者都没有时返回 null）
   String? _trackHint(String? lang, String? codec) {
     final parts = <String>[];
@@ -3959,7 +4731,27 @@ class _PlayerPageState extends State<PlayerPage>
   ///    `X-Error-Message` 这条唯一能说明"为什么失败"的信息永久埋掉
   ///    （见 core/danmaku.dart 文件头的错误透传策略）。
   Future<void> _loadDanmakuNamed(String fileName) async {
-    if (!_danmakuEnabled) return;
+    /*
+     * ★★★ OPS-10 ⑤（Owner 逐字：「导入bilibili弹幕之后,并没有提示任何信息
+     *     和反馈,返回播放页继续,也没有出现弹幕」）
+     *
+     * # 改前：开关判据排在**最前面**，于是「有 B 站绑定」这条路也被一起挡掉
+     * ```text
+     * 原第 2 行就是 `if (!_danmakuEnabled) return;`，而弹幕开关的**缺省是关**
+     * （core/danmaku.dart:19 记着 dsh.danmaku.enabled 缺省 "0"）。
+     * 用户导入完 B 站弹幕、回到播放页 ⇒ _danmakuEnabled 仍是 false ⇒
+     * 这一行直接 return —— B 站那条**免登录、有 cid、一次请求就成**的路
+     * 根本没走，用户看到的就是「导入成功了但还是没有弹幕」。
+     * ```
+     *
+     * # 改法：把「有没有绑定」与「开关开没开」拆成两件事
+     * ```text
+     * 有绑定 + 这一集有 cid ⇒ **先取**（B 站不要凭证，没理由被开关挡住），
+     *   取回来顺手把开关真的打开（见 _loadBiliDanmaku 成功支）。
+     * 没绑定 ⇒ 与改前**逐字节相同**：仍然由下面那句开关判据管，
+     *   关着就一个请求都不发。
+     * ```
+     */
     /*
      * ★★★ task-31 ④：绑了 B 站 ⇒ **B 站优先**，dandanplay 一条请求都不发。
      *
@@ -3973,6 +4765,71 @@ class _PlayerPageState extends State<PlayerPage>
         await _loadBiliDanmaku(cid);
         return;
       }
+      /*
+       * ★★ Owner 第 9 条（2026-10-09）：绑了 B 站、但这一集没有 cid ⇒ **必须说出来**
+       *
+       * # 改前这里是**静默**落空（`}` 直接闭合）
+       * ```text
+       * 用户绑了 B 站 ⇒ 下面 dandanplay 那条必定没有凭证 ⇒ 403 ⇒
+       *   _flash('弹幕失败：Missing Authentication Headers ｜ 弹幕服务没收到凭证…')
+       * 用户看到这句会以为「B 站要登录」——**完全不是**。
+       * 真实原因是「这一集没匹配到分 P」⇒ 两件事必须分开说。
+       * ```
+       *
+       * # ★ 为什么"B 站搜索免登录"不是问题所在（诊断时先排除了这条）
+       * ```text
+       * lib/core/bili/bili_api.dart:3 记着：B 站搜索接口本来就免登录，
+       * 未登录一样能搜。所以用户报的「未登录应该都能搜索」**本来就成立** ——
+       * 挡路的从来不是登录态，而是「绑定了 B 站之后就不再走搜索」这条路。
+       * ```
+       *
+       * # 为什么是 _flash 而不是角标/弹窗
+       * 与下面那条失败提示**同一条通道**（`_flash` → `_tip` → `_TipBubble`）：
+       * 用户先看到「已改用 dandanplay」，紧接着看到 dandanplay 的失败 ——
+       * 两句话连起来才是一个完整因果，用户就知道该去查分 P 而不是去登录 B 站。
+       *
+       * ⚠️ 这句话**逐字**是 `test/zz_t3_flash_probe_test.dart:46` 的 `kTipFallThrough`，
+       *    改一个字那个探针就会红（它是**故意**钉住这条文案的）。
+       */
+      if (!_danmakuEnabled) return;
+      _flash('B 站弹幕：这一集没匹配到分 P（cid），已改用 dandanplay');
+    }
+
+    // ★ OPS-10 ⑤：没绑定（或这一集没 cid）才回到「开关说了算」
+    if (!_danmakuEnabled) return;
+
+    /*
+     * ★★★ 2026-10-09（Owner：「bilibili都支持搜索了,也选择了,但就是没显示弹幕这个流程有问题」）
+     *
+     * # 这里补上**缺失的那一步**：没绑定时自动去 B 站搜一次
+     * ```text
+     * 改前的两条路：
+     *   ① 有绑定      ⇒ 用绑定（走上面那个 if）；
+     *   ② 没绑定      ⇒ **直接落到下面的 dandanplay** ——
+     *      而 dandanplay 要 AppId/AppSecret，没配就 403
+     *      ⇒ 屏幕上那句「弹幕失败：Missing Authentication Headers」。
+     *
+     * 用户看到的观感就是「B 站明明能搜、我也选了，怎么还是没弹幕」——
+     * 因为**自动这条路压根没走搜索**：搜索只有用户手动点面板才会触发。
+     * ```
+     *
+     * # 为什么免登录就能搜（不是"登录了才行"）
+     * ```text
+     * 实测 2026-10-09（无 Cookie）：
+     *   comment.bilibili.com/279786.xml → 200，1200 条弹幕
+     * B 站搜索与弹幕 XML **都免登录** ⇒ 缺的从来不是登录态，是这一步。
+     * ```
+     *
+     * # 失败要**如实**、且不挡 dandanplay
+     * ```text
+     * autoBindBySearch 返回 null（没匹配到 / 网络失败）⇒ 什么都不说，
+     * 继续往下走 dandanplay —— 行为与改前**完全一致**，
+     * 不会因为多了这一步而让原本能用 dandanplay 的用户变差。
+     * ```
+     */
+    if (_danmakuEnabled && biliBind == null) {
+      final ok = await _autoBindBili();
+      if (ok) return;
     }
     final token = ++_danmakuFetchToken;
     final client = _ensureDanmakuClient();
@@ -3994,21 +4851,35 @@ class _PlayerPageState extends State<PlayerPage>
       if (!mounted || token != _danmakuFetchToken) return;
       setState(() {
         _danmakuComments = res.comments;
-        _danmakuStatus = res.summary;
+        /*
+         * ★ OPS-10 B：「在 UI 上如实反映实际用的是哪个源的弹幕」
+         *
+         * `res.summary` 自己是「某番 第 3 集 · 842 条弹幕」（danmaku.dart:919-923），
+         * **不含源名**；B 站那条（bili_auto_update.dart:89-96）也不含。
+         * 两条路都取回来之后，用户从读数上分不出这些弹幕是谁给的 ——
+         * 而 B 站那侧**不需要凭证**、dandanplay 那侧**要**，这个区别
+         * 恰恰是他排错时唯一要分清的事（见下面 DanmakuHint 的说明）。
+         * ⇒ 在宿主这一层补前缀，不改 core 的文案（t70 逐字钉着它们）。
+         */
+        _danmakuStatus = 'dandanplay · ${res.summary}';
         _danmakuError = null;
+        _danmakuErrorAt = null;
+        _danmakuEmptyExpired = false;
         _danmakuLoading = false;
         _danmakuSettings = _danmakuSettings.copyWith(
           loading: false,
           clearError: true,
-          status: res.summary,
+          status: 'dandanplay · ${res.summary}',
         );
       });
+      _armDanmakuBadgeExpiry(kDanmakuBadgeEmptyMs);
     } on DanmakuException catch (e) {
       if (!mounted || token != _danmakuFetchToken) return;
       setState(() {
         _danmakuComments = const <DanmakuComment>[];
         _danmakuStatus = '';
         _danmakuError = e;
+        _danmakuErrorAt = DateTime.now();
         _danmakuLoading = false;
         _danmakuSettings = _danmakuSettings.copyWith(
           loading: false,
@@ -4022,6 +4893,7 @@ class _PlayerPageState extends State<PlayerPage>
        * 不吞、不改写、不翻译成"网络错误" —— 用户要看到的是
        * dandanplay 自己说的那句话（例如 Missing Authentication Headers）。
        */
+      _armDanmakuBadgeExpiry();
       final why = e.xErrorMessage.isNotEmpty ? e.xErrorMessage : e.message;
       /*
        * ★★ Owner 第 1 条（2026-10-08）：报错要**可操作**
@@ -4036,14 +4908,38 @@ class _PlayerPageState extends State<PlayerPage>
        *    就消失 —— 塞进去等于没写。标题 + 面板入口才是能用的形态。
        */
       final h = e.hint;
-      _flash(h == null ? '弹幕失败：$why' : '弹幕失败：$why ｜ ${h.title}（打开弹幕设置可一键处理）');
+      /*
+       * ★★ Owner 第 9 条：点明**这句失败是谁的凭证**
+       *
+       * # 为什么非加不可（Lead 追加 2）
+       * ```text
+       * 走到这一行 = dandanplay 这条路失败了。而**绑了 B 站的用户**
+       * 看到「弹幕服务没收到凭证」会去 B 站找 AppId —— 找错地方，
+       * 因为 B 站那侧压根不用填 AppId（bili_api.dart:3：搜索免登录）。
+       * 「没收到凭证」这四个字里的"凭证"指的是 **dandanplay 开放平台**
+       * 的 AppId/AppSecret，必须写出来，否则提示是**指向错误**的。
+       * ```
+       *
+       * ⚠️ 括号里那半句**逐字**是 `test/zz_t3_flash_probe_test.dart:43` 的
+       *    `kTipAfter`（完整句是「弹幕失败：…（打开弹幕设置可一键处理；
+       *    这是 dandanplay 的凭证，与 B 站弹幕无关）」）。
+       * ⚠️ 公共前缀 `'弹幕失败：… （打开弹幕设置可一键处理'` **一个字符都没动** ——
+       *    那是 t100/t103 既有断言面（探针 :147-149 专门守着这条）。
+       */
+      _flash(
+        h == null
+            ? '弹幕失败：$why'
+            : '弹幕失败：$why ｜ ${h.title}（打开弹幕设置可一键处理；这是 dandanplay 的凭证，与 B 站弹幕无关）',
+      );
     } catch (e) {
       if (!mounted || token != _danmakuFetchToken) return;
+      _armDanmakuBadgeExpiry();
       final wrapped = DanmakuException(e.toString());
       setState(() {
         _danmakuComments = const <DanmakuComment>[];
         _danmakuStatus = '';
         _danmakuError = wrapped;
+        _danmakuErrorAt = DateTime.now();
         _danmakuLoading = false;
         _danmakuSettings = _danmakuSettings.copyWith(
           loading: false,
@@ -4212,8 +5108,77 @@ class _PlayerPageState extends State<PlayerPage>
   /// 失败时必须显示：否则用户只会觉得"弹幕坏了"，
   /// 而实际上往往只是没填 AppId（原文见 core/danmaku.dart 的错误透传策略）。
   String? get _danmakuBadge {
-    if (!_danmakuEnabled) return null;
-    if (_danmakuLoading) return '弹幕加载中…';
+    /*
+     * ★★★ OPS-10 现象 A（Owner：「弹幕失败：Missing Authentication Headers ｜
+     *     弹幕服务没收到凭证」……【这个失败提示一直不消失】）
+     *
+     * # 改前这一行排在**失败分支之前**
+     * ```text
+     * `if (!_danmakuEnabled) return null;` 是最先执行的一句。
+     * 而弹幕开关出厂是**关**（core/danmaku.dart:19），B 站那条路取失败时
+     * `_danmakuEnabled` 仍然是 false ⇒ 这里直接 return null ——
+     * **失败角标在「开关关着」这个最常见的情形下根本不会显示**。
+     * 用户报的是「失败提示一直不消失」，但在探针里量到的是它的另一面：
+     * 开关关着时连「看得见」这一步都到不了（用例 ③ 的第一条断言就是这条）。
+     * ```
+     *
+     * # 改法：先判「这一屏到底有没有话要说」，再让开关管它
+     * ```text
+     * 失败（`_danmakuError != null`）⇒ **照说**（用户必须知道为什么没有弹幕）；
+     * 其余（加载中 / 没有弹幕）⇒ 仍然由开关管 —— 关着弹幕时不该冒出
+     * 「弹幕加载中…」或「没有弹幕」这种「我在给你找弹幕」的口气。
+     * ```
+     */
+    final err0 = _danmakuError;
+    if (!_danmakuEnabled && err0 == null) return null;
+    if (_danmakuLoading && err0 == null) return '弹幕加载中…';
+    /*
+     * ★★★ 2026-10-09（Owner：「这个弹幕失败一直也不消失」）
+     *
+     * # 用户报的是哪一条
+     * ```text
+     * 截图上是两条**叠在一起**的：
+     *   ① _flash 那条（「…（打开弹幕设置可一键处理；这是 dandanplay 的凭证…）」）
+     *      —— 它 1.2 秒就消失，不是用户说的那个；
+     *   ② ★ 本角标 —— 它**故意常驻**（见下面 4601 的旧注释），
+     *      而用户读作「一直也不消失」。
+     * ```
+     *
+     * # 为什么"常驻"这个设计本身是错的
+     * ```text
+     * 旧注释的理由是"失败时必须显示，否则用户只会觉得弹幕坏了"。
+     * 那个理由**在刚失败时成立**，但它没说"显示多久"。
+     * 弹幕角标画在**画面上**，永久糊在那里 = 用户每看一集都被它挡一次；
+     * 而用户其实**已经知道了**（他看过一眼了）。
+     * ```
+     *
+     * # 改法：给失败态一个**会自己走掉**的形态
+     * ```text
+     * 失败 ⇒ 记下失败时刻，角标显示 [kDanmakuBadgeFailMs] 毫秒后自动隐藏。
+     * 用户点一下角标 ⇒ 立刻隐藏（不用等）。
+     * 下一次起播/换集 ⇒ 重新计时（新的一集该重新告诉他一次）。
+     * ```
+     *
+     * ⚠️ "加载中"那条**不参与**计时：它本来就该在加载完自动消失，
+     *    加超时反而会让慢网络下的正常加载被误判成"卡住了"。
+     *
+     * ★★★ 2026-10-10（OPS-10 ④。Owner 逐字：
+     *     「没有弹幕的那个标识,不用一直显示,跟随一起消失就行了」）
+     *
+     * # 角标**整体**跟随控制条（放在最前面 ⇒ 四支都吃到）
+     * ```text
+     * 角标是**浮在画面上的 chrome**，与控制条同一性质 ⇒ 控制条收起了，
+     * 它也必须收。控制条回来时它自然回来 —— 判据是**当下**的
+     * _controlsVisible，不需要额外记账：记账（隐藏时清掉）会让
+     * "回来"时这句话永远回不来。
+     * ```
+     */
+    if (!_controlsVisible) return null;
+    if (_danmakuErrorAt != null &&
+        DateTime.now().difference(_danmakuErrorAt!) >
+            const Duration(milliseconds: kDanmakuBadgeFailMs)) {
+      return null;
+    }
     final e = _danmakuError;
     if (e != null) {
       final raw = e.xErrorMessage.isNotEmpty ? e.xErrorMessage : e.message;
@@ -4228,7 +5193,22 @@ class _PlayerPageState extends State<PlayerPage>
       return h == null ? '弹幕失败：$raw' : '弹幕失败：$raw ｜ ${h.title}';
     }
     if (_danmakuComments.isEmpty) {
-      return _danmakuStatus.isEmpty ? null : '没有弹幕';
+      if (_danmakuStatus.isEmpty) return null;
+      /*
+       * ★★★ 2026-10-10（OPS-10 ④）：改前这里只有一句
+       *     `return '没有弹幕';` —— 既没有计时器、也不看控制条，
+       *     于是"取数成功但 0 条"的角标**永久**糊在画面左上角。
+       *
+       * 现在它跟失败态一样有**寿命**：到点由 [_danmakuBadgeTimer]
+       * 触发一次重建，本 getter 看到 [_danmakuEmptyExpired] ⇒ 不再画。
+       *
+       * ⚠️ 判据必须是**定时器翻的 bool**，不能是 `DateTime.now()` 算差值：
+       *    widget 测试里 `t.pump(Duration)` 只推进**假时钟**，
+       *    墙钟几乎不动 ⇒ 用 now() 算的话，测试里这个角标永远不消失，
+       *    而生产上会消失 —— 两边行为不一致，测试就是假的。
+       */
+      if (_danmakuEmptyExpired) return null;
+      return '没有弹幕';
     }
     return null;
   }
@@ -4302,7 +5282,27 @@ class _PlayerPageState extends State<PlayerPage>
          * 结果列表 —— 点一条就绑到错误的视频上。宁可空着让他重搜。
          */
         searchResults: const <BiliSearchItem>[],
-        searchKeyword: '',
+        /*
+         * ★★★ 2026-10-09（Owner：「获取弹幕 bilibili和弹弹都应该支持 自动填入名字」）
+         *
+         * # 改前是空串，用户每次都要手打一遍剧名
+         * ```text
+         * 上面那条注释说的是"清掉**上一次搜索结果**"（对，那必须清）；
+         * 但它把**关键词**也一起清了 ⇒ 用户打开面板看到的是空搜索框，
+         * 得自己重新敲一遍标题 —— 而他正在看的这一集叫什么，
+         * 应用明明知道（`_liveTitle`）。
+         * ```
+         *
+         * # 为什么预填 `_liveTitle` 而不是 `_danmakuFileName`
+         * ```text
+         * `_danmakuFileName` 是给 dandanplay 的 match 用的（去掉了扩展名，
+         * 有时还带"第01集"这种后缀）；而**搜索**要的是**作品名**，
+         * 带上集数反而搜不准。`_liveTitle` 就是标题栏上那串，最贴近用户认知。
+         * ```
+         *
+         * ⚠️ 用户点「搜索」前可以随便改 —— 这只是**预填**，不是锁定。
+         */
+        searchKeyword: _liveTitle.trim(),
         trace: _biliApi?.trace ?? const <BiliHttpTrace>[],
       );
     });
@@ -4497,6 +5497,52 @@ class _PlayerPageState extends State<PlayerPage>
   ///
   /// ⚠️ 令牌判据**不能省** —— 换集后旧的响应必须被丢掉，
   ///    否则第 5 集会短暂显示第 3 集的弹幕。
+  /// 自动搜 B 站 → 绑定 → 取弹幕。成功返回 true（调用方据此 return）。
+  ///
+  /// 判据与设计见 `_loadDanmakuNamed` 里那段长注释（为什么需要这一步、
+  /// 为什么免登录成立、失败为什么要静默）。这里只补**执行**细节：
+  ///
+  /// ```text
+  /// ① 标题取 `_liveTitle`（与 dandanplay 那条路同一个来源，保证两边一致）
+  /// ② 集名用 `_episodes` 的标题（分 P 对齐要靠它）
+  /// ③ 成功 ⇒ 落盘 + 立刻用刚拿到的 cid 拉弹幕（不多发一次请求）
+  /// ```
+  ///
+  /// ⚠️ 整个过程**不 flash 任何"正在搜索"**：起播时的提示条是给失败用的，
+  ///    搜索成功的话用户直接看到弹幕出现，那才是最好的反馈。
+  Future<bool> _autoBindBili() async {
+    final title = _liveTitle.trim();
+    if (title.isEmpty) return false;
+    try {
+      final api = _ensureBiliApi();
+      final outcome = await autoBindBySearch(
+        api: api,
+        provider: widget.provider,
+        id: widget.id,
+        localTitle: title,
+        episodeTitles: [for (final e in _episodes) e.title],
+      );
+      if (outcome == null || !outcome.ok) return false;
+      final cid = outcome.binding.cidFor(_epIndex);
+      if (cid <= 0) return false;
+      if (!mounted) return true;
+      // 自动匹配成功 ⇒ 让面板与卡片也能看到这次绑定（不静默改状态）
+      debugPrint('[BILI] 自动匹配成功：${outcome.reason} cid=$cid');
+      await _loadBiliDanmaku(cid);
+      return true;
+    } catch (e) {
+      /*
+       * ★ 这里**必须**吞掉异常。
+       *
+       * 自动匹配是"锦上添花"：失败就退回 dandanplay（改前的行为），
+       * 绝不能因为多了这一步而让原本能用的路径变差。
+       * 但要留日志 —— 本项目的一贯纪律是"可以降级，不许静默"。
+       */
+      debugPrint('[BILI] 自动匹配失败（退回 dandanplay）：$e');
+      return false;
+    }
+  }
+
   Future<void> _loadBiliDanmaku(int cid) async {
     final token = ++_danmakuFetchToken;
     if (mounted) {
@@ -4522,6 +5568,20 @@ class _PlayerPageState extends State<PlayerPage>
         _danmakuComments = r.comments;
         _danmakuStatus = '';
         _danmakuError = e;
+        /*
+         * ★★★ OPS-10 现象 A（Owner 逐字：「弹幕失败：Missing Authentication
+         *     Headers ｜ 弹幕服务没收到凭证 …【这个失败提示一直不消失】」）
+         *
+         * # 改前这一支**没有**这两行
+         * ```text
+         * `_danmakuBadge` 的失败寿命判据是 `_danmakuErrorAt` 的差值
+         * （player_page.dart:4932-4936），而这里只写了 `_danmakuError`、
+         * 没写 `_danmakuErrorAt`、也没起计时器 ⇒ 判据恒为 false ⇒
+         * 角标**永远**画着。dandanplay 那一支（:4659/:4673）早就写了，
+         * 只有 B 站这一支漏了 —— 这正是用户看到「常驻」的那一条。
+         * ```
+         */
+        _danmakuErrorAt = DateTime.now();
         _danmakuLoading = false;
         _danmakuSettings = _danmakuSettings.copyWith(
           loading: false,
@@ -4529,18 +5589,35 @@ class _PlayerPageState extends State<PlayerPage>
           status: '',
         );
       });
+      _armDanmakuBadgeExpiry();
       _flash('弹幕失败：${r.error}');
       return;
     }
     setState(() {
       _danmakuComments = r.comments;
-      _danmakuStatus = r.summary;
+      // ★ OPS-10 B：UI 如实反映来源（见 _loadDanmakuNamed 里那段说明）
+      _danmakuStatus = 'B 站 · ${r.summary}';
       _danmakuError = null;
+      /*
+       * ★ OPS-10 ⑤：取回来了 ⇒ 上一次的失败态必须**真的**被清掉。
+       *   只清 `_danmakuError` 不够 —— 角标那条寿命判据读的是
+       *   `_danmakuErrorAt`，留着它会让「刚成功」的下一帧又被判成过期。
+       */
+      _danmakuErrorAt = null;
+      _danmakuEmptyExpired = false;
       _danmakuLoading = false;
+      /*
+       * ★ OPS-10 ⑤：`_danmakuEnabled = true` 是**真的把开关打开**
+       *   （用户下次点底栏那颗按钮时 `_toggleDanmaku` 会把它写回偏好）。
+       *   用户导入完 B 站弹幕、回到播放页 ⇒ 弹幕本来就该出现，
+       *   而不是先让他去点一次开关。
+       */
+      _danmakuEnabled = true;
       _danmakuSettings = _danmakuSettings.copyWith(
+        enabled: true,
         loading: false,
         clearError: true,
-        status: r.summary,
+        status: 'B 站 · ${r.summary}',
       );
     });
     _biliCid = cid;
@@ -4560,12 +5637,47 @@ class _PlayerPageState extends State<PlayerPage>
     if (!mounted) return;
     setState(() {
       _danmakuComments = r.comments;
-      _danmakuStatus = r.summary;
+      // ★ OPS-10 B：UI 如实反映来源（见 _loadDanmakuNamed 里那段说明）
+      _danmakuStatus = 'B 站 · ${r.summary}';
       _danmakuError = null;
+      /*
+       * ★★★ OPS-10 ⑤（Owner 逐字：「导入bilibili弹幕之后,并没有提示任何信息
+       *     和反馈,返回播放页继续,也没有出现弹幕」）
+       *
+       * # 改前这里只写了上面四行 —— 三件事一起漏掉
+       * ```text
+       * ① 失败态没清干净：`_danmakuErrorAt` 还留着上一次失败的时刻
+       *    （角标那条寿命判据读的就是它，player_page.dart:4932-4936）
+       *    ⇒ 面板里说「更新成功」、画面角标却在说「弹幕失败」，两边打架。
+       * ② 面板读数没同步：`_danmakuSettings` 一个字都没动 ⇒ 弹幕设置面板
+       *    里仍然是上一次那套 loading/error/status。
+       * ③ **一句话都没说**：成功那条路上没有任何 `_flash` ⇒ 用户点完
+       *    「导入并绑定」看到的是「什么都没发生」（他只能反复点）。
+       * ```
+       *
+       * # 文案为什么是这一句
+       * ```text
+       * 用户要知道的是**三件事**：用的是哪个源（B 站，不是 dandanplay）、
+       * 成了多少条、这一集到底有没有东西上屏。
+       * `r.summary` 自己只说「新增 N 条，共 M 条」（bili_auto_update.dart:89-96），
+       * 不含源名 ⇒ 这里补上「B 站」二字。
+       * ```
+       */
+      _danmakuErrorAt = null;
+      _danmakuEmptyExpired = false;
+      _danmakuLoading = false;
       _danmakuEnabled = true;
+      _danmakuSettings = _danmakuSettings.copyWith(
+        enabled: true,
+        loading: false,
+        clearError: true,
+        status: 'B 站 · ${r.summary}',
+      );
     });
     _biliCid = r.cid;
     markBiliSynced();
+    // ★ OPS-10 ⑤：成功也必须**说一句**（改前这条路上一个字都没有）
+    _flash('B 站弹幕已导入：这一集 ${r.total} 条（新增 ${r.added} 条）');
   }
 
   /// 自动刷新（切集 / 集列表变了时调用）
@@ -4710,6 +5822,22 @@ class _PlayerPageState extends State<PlayerPage>
     setState(() => _danmakuEnabled = v);
   }
 
+  /// 探针用：重跑一次**起播时那次**弹幕偏好读取（`_loadDanmakuPrefs`）
+  ///
+  /// # 为什么需要它（OPS-10 ⑤ 的夹具关键）
+  /// ```text
+  /// `_danmakuEnabled` 只在 `initState` 里由偏好读出来一次（:2354-2357），
+  /// 而探针入口在 `initState` **之前**就已经把 UiPrefs 写好了 ——
+  /// 单测里没有"先起播再改偏好"这一步，于是开关永远是出厂值（关）。
+  /// 真机上用户是"导入 → 退出 → 再进来"，第二次进来才读到偏好。
+  /// 这里重跑那**同一段生产代码**，把"第二次进播放页"这件事补上 ——
+  /// 不手抄一份 `_danmakuEnabled = ...`，否则测的就不是生产判据了。
+  /// ```
+  void debugDanmakuLoadPrefs() {
+    if (!mounted) return;
+    _loadDanmakuPrefs();
+  }
+
   /// 探针用：塞一组**本地构造的**弹幕进渲染层（同时把开关打开）
   ///
   /// 见顶层 [debugPlayerSetDanmakuCommentsForProbe] 的说明：
@@ -4721,6 +5849,32 @@ class _PlayerPageState extends State<PlayerPage>
       _danmakuComments = cs;
       _danmakuEnabled = true;
     });
+  }
+
+  /// 探针用：造「取数**成功**但一条都没有」这个状态
+  ///
+  /// # 为什么必须由探针造
+  ///
+  /// 生产上这个状态来自 `DanmakuFetchResult` / `BiliUpdateResult`
+  /// 的 `summary` 非空而 `comments` 为空（`summary` 永远非空，见
+  /// core/danmaku.dart 的 `String get summary`）。真实链路要**网络**
+  /// + **凭证**，单测里发不出来。
+  ///
+  /// ⚠️ 写的是真字段 `_danmakuComments` / `_danmakuStatus`，
+  ///    与生产成功那一支（`player_page.dart:4638-4649` / `:5307-5317`）
+  ///    写的是同一组 —— 不手抄副本。
+  void debugDanmakuSetEmptyResult(String status) {
+    if (!mounted) return;
+    setState(() {
+      _danmakuComments = const <DanmakuComment>[];
+      _danmakuStatus = status;
+      _danmakuError = null;
+      _danmakuLoading = false;
+      _danmakuEnabled = true;
+      // ★ 与生产成功那几支同款：新读数 ⇒ 重新计一次寿命
+      _danmakuEmptyExpired = false;
+    });
+    _armDanmakuBadgeExpiry(kDanmakuBadgeEmptyMs);
   }
 
   /// 打开「播放设置」面板（齿轮）
@@ -4841,6 +5995,71 @@ class _PlayerPageState extends State<PlayerPage>
   ///
   /// ⚠️ 必须在 State 里（而不是像其它探针那样从外面改私有字段）：
   ///    `setState` 是 protected，外面改会多一条 warning。
+  /// ★ popover 层 —— 由**页面**挂在整屏那个 Stack 里（与底栏是兄弟）
+  ///
+  /// # 为什么不挂在底栏内部（这是实测出来的，不是设计偏好）
+  /// ```text
+  /// 底栏在页面里是 `Positioned(bottom:0)`、高约 106px 的一个盒子。
+  /// 面板若作为它的子件，能长到的上界就被那 106px 卡死。
+  /// 实测（无头截图，1440×900）：popover 展开后的 PNG 与「没展开」的 PNG
+  /// **md5 完全相同** —— 一像素都没画出来，而 widget 树里 `PlayerMoreMenu`
+  /// 确实存在 ⇒ 问题出在**几何/裁剪**，不在逻辑。
+  /// ⇒ 提到同一个 Stack 里当兄弟：面板从底栏上沿往上长，
+  ///   而那个 Stack 是整屏（`SizedBox.expand`）⇒ 不会被任何祖先裁掉。
+  /// ```
+  PlayerBottomBar? _bottomBarWidget;
+
+  Widget buildPopoverLayer() =>
+      _bottomBarWidget?.buildPopoverLayer() ?? const SizedBox.shrink();
+
+  /// ★ 截图/几何用：打开选集面板（走**生产**那条 `_episodeSheetOpen` 真源）
+  ///
+  /// # 为什么要探针而不是 `t.tap`
+  /// ```text
+  /// flutter_tester 里 PlayerPage 整棵树的**指针回调不被调用**（见 test/t98
+  /// 文件头）⇒ `t.tap(find.text('更多'))` 打不动底栏。
+  /// ⇒ 探针直接改**生产**的那个字段 / 控制器，验的就是生产那条路径。
+  /// ```
+  bool debugOpenEpisodesForProbe() {
+    if (!mounted) return false;
+    setState(() => _episodeSheetOpen = true);
+    return _episodeSheetOpen;
+  }
+
+  /// 展开某一个 popover（走**生产**那个 `PopoverController`）
+  bool debugOpenPopoverForProbe(String id) {
+    if (!mounted) return false;
+    _popover.toggle(id);
+    return _popover.openId == id;
+  }
+
+  /// ★ 截图专用：清掉起播错误并把控制条**钉在显示态**
+  ///
+  /// # 为什么需要它
+  /// ```text
+  /// 无头截图环境里没有核心库 ⇒ `_load()` 必然失败 ⇒ `_error != null`
+  /// ⇒ 底栏那条门控（`_error == null`）不成立 ⇒ 截图里**根本没有底栏**，
+  ///   截出来只是一张「播放失败」的全屏图。
+  /// ```
+  /// ⚠️ 它**只**改 UI 状态，不碰播放器、不发任何请求。
+  bool debugForceBarsForShot() {
+    if (!mounted) return false;
+    setState(() {
+      _error = null;
+      // ★ 与其余 8 处一样：清 `_error` 必须同时清 `_errorKind`。
+      //   否则截图之后若真的起播失败，会拿到**上一条**错误的 kind，
+      //   把「网络问题」显示成「请重新登录」（陈旧 kind 误判）。
+      //   由 test/login_prompt_trigger_test.dart 的「8 / 9 → 9 / 9」那条盯着。
+      _errorKind = null;
+      _loading = false;
+      _playing = true;
+      _controlsVisible = true;
+      _duration = const Duration(hours: 1, minutes: 42, seconds: 7);
+    });
+    _applyControlsMotion();
+    return true;
+  }
+
   void debugAutoHideControlsForProbe() {
     _autoHideNow();
   }
@@ -4866,6 +6085,31 @@ class _PlayerPageState extends State<PlayerPage>
   void debugHoverControlsForProbe() {
     if (!mounted) return;
     _showControls();
+  }
+
+  /// ★ task-16 探针入口：直接置「指针是否在页内」
+  ///
+  /// # 为什么必须由测试来置，而不能靠 `t.tap` / 真鼠标
+  /// ```text
+  /// `flutter_tester` 里 PlayerPage 整棵树的**指针事件回调都不被调用**
+  /// （本仓已记录在 `test/t118` 文件头与 `t98`）—— 也就是说
+  /// `MouseRegion.onEnter` / `onExit` 在测试里**永远不会**被派发。
+  /// ⇒ 不提供这条入口，判据③（指针离开 ⇒ 不画）在测试里根本走不到，
+  ///   而它正是本次要验的东西。
+  /// ```
+  ///
+  /// ★ 它走的是**与 onEnter/onExit 同一对方法**（`_onPointerEnter` /
+  ///   `_onPointerExit`），不是测试自己写一遍置位 —— 与
+  ///   `debugAutoHideControlsForProbe` 同一条纪律：
+  ///   探针验的必须是**生产路径**。
+  ///
+  /// ⚠️ 放在 State 里（`setState` 是 protected，从外面改会多一条 warning）。
+  void debugSetPointerInsideForProbe(bool v) {
+    if (v) {
+      _onPointerEnter();
+    } else {
+      _onPointerExit();
+    }
   }
 
   /// 收起 rootOverlay 上的播放设置面板（Esc / 关闭按钮 / dispose 都走这里）
@@ -5036,8 +6280,39 @@ class _PlayerPageState extends State<PlayerPage>
   }
 
   // ═══════════════════════════════════════════════════════════════════
+  // ═══════════════════════════════════════════════════════════════════
   //  进度落盘（记忆播放位置）
   // ═══════════════════════════════════════════════════════════════════
+
+  /// ★★★ OPS-13（反馈 C）：这条进度该**镜像**到哪个键上（null = 不镜像）
+  ///
+  /// # 根因（一句话）
+  /// ```text
+  /// 进度主键是 (provider, id)：本地播放恒为 ('local', 文件绝对路径)、
+  /// 在线播放是 (站点, 站点内容 id) ⇒ **两套命名空间互不可见**
+  /// ⇒ 本地看完一集，在线打开同一部从第 0 秒开始（Owner 报的正是这个）。
+  /// ```
+  ///
+  /// # 判据**全部**在 `lib/core/progress_origin.dart`（纯函数，已单测）
+  /// ```text
+  /// localProgressOrigin  旁文件没有来源 / 来源就是 local ⇒ null（不猜）
+  /// mirrorOriginFor      来源 == 会话自己的 provider ⇒ null（否则会覆盖自己那条）
+  /// ```
+  /// ⚠️ 本方法只做「取值 + 交给那两个纯函数」——**不在页面里重写判据**
+  ///    （重写一份 = 两套真相，迟早不一致）。
+  ///
+  /// # 为什么必须取 `widget.` 而不是某个 state 字段
+  /// ```text
+  /// 来源是**页面级不可变**的（同 `localPath`）：shell 在 push 那一刻定好，
+  /// 之后换集/换源都不会换来源 ⇒ 直接读 widget，不引入第二个可能过期的来源。
+  /// ```
+  ProgressOrigin? get _mirrorOrigin => mirrorOriginFor(
+    localProgressOrigin(
+      originProvider: widget.originProvider,
+      originMediaId: widget.originMediaId,
+    ),
+    sessionProvider: _provider,
+  );
 
   void _startProgressSaver() {
     _progressTimer?.cancel();
@@ -5077,9 +6352,34 @@ class _PlayerPageState extends State<PlayerPage>
     final ep = _epIndex < _episodes.length ? _episodes[_epIndex] : null;
 
     try {
-      await SourinApi.saveProgress(
-        _provider,
-        _contentId,
+      /*
+       * ★★★ OPS-13（反馈 C）：改走 `lib/core/progress_origin.dart` 的
+       * **唯一出口** `saveProgressWithMirror` —— 它做两件事，顺序固定：
+       * ```text
+       * ① 原样写会话自己的键（(_provider, _contentId)）—— 既有行为逐字不变
+       * ② 条件满足时，**再写一条镜像**到 (originProvider, originMediaId)
+       * ```
+       *
+       * # ★ 为什么镜像那条**不带** episode_id（本轮最关键的一处推理）
+       * ```text
+       * 本地会话手上的「集号」是**文件名**（shell.dart:4830 传 req.episode.fileName，
+       *   如 `第01集.mp4`），而在线的「集号」是站点集 id（如 `51463`）——
+       *   二者**必然不等**。
+       * 若把文件名写进镜像的 episode_id，在线那条「按集校验」
+       *   （本文件 :3457 的 `p.episodeId != curEpId`）会判成
+       *   「进度属于另一集」而**拒绝续播** ⇒ 镜像白写。
+       * ⇒ `saveProgressWithMirror` 里镜像那条固定 episode_id = null（JSON 里干脆
+       *   不带这个键）⇒ 守卫的第一个条件不成立 ⇒ 任意一集都能续上。
+       * ```
+       *
+       * ⚠️ 传进去的 `mirror: _mirrorOrigin`：三条拒绝（没有来源 / 来源是 local /
+       *    来源 == 会话自己的 provider）全在那两个纯函数里，本页不重写。
+       *    没来源时它内部直接 `return` ⇒ 与今天**逐字等价**（只多一次判空）。
+       */
+      await saveProgressWithMirror(
+        provider: _provider,
+        id: _contentId,
+        mirror: _mirrorOrigin,
         /*
          * ══════════════════════════════════════════════════════════════
          * ★★★ 2026-09-26 第二轮：这里原来写的是 `widget.title` / `widget.cover`
@@ -5918,11 +7218,77 @@ class _PlayerPageState extends State<PlayerPage>
      */
     _reportEpisodeChanged();
 
-    await _resolveAndPlay(req.provider, req.id, epId, req.sourceCode);
+    /*
+     * ══════════════════════════════════════════════════════════════════
+     * ★★★ task-39（T13 残留①）：换会话后刷新顶栏站名 —— **两条支路都要**
+     * ══════════════════════════════════════════════════════════════════
+     *
+     * # 改前为什么会坏（T7 如实上报的残留）
+     * ```text
+     * 下面那个分流里，**只有** else 支（在线）会经 `_resolveAndPlay`
+     * 在解析成功后刷新站名；if 支（本地）走 `_bootLocalFile`，
+     * 那个方法**只**做 _streams / _prepareResume / _startPlayback /
+     * _loadSkipMarker —— 从头到尾不碰 `_providerName`。
+     * ⇒ 从在线会话切到本地会话（req.provider == 'local'）之后，
+     *   顶栏仍挂着**上一个站点**的名字（比"不显示"更糟：用户会以为
+     *   换源/换集没生效）。Owner-1009 要的正是"显示原来源而不是 local"。
+     * ```
+     *
+     * # 为什么放在**分流之前**、且不 await
+     * ```text
+     * ① 两条支路都要刷新 ⇒ 放在 if/else 内部必然要抄两份
+     *    （本项目反复记录过"两处同构必须一起改"的坑）。
+     * ② 必须在 setState({ _provider = req.provider; }) **之后**调 ——
+     *    `_loadProviderName` 里那个代次判据比的正是 `_provider`
+     *    （与 `_resolveAndPlay` 里那条"★ 换源后刷新顶栏的站名"同款纪律），
+     *    顺序反了会把这次当成过期结果**直接丢弃**。
+     * ③ 不 await：查名字要过一次 `listProviders()`，而它**只挡首帧**
+     *    （之后是进程内缓存，见 provider_name.dart:47）；await 会把它
+     *    塞进"换集 → 起播"的关键路径上，白白让用户多等。
+     *    `_loadProviderName` 自己就是 async + 自带代次保护 + 永不抛
+     *    ⇒ 与 `:6381`（_resolveAndPlay）同一写法。
+     * ```
+     */
+    unawaited(_loadProviderName());
+
+    /*
+     * ══════════════════════════════════════════════════════════════════
+     * ★★★ task-12 ④ 改动 B（2026-10-09）：本地会话的换集走**本地短路**
+     * ══════════════════════════════════════════════════════════════════
+     *
+     * # 改前为什么会坏（真机证据）
+     * ```text
+     * `PlayerPage.localPath` 是**页面级不可变**的（shell.dart:4773 一次性决定）。
+     * 而换集走的是「对同一个 State 下命令」=> 不重建页面 =>
+     * 那条路径只能读到「进页面时那一集」的路径。
+     * 用户点右侧第 2 集 => 下面无条件走 `_resolveAndPlay` => resolveStream =>
+     *   对本地会话报「无法路由: local:<路径>」（Owner 截图里的顶栏 local + 那条红字）。
+     * ```
+     *
+     * # 改法：与 ① `_load()` / ② `_bootLocalFile` 同一条分流纪律
+     * ```text
+     * req.localPath != null  => 本地文件 => `_bootLocalFile(path: req.localPath)`
+     *                           （★ 复用已有实现，**不重写一份**）
+     * 否则                    => 在线      => `_resolveAndPlay`（逐字节不变）
+     * ```
+     *
+     * ⚠️ 为什么用 `req.localPath` 而不是 `_localPath`（若设了那个字段）：
+     *    这一支的语义就是「**这次请求**要播的本地文件是谁」——
+     *    直接用 req 的字段，不引入第二个可能过期的来源。
+     */
+    if (req.localPath != null) {
+      await _bootLocalFile(path: req.localPath);
+    } else {
+      await _resolveAndPlay(req.provider, req.id, epId, req.sourceCode);
+    }
 
     /*
      * ④ 重新读跳过点 —— 新源的片头片尾可能与旧源不同
      *    （与 `_remoteSwitchSource` 换源后那一步同款）
+     *
+     * ⚠️ 本地文件**也要**走这一步：片头片尾是**按 provider/id 存**的
+     *    （`_loadSkipMarker` 内部用 `_provider`/`_contentId`），而本地会话的 key
+     *    是 local:<规范化路径> => 是独立一份，不会串到在线记录上。
      */
     await _loadSkipMarker();
   }
@@ -6279,6 +7645,16 @@ class _PlayerPageState extends State<PlayerPage>
   /// 手机端 `srcCard` 的判据是 `sources.length > 1`，
   /// 所以它会隐藏 —— 后续若要支持换线路，
   /// 需要先把 `detail.sources` 存进 `PlayerPage`（独立一步，本次不做）。
+  /// 手机端「选集」tab 在直播时显示的频道列表（`id, 名称`）
+  ///
+  /// 取自 `onLiveChannels` —— 与电脑端「所有直播」抽屉**同一份**，
+  /// 所以手机上看到的台和电脑上看到的必然一致。
+  List<(String, String)> _remoteLiveChannels() {
+    final v = _liveChannels();
+    if (v == null) return const [];
+    return [for (final c in v.channels) (c.id, c.name)];
+  }
+
   RemoteState _remoteGetState() {
     /*
      * 直播没有集数概念（同 `_openSkipDialog` 的判据）。
@@ -6324,6 +7700,18 @@ class _PlayerPageState extends State<PlayerPage>
       outroSkip: _skipMarker?.outroStart,
       outroEnd: _skipMarker?.outroEnd,
       autoSkip: _autoSkip,
+      // ★ 手机端遥控页新增的几项（见 rust 侧 RemoteState 的同名字段注释）
+      cover: _cover,
+      isLive: _isLive,
+      liveChannelId: _liveChannelId ?? '',
+      // 直播频道列表：与「所有直播」抽屉同一个取值入口（`onLiveChannels`），
+      // 所以手机上看到的台与电脑上看到的**一定是同一份**。
+      liveChannels: _remoteLiveChannels(),
+      speed: _rate,
+      danmaku: _danmakuEnabled,
+      fullscreen: _fullscreen,
+      // 清晰度候选：只给 displayName，地址常带一次性签名，不下发。
+      qualities: _streams.map((x) => x.displayName).toList(),
     );
   }
 
@@ -6341,6 +7729,11 @@ class _PlayerPageState extends State<PlayerPage>
   /// set_volume       音量 0~100
   /// toggle_mute      静音切换
   /// switch_source    切换线路（按 code）
+  /// set_speed        设置播放倍速
+  /// toggle_danmaku   弹幕开关
+  /// toggle_fullscreen 全屏切换
+  /// set_quality      选清晰度 / 线路（按下标）
+  /// goto_channel     跳到指定直播频道（按 id）
   /// skip_config_open 打开片头片尾设置弹窗
   /// skip_preview     预览跳到某秒（手机上微调时）
   /// skip_confirm     锁定为片头/片尾（手机确认）
@@ -6417,7 +7810,7 @@ class _PlayerPageState extends State<PlayerPage>
         final clamped = v.clamp(0, 100).toDouble();
         // ★ 遥控器调音量 = 用户发起的（白名单，见 `_lastUserVolumeAction`）
         _lastUserVolumeAction = DateTime.now();
-        await _player.setVolume(clamped);
+        _sendVolume(clamped);
         /*
          * 调音量顺带解除静音 —— 用户按了「音量 +」却还是没声音
          * 会以为坏了（原版 ArtPlayer 也是这个行为）。
@@ -6438,6 +7831,49 @@ class _PlayerPageState extends State<PlayerPage>
         final code = c.code;
         if (code == null || code.isEmpty) return;
         await _remoteSwitchSource(code);
+        return;
+
+      case 'set_speed':
+        /*
+         * 与底栏倍速面板同一个落点（`_player.setRate`）。
+         * ⚠️ 过滤非正数：media_kit 会拒绝 0/负倍率，手机上少给一个 0
+         *    就直接把播放搞停 —— 边界在这里挡一次，不去让原生库报错。
+         */
+        final r = c.number('value')?.toDouble();
+        if (r == null || r <= 0) return;
+        _requestRate(r);
+        _flash('倍速 ${r}x');
+        return;
+
+      case 'toggle_danmaku':
+        await _toggleDanmaku();
+        return;
+
+      case 'toggle_fullscreen':
+        await _toggleFullscreen();
+        return;
+
+      case 'set_quality':
+        /*
+         * 手机端只发**下标** —— 地址常带一次性签名，回传既长又不安全；
+         * 客户端用自己的 `_streams` 取真值（与线路面板同一份数据）。
+         */
+        final i = c.number('index')?.toInt();
+        if (i == null || i < 0 || i >= _streams.length) return;
+        if (identical(_streams[i], _current)) return;
+        _startPlayback(_streams[i]);
+        _flash('已切到 ${_streams[i].displayName}');
+        return;
+
+      case 'goto_channel':
+        final chId = c.id;
+        if (chId == null || chId.isEmpty || !_isLive) return;
+        final ch = _liveChannels()?.channels.where((x) => x.id == chId).firstOrNull;
+        if (ch == null) {
+          debugPrint('[REMOTE] goto_channel 找不到频道 $chId');
+          return;
+        }
+        await _pickLiveChannel(ch);
         return;
 
       case 'skip_config_open':
@@ -6791,6 +8227,32 @@ class _PlayerPageState extends State<PlayerPage>
       _errorKind = null;
     });
 
+    /*
+     * ══════════════════════════════════════════════════════════════════
+     * ★★★ task-39（T13 残留②）：换直播台后刷新顶栏站名
+     * ══════════════════════════════════════════════════════════════════
+     *
+     * # 改前为什么会坏（T7 如实上报的残留）
+     * ```text
+     * 上面那个 setState 刚把 `_provider` 换成 `pick.provider`（新台所属的源），
+     * 但整段方法**没有任何**取名字的调用 ⇒ 换到**别的 provider** 的台之后，
+     * 顶栏仍然是旧 provider 的名字。
+     * ```
+     *
+     * # 为什么必须在 setState **之后**、且不 await
+     * ```text
+     * ① 顺序：`_loadProviderName` 的代次判据比的是 `_provider`
+     *    （与 `:6381` 那条"★ 换源后刷新顶栏的站名"同一条纪律）——
+     *    放在 setState 之前会把这次当成过期结果丢弃。
+     * ② 不 await：换台要立刻出画面；查名字只挡首帧，之后是进程内缓存。
+     * ③ 并发切台的**画面**代次由下面那条 `_liveChannelId != next.id`
+     *    守卫负责（它是权威）；本条只管站名，两者不冲突：
+     *    即便这次切台随后被判过期，站名也只是提前显示了新源的名字，
+     *    而那种情况下 `_provider` 本来就已是新值。
+     * ```
+     */
+    unawaited(_loadProviderName());
+
     try {
       final list = await SourinApi.getLiveStream(pick.provider, next.id);
       if (!mounted) return;
@@ -7022,18 +8484,64 @@ class _PlayerPageState extends State<PlayerPage>
       // ★ task-31 ⑤ 在线搜索字幕面板（同款全屏浮层）
       _subtitlePanelOpen;
 
-  /// 常驻悬浮返回键是否允许出现
-  /*
-   * ★★★ 常驻悬浮返回键是否允许出现（2026-10-07，用户缺陷②）
-   *
-   * 用户原话：
-   * > 就是箭头指的位置,你看到了吗?而且我现在无法返回到首页了
-   *
-   * 判据与取舍见 `_FloatingBackButton` 的长注释。这里只强调一点：
-   * 它**故意不看** `_controlsVisible` —— 那个字段正是缺陷本身。
-   */
-  bool get _canUseFloatingBack =>
-      Device.isDesktop && _error == null && !_anySheetOpen;
+  /// ★★★ 错误态下顶栏那枚返回箭头**必须仍然可用**（Owner 2026-10-09 新增）
+  ///
+  /// ══════════════════════════════════════════════════════════════════
+  /// # Owner 原话（附截图：黑屏 + 「播放失败 / Failed to open …m3u8」）
+  /// ══════════════════════════════════════════════════════════════════
+  /// ```text
+  /// > 还有一个问题,如果不能播放的时候,左上角的返回,是不能点击的,
+  /// > 只能点击返回按钮,才能返回到上一层
+  /// ```
+  ///
+  /// # 改前为什么点不动（两枚箭头**同时**失效）
+  /// ```text
+  /// ① `_canUseFloatingBack` 里的 `_error == null` 为 false
+  ///    => `onFloatingBack` 传 null
+  ///    => `_TopBar` 内部 `if (!visible && onFloatingBack != null)` 不成立
+  ///    => **常驻悬浮返回键根本不画**；
+  /// ② `visible: _controlsVisible && _error == null` 也是 false
+  ///    => 顶栏那条 `IgnorePointer(ignoring: !visible)` 把整条顶栏挡住
+  ///    => 顶栏那枚箭头「看起来还在」但**命中测试穿不过去**。
+  /// ⇒ 屏幕上**一枚可点的返回箭头都没有**，只剩 `_ErrorOverlay` 里那两颗按钮。
+  /// ```
+  ///
+  /// # ★ 这不是缺陷 2 的回归，是**同一个门控的另一半没补**
+  /// ```text
+  /// 当年加悬浮键时把 `_error != null` 当成「错误层自带返回」——
+  /// 但错误层那颗在**中间**，用户按的是**左上角**那枚。
+  /// 视觉上那枚一直在（顶栏渐隐那层没被移除，只是被 Opacity/IgnorePointer 处理），
+  /// 所以用户的第一反应就是去点它 ⇒ 点不动 = 「卡死」观感。
+  /// ```
+  ///
+  /// # 为什么判据是 `_error != null` 而不是 `!_controlsVisible`
+  /// ```text
+  /// 错误态下**控制条本来就是隐藏的**（`_controlsVisible` 由 _error 一起管），
+  /// 所以这里只需要补「错误时也要有返回口」这一个条件；
+  /// 正常播放时顶栏/悬浮键的既有分工**一个字都不改**。
+  /// ```
+  ///
+  /// ⚠️ `!_anySheetOpen` 必须留：错误态下若还开着浮层（例如从错误浮层点进设置），
+  ///    浮层自己占满交互，且它有 `_error == null` 之外的关闭路径 ⇒ 不抢它的返回。
+  /// ⚠️ 2026-10-10（Owner 缺陷：控制条收起后左上角仍留着一枚箭头）
+  /// ```text
+  /// 这个判据原来只看「桌面端 + 有错误 + 无浮层」，**不看控制条收没收起** ⇒
+  /// 一旦是「先正常播放、3 秒后控制条自动收起、这时才起播失败」，
+  ///   `_controlsVisible == false` 而 `_error != null`
+  /// ⇒ 顶栏的 `visible` 走 `|| _canUseTopBarBack` 恒为 true，
+  ///   `fade` 又被钉成 `kAlwaysCompleteAnimation` ⇒ **不透明度恒 1.0**
+  /// ⇒ 底栏被 `_error == null` 那道门整条卸掉之后，画面上就只剩左上角这一枚
+  ///   常驻、可点的返回箭头（Owner 原话：「原本的播放控件消失之后，
+  ///   你有一个返回的控件一直在显示不消失」）。
+  /// ⇒ 补上 `_controlsVisible`：**控制条收起来了，这一枚也必须跟着收起来**。
+  /// ```
+  /// ★ 不变量（t118 ⑧⑩ 盯着）：本判据与前半段 `_error != null` 仍然**互斥**，
+  ///   正常播放时它恒 false ⇒ 顶栏的显隐仍然只由 `_controlsVisible` 决定，
+  ///   两条控制条的联动**一个字都没改**。
+  /// ★ task-7 的要求也不回归：错误态、控制条还亮着时（刚进错误浮层那阵子）
+  ///   `_controlsVisible` 仍为 true ⇒ 这一枚照旧可点 ⇒ 用户仍能从左上角退回上一层。
+  bool get _canUseTopBarBack =>
+      Device.isDesktop && _error != null && !_anySheetOpen && _controlsVisible;
 
   /// 长按倍速是否启用（PC/TV 恒 false）
   /// 长按手势是否启用
@@ -7447,7 +8955,7 @@ class _PlayerPageState extends State<PlayerPage>
     final v = (_volume + delta).clamp(0.0, 100.0);
     // ★ 用户发起的音量改动（白名单，见 `_lastUserVolumeAction`）
     _lastUserVolumeAction = DateTime.now();
-    _player.setVolume(v);
+    _sendVolume(v);
     /*
      * ★ 静音标志与音量**必须同步**（原版 `v.muted = next === 0`）：
      *   滚/按到 0 ⇒ 静音；从 0 往上 ⇒ 解除静音。
@@ -7523,16 +9031,154 @@ class _PlayerPageState extends State<PlayerPage>
     });
   }
 
+  /// 静音 / 取消静音（缺陷 1 / 11 的核心修复点）
+  ///
+  /// # 错在哪（改之前是一行三元）
+  /// ```dart
+  /// _player.setVolume(_muted ? _volume : 0);
+  /// ```
+  /// 它把「取消静音要恢复到的音量」寄托在 `_volume` 上，而 `_volume`
+  /// 在静音时**合法地等于 0**（`_volumeBy` 把它写成 0、音量监听器也回写 0）
+  /// => 再点一次执行的是 `setVolume(0)` => ★ 永远没声音，
+  ///    而 `_muted` 已被翻成 false => 图标「未静音」但实际全静音（UI 在说谎）。
+  ///
+  /// # 修法：压 0 **之前**先抓快照，恢复时只认快照
+  /// ```text
+  /// 静音    : _volume > 0 => _volumeBeforeMute = _volume; 然后 setVolume(0)
+  /// 取消静音: 恢复目标 = _volumeBeforeMute
+  ///            快照为空/为 0 => 退回偏好里的 lastVolume x 100
+  ///            再为空/为 0 => 退回出厂 100
+  /// ```
+  /// ⚠️ **绝不下发 0** —— 那是改前那个 bug 的全部内容。
+  ///
+  /// ⚠️ 用快照而不是 `_volume` 的当前值：静音期间 `_volume` 会被 mpv 的
+  ///    广播写成 0（见音量监听器），所以「当前值」在取消静音那一刻恒为 0，
+  ///    它**不可能**是正确答案。
   void _toggleMute() {
+    if (_muted) {
+      /*
+       * ★ 取消静音：三级瀑布求恢复目标
+       *   1) 快照（用户静音前的真实音量，最准）
+       *   2) 偏好里的 lastVolume（跨会话的「用户习惯音量」）
+       *   3) 出厂 100（理论上到不了，纯粹兜底不让它下发 0）
+       */
+      var restore = _volumeBeforeMute ?? 0;
+      if (restore <= 0) restore = _lastVolume * 100;
+      if (restore <= 0) restore = 100;
+      _volumeBeforeMute = null;
+      _sendVolume(restore);
+      setState(() => _muted = false);
+      _flash('取消静音 ${restore.round()}%');
+    } else {
+      /*
+       * ★ 静音：**先抓快照再压 0**（顺序不能反 —— 反了就抓不到原音量）
+       *   ⚠️ `_volume > 0` 的守卫是必须的：`_volume` 已经因为
+       *     「拖到 0 自动静音」而等于 0 时，把它记进快照等于把 0 当答案。
+       *     这种情况下保留**旧的**快照（它才是用户真正的音量）。
+       */
+      if (_volume > 0) _volumeBeforeMute = _volume;
+      _sendVolume(0);
+      setState(() => _muted = true);
+      _flash('已静音');
+    }
     /*
-     * ★ 静音/取消静音**不算**"用户调音量" —— 监听器里本来就有
-     *   `!_muted` 守卫（静音时不记），这里**不盖**时间戳是刻意的：
-     *   取消静音时恢复的那个音量，用户并没有"调"它。
+     * ★ 静音/取消静音**不算**「用户调音量」 —— 这里**不盖** `_lastUserVolumeAction`
+     *   是刻意的：取消静音恢复的那个音量，用户并没有「调」它。
+     *   （旧注释把 _toggleMute 列进「三个入口」是自相矛盾的，
+     *    已在 _lastUserVolumeAction 字段上方订正为「三处调用、两处盖戳」。）
      */
-    _player.setVolume(_muted ? _volume : 0);
-    setState(() => _muted = !_muted);
-    _flash(_muted ? '已静音' : '取消静音');
     _showControls();
+  }
+
+  // ══════════════════════════════════════════════════════════════════
+  // ★ 探针钩子（缺陷 1 / 11 静音状态机）—— 仅测试用，不参与生产逻辑
+  // ══════════════════════════════════════════════════════════════════
+  //
+  // 为什么需要它们：`_PlayerPageState` 是 library-private，test/ 拿不到实例；
+  // 而 flutter_test 里**没有 libmpv-2.dll** => `_player` 永远建不起来
+  // => 任何摸 `_player` 的路径都是 LateInitializationError。
+  // 所以这里把"下发"与"状态"分开暴露：
+  // ```text
+  // debugPlayerToggleMute()  => 走**真实**的 _toggleMute（状态机逐字相同）
+  // _probeNoAudio = true     => 让 _sendVolume 短路，只记录下发值
+  // debugPlayerVolumeWrites()=> 读回真实下发序列，断言"绝不下发 0"
+  // ```
+
+  /// 探针用：记录每次 `_sendVolume` 实际下发的值（生产不读它）
+  final List<double> _probeVolumeWrites = <double>[];
+
+  /// 探针用：进入无音频模式（短路 `_sendVolume` 的真实下发）
+  void debugPlayerSetNoAudioForProbe(bool v) => _probeNoAudio = v;
+
+  /// 探针用：调一次真实的静音按钮
+  void debugPlayerToggleMute() => _toggleMute();
+
+  /// 探针用：等价于键盘/滚轮调音量
+  void debugPlayerVolumeBy(double delta) => _volumeBy(delta);
+
+  /// 探针用：等价于拖底栏音量滑杆
+  void debugPlayerSetVolume(double v) {
+    _lastUserVolumeAction = DateTime.now();
+    final next = v.clamp(0.0, 100.0);
+    if (_muted && next > 0) _volumeBeforeMute = next;
+    _sendVolume(next);
+  }
+
+  /// 探针用：读回静音状态机的全部关键量
+  String debugPlayerMuteState() {
+    final before = _volumeBeforeMute;
+    return 'muted=$_muted|volume=${_volume.toStringAsFixed(0)}'
+        '|beforeMute=${before == null ? '-' : before.toStringAsFixed(0)}'
+        '|lastVolume=${(_lastVolume * 100).toStringAsFixed(0)}';
+  }
+
+  /// 探针用：读回实际下发过的音量序列（'/' 分隔）
+  String debugPlayerVolumeWrites() =>
+      _probeVolumeWrites.map((e) => e.toStringAsFixed(0)).join('/');
+
+  /// 探针用：清空下发记录
+  void debugPlayerResetVolumeWrites() => _probeVolumeWrites.clear();
+
+  /// 探针用：直接摆好"当前音量"（模拟用户已经调到这个值）
+  void debugPlayerSeedVolume(double v) {
+    _volume = v.clamp(0.0, 100.0);
+    _muted = _volume <= 0;
+    _volumeBeforeMute = null;
+    _probeVolumeWrites.clear();
+  }
+
+  /// ★ 缺陷 13：把探针塞进去的缓冲区间直接推给 UI（不经 mpv）
+  ///
+  /// 为什么要这个口子：真实 mpv 只在**真播放**时才给出 demuxer-cache-*，
+  /// 而探针要在**任意可控输入**下断言缓冲条的几何。
+  /// 本方法走的是与生产**完全相同**的那条 `setState(_bufferedRange)`，
+  /// 所以它证明的是"UI 对区间的反应"，不是"另一个实现"。
+  BufferedRange? debugPlayerPushBufferForProbe(
+    Duration? end, {
+    Duration? start,
+  }) {
+    setState(() {
+      _bufferedRange = end == null
+          ? null
+          : BufferedRange(end: end, start: start);
+    });
+    return _bufferedRange;
+  }
+
+  BufferedRange? debugPlayerBufferedRangeForProbe() => _bufferedRange;
+
+  bool? debugPlayerBufferPollerRunningForProbe() => _bufferPoller?.running;
+
+  double? debugPlayerBufferStateForProbe() => _bufferStatePercent;
+
+  /// 缓冲条的真实几何（left|top|w|h）；没在树上返回 null
+  String? debugPlayerBufferBarGeometryForProbe() {
+    final ro = _bufferBarKey.currentContext?.findRenderObject();
+    if (ro is! RenderBox) return null;
+    final o = ro.localToGlobal(Offset.zero);
+    final s = ro.size;
+    return 'left=${o.dx.toStringAsFixed(1)}|top=${o.dy.toStringAsFixed(1)}'
+        '|w=${s.width.toStringAsFixed(1)}|h=${s.height.toStringAsFixed(1)}';
   }
 
   void _rateBy(double delta) {
@@ -7582,7 +9228,30 @@ class _PlayerPageState extends State<PlayerPage>
   /// 手机   竖屏播放器铺满即可（本来就是全屏窗口），保持标志位
   /// TV     同上
   /// ```
-  Future<void> _toggleFullscreen() async {
+  /// ⚠️ [awaitOs] —— ★★★ task-8 ① 追加（Owner 2026-10-09 第三批）：
+  ///    允许调用方只提交「标志位 + 布局」而**不串行等待 OS 回包**。
+  ///
+  /// # 为什么需要这个开关（而不是在外面套 unawaited）
+  /// ```text
+  /// 我第一版在 `_exitPlayer` 里写的是 `unawaited(_toggleFullscreen())`，
+  /// 被 lead 用真机日志推翻：`setState(_fullscreen = next)` 明明在同步段执行了，
+  /// 但**布局**要等下一个微任务边界 —— 而 pop 已经开始 ⇒
+  /// 退全屏那一帧布局整个**排在 pop 之后** ⇒ 真机看到「窗口先退全屏、再切页」，
+  /// 比原来更花（正是 :9146 那条注释要避免的）。
+  /// ```
+  /// ⇒ 正确做法：**保留 await 语义**（同步段 + 本帧布局都在调用方仍在 await 时完成），
+  ///    只把**最后那次真 OS 往返**从等待里摘出去。
+  ///
+  /// # 为什么摘掉它是安全的
+  /// ```text
+  /// 实测：`_toggleFullscreen()` 本体 2ms，而全屏返回比非全屏多 16.6ms ——
+  /// 差额全在 `await windowManager.setFullScreen(next)`（真机上=窗口管理器回包）。
+  /// 而这一步之后**没有任何** setState / 布局（已通读全函数体）⇒
+  /// 不等它不会让任何 UI 状态变旧。
+  /// 另外 `dispose()` 里还有一条幂等兜底（`if (_fullscreen && Device.isDesktop)`）
+  /// 会再发一次 `setFullScreen(false)`，即使这一次失败也能收尾。
+  /// ```
+  Future<void> _toggleFullscreen({bool awaitOs = true}) async {
     _fullscreenCalls++;
     final next = !_fullscreen;
     setState(() => _fullscreen = next);
@@ -7652,7 +9321,17 @@ class _PlayerPageState extends State<PlayerPage>
     if (!Device.isDesktop) return; // 移动端没有"窗口全屏"概念
 
     try {
-      await windowManager.setFullScreen(next);
+      if (awaitOs) {
+        await windowManager.setFullScreen(next);
+      } else {
+        /*
+         * ★ 只**发出**不等待：调用方（_exitPlayer）要的是
+         *   「退全屏的请求已发出 + 标志位/布局已更新」，不是「OS 已回包」。
+         * ⚠️ 用 unawaited 包住，避免 lint 与「未处理 Future」。
+         * ⚠️ 失败仍然吞掉（与 await 分支同一语义）—— 不该因此让播放中断。
+         */
+        unawaited(windowManager.setFullScreen(next).catchError((Object _) {}));
+      }
     } catch (_) {
       // 插件不可用（极端情况）—— 不该因此让播放中断
     }
@@ -7738,7 +9417,7 @@ class _PlayerPageState extends State<PlayerPage>
   void _autoHideNow() {
     if (mounted && _playing && !_hintsOpen && !_zoomOpen) {
       setState(() => _controlsVisible = false);
-        /*
+      /*
          * ★★★ 2026-10-08（Owner 追加：顶栏要与底栏**联动**一起消失）
          *
          * # 改前这里**没有**这一行 —— 这正是「顶栏一直不消失」的根因之一
@@ -7757,12 +9436,66 @@ class _PlayerPageState extends State<PlayerPage>
     }
   }
 
+  /// ★ 缺陷 9 探针入口（见文件末尾的顶层转发器）
+  void debugPlayerFlashForProbe(String msg) => _flash(msg);
+
   void _flash(String msg) {
     if (!mounted) return;
     setState(() => _tip = msg);
     Future.delayed(const Duration(milliseconds: 1200), () {
       if (mounted && _tip == msg) setState(() => _tip = null);
     });
+  }
+
+  /// 弹幕失败角标自动消失的时间（毫秒）
+  ///
+  /// 为什么是 8 秒：够用户看清「弹幕失败：…」+ 那半句中文说明（约 40 字），
+  /// 又不至于在画面正中糊太久。见 `_danmakuBadge` 的说明。
+  static const int kDanmakuBadgeFailMs = 8000;
+
+  /// 失败发生的时刻（null = 没有失败）。用来给角标算"还要显示多久"。
+  DateTime? _danmakuErrorAt;
+
+  /// 让角标到点自己消失的定时器
+  ///
+  /// ⚠️ **必须**有这个定时器：`_danmakuBadge` 是 getter，它算得出
+  ///    "已经超时了"，但**没人重建**的话屏幕上那层永远不会消失。
+  ///    （这是"改了 getter 忘了触发重建"的经典坑。）
+  Timer? _danmakuBadgeTimer;
+
+  /// 「取数成功但一条都没有」时那句「没有弹幕」能挂多久（毫秒）
+  ///
+  /// ★ OPS-10 ④：改前它**没有寿命**（永久），Owner 报「不用一直显示」。
+  ///   取 3 秒 = 与控制条"停手 3 秒就收"同一个节奏，用户看到的是
+  ///   一句话跟控制条一起走掉，而不是一个赖着不走的标识。
+  ///
+  /// ⚠️ 必须 < 4 秒：`test/zz_cr_dmk_d_badge_test.dart` 用一次
+  ///    `t.pump(Duration(seconds: 4))` 断言它已经消失 —— 改大了那条会红。
+  static const int kDanmakuBadgeEmptyMs = 3000;
+
+  /// 「没有弹幕」这句是否已经到点（定时器翻的牌，见 `_danmakuBadge`）
+  ///
+  /// ⚠️ 用 bool 而不是 `DateTime.now()` 差值：widget 测试推进的是假时钟，
+  ///    墙钟不动 ⇒ 时间戳判据在测试里恒"未过期"，测出来的是假绿。
+  bool _danmakuEmptyExpired = false;
+
+  /// 到点隐藏角标（失败态 / 空态共用一个计时器）
+  ///
+  /// [ms] 用默认值 = 失败态那 8 秒；空态传 [kDanmakuBadgeEmptyMs]。
+  void _armDanmakuBadgeExpiry([int ms = kDanmakuBadgeFailMs]) {
+    _danmakuBadgeTimer?.cancel();
+    _danmakuBadgeTimer = Timer(
+      Duration(milliseconds: ms),
+      () {
+        if (!mounted) return;
+        /*
+         * ★ 两件事一起做：
+         *   ① 翻牌（getter 下一帧就不再画"没有弹幕"）；
+         *   ② setState 触发重建（getter 是懒的，没人重建就没人重读）。
+         */
+        setState(() => _danmakuEmptyExpired = true);
+      },
+    );
   }
 
   String? _tip;
@@ -8477,6 +10210,12 @@ class _PlayerPageState extends State<PlayerPage>
         // ★ task-53【③】「所有直播」面板也要能被 Esc 关掉
         //   （与其它浮层同层级 —— 否则用户以为 Esc 坏了）
         setState(() => _liveChannelsOpen = false);
+      } else if (_popover.openId != null) {
+        // ★ 悬浮小窗（倍速 / 线路 / 字幕 / 弹幕 / 更多）
+        //
+        // 放在**所有真浮层之后、全屏之前**：popover 只是贴在按钮旁的小卡片，
+        // 它开着时 Esc 该先把它收掉，而不是直接退出全屏。
+        _popover.close();
       } else if (_fullscreen) {
         /*
          * ★ 全屏时先退出全屏，**不要**直接返回（2026-09-24）
@@ -8766,10 +10505,57 @@ class _PlayerPageState extends State<PlayerPage>
   ///
   /// ⚠️ 顺序：**先退全屏，再 pop**。反过来的话 pop 已经开始了，
   ///    退全屏的动画会和页面切换动画打架，看起来像闪一下。
+  /// ★ task-8 ① 探针：直接 await `_toggleFullscreen()`，量它到底要多久 / 卡不卡。
+  ///
+  /// # 为什么要单独量它
+  /// ```text
+  /// `_exitPlayer()` 里只有一处 await 就是它。若它不返回，
+  /// 后面的 `maybePop()` **永远不会执行** —— 用户看到的就是「点了返回没反应」。
+  /// ```
+  Future<int> debugPlayerToggleFullscreenForProbe() async {
+    final sw = Stopwatch()..start();
+    await _toggleFullscreen();
+    return sw.elapsedMilliseconds;
+  }
+
   Future<void> _exitPlayer() async {
-    // ① 全屏状态下先退出全屏（含恢复标题栏）
+    /*
+     * ★★★ task-8 ①（Owner 2026-10-09 第三批）：返回卡顿
+     *
+     * Owner 原话：
+     * > 从播放界面返回的时候很卡顿
+     *
+     * # 实测读数（flutter_tester 逐段 Stopwatch；.probe/zz_t8_latency_probe_test.dart）
+     * ```text
+     * 非全屏路径：_exitPlayer 同步段 0.70ms | 第一帧 19.06ms | 过渡 4.74ms | 合计 24.50ms
+     * 全屏路径  ：_exitPlayer 起手 1.19ms | 第一帧 35.21ms | 过渡 5.14ms | 合计 43.58ms
+     *                                              ^^^^^^^^^^ 比非全屏多 16.6ms
+     * 对照组：`_toggleFullscreen()` 本体耗时 = 2ms（真时钟 runAsync 量得）
+     * ```
+     * ⇒ 那 16.6ms 的差额**几乎全在** `await windowManager.setFullScreen(next)`
+     *   —— 一次真 OS 往返（真机上还要等窗口管理器回包）。
+     *
+     * # ★ 我第一版改错过（记录在此，避免有人再走一遍）
+     * ```text
+     * 我原本写成 `unawaited(_toggleFullscreen())`，被 lead 用真机日志推翻：
+     *   `setState(_fullscreen = next)` 虽在同步段，但**布局**要等下一个微任务边界，
+     *   而那时 pop 已经开始 ⇒ 退全屏那一帧布局**整个排在 pop 之后**
+     *   ⇒ 真机看到「窗口先退全屏、再切页」，比原来更花 ——
+     *   正是 :9146 那条注释要避免的。
+     * ```
+     * ⇒ 正确做法 = **保住 await**，只把最后那次 OS 往返摘出等待窗口（`awaitOs: false`）：
+     *   ```text
+     *   · `_toggleFullscreen` 的同步段（setState / _flash / 回调 / titleBar）
+     *     以及**本帧布局**，都在 `_exitPlayer` 仍 await 时完成 ⇒ **帧序不变**；
+     *   · OS 调用照样发出去，只是不串行等它回包。
+     *   ```
+     * ⇒ 「先退全屏再 pop」的**语义**与**帧序**都保住，卡顿（那次 OS 往返）去掉。
+     *
+     * ⚠️ 非全屏时**一格都不变**（不进分支）：实测 `_fullscreenCalls 前=0 后=0`。
+     */
+    // ① 全屏状态下先退全屏（**仍 await**：保住帧序），但不串行等 OS 回包
     if (_fullscreen) {
-      await _toggleFullscreen();
+      await _toggleFullscreen(awaitOs: false);
     }
     // ② 保底：无论是否全屏，退出时标题栏都必须是可见的
     titleBarVisible.value = true;
@@ -8780,15 +10566,152 @@ class _PlayerPageState extends State<PlayerPage>
      * （首页是浅色主题，顶一条黑带非常突兀）。
      * 这是"成对置位"类缺陷的典型形态，所以 `_exitPlayer` 与
      * `dispose` **两处都复位**（幂等，`ValueNotifier` 值不变时不通知）。
+     *
+     * ══════════════════════════════════════════════════════════════════
+     * ★★★ OPS-12 ⑦（Owner 2026-10-10 第四批）：**复位时机**也是缺陷的一部分
+     * ══════════════════════════════════════════════════════════════════
+     *
+     * Owner 原话：
+     * > 从播放页返回上一级感觉十分卡顿,还是卡顿,还是需要优化
+     *
+     * # 实测（`.probe\ops\zz_ops12_*_probe_test.dart`，同一次 run 内做因果 A/B）
+     * ```text
+     * 触发这一行（返回帧同步复位）：返回帧 276 个元素 / 墙钟 59.23ms
+     * 抑制这一行（先手动置 false）  ：返回帧 244 个元素 / 墙钟 32.61ms
+     *                                    ↑ 差 ≈ 27ms 全在这一行上
+     * ```
+     * 独立复测（本文件同目录的 `test/zz_cr_jank_titlebar_flip_test.dart`）：
+     * ```text
+     * 返回帧全量 277 个元素 / 60.67ms，其中**标题栏本体 33 个元素**；
+     * 阳性对照（单独人为翻一次深色态）：标题栏本体 33 个元素 / 22.32ms
+     * ```
+     *
+     * # 为什么它这么贵（一句话根因）
+     * ```text
+     * titleBarDark 由 shell.dart 的 _TitleBarHostState 监听
+     * （lib/shell.dart:5199 addListener → :5221 _onVisibleChanged → setState），
+     * 而 _TitleBarHost 挂在 MaterialApp.builder 上、**在 Navigator 之上**
+     * ⇒ 它一变，**返回帧**（那一帧本来就要付整条 pop 级联）**还要多付一次**
+     *   "深色支 → 浅色支"的标题栏重建 —— 浅色支是液态玻璃子树
+     *   （GlassContainer / AdaptiveGlass / LightweightLiquidGlass，
+     *   见 lib/shell.dart:5473-5497），实测 33 个元素 / ≈22ms。
+     * ```
+     *
+     * # 修法：**让开返回帧**（不是"不复位"）
+     * ```text
+     * 深色态照样被复位（否则返回首页后标题栏一直是黑的 —— 那是
+     * test/titlebar_dark_on_player_test.dart 钉死的成对置位约束），
+     * 只是把这次翻转推到**返回帧画完之后**：
+     *   · 返回帧只付 pop 级联 ⇒ 用户点下去的那一下不再叠加 22ms；
+     *   · 翻转落在转场期间的后一帧（那时页面本来就在重画）。
+     * ```
+     *
+     * # 为什么是 postFrameCallback，不是 `Future.microtask` / `Future.delayed(0)`
+     * ```text
+     * 微任务/零延时定时器都可能在**返回帧的 build 之前**跑完
+     * （帧与帧之间微任务队列会被排空）⇒ 标题栏照样脏在同一帧上，
+     * 换了写法没换行为 = 假修。
+     * addPostFrameCallback 是**帧边界**语义：保证在"这一帧已经画完"之后才跑。
+     * ```
+     *
+     * ⚠️ 顺带调用了 `scheduleFrame()`：`addPostFrameCallback` **自己不会**
+     *    保证有下一帧。若这次 pop 因为某种原因没排上帧（例如栈顶不是本页），
+     *    回调就永远不跑 ⇒ 标题栏卡在深色态。`scheduleFrame()` 幂等
+     *    （已有帧在排就什么都不做），拿它买这个保证。
      */
-    titleBarDark.value = false;
+    _scheduleTitleBarDarkReset();
     // ③ 真正返回
     if (mounted) Navigator.of(context).maybePop();
+  }
+
+  /// 把「标题栏退出深色态」推到**返回帧画完之后**（详见 `_exitPlayer` 里的长注释）。
+  ///
+  /// ⚠️ 只有 `_exitPlayer` 用这个（主动返回那条路）；`dispose` 里仍然直接复位 ——
+  ///    那是**兜底**，它跑的时候页面早就没了，没有"返回帧"可让。
+  void _scheduleTitleBarDarkReset() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      titleBarDark.value = false;
+    });
+    // 见 _exitPlayer 的注释：addPostFrameCallback 不保证有下一帧。
+    WidgetsBinding.instance.scheduleFrame();
   }
 
   // ═══════════════════════════════════════════════════════════════════
   //  生命周期
   // ═══════════════════════════════════════════════════════════════════
+
+  /// ★ 缺陷 13：把 mpv 的缓冲属性接到底栏（500ms 轮询，见 _BufferPoller）
+  ///
+  /// # 为什么要**交叉校验**（这是本条最容易被忽略的一步）
+  /// ```text
+  /// demuxer-cache-time 是绝对时间轴上的缓出点，但它**不保证**与
+  /// 当前 position 同源 —— 刚 seek 完、或换源之后，两者会短暂地
+  /// 各说各话。实测表现是缓冲条**瞬间跨过整个进度条**再弹回来。
+  ///
+  /// 判据：end 必须 ≈ position + span（跨度就是"从当前位置往后缓存了多少"）。
+  /// 差超过 2 秒就认为这一拍不可信 ⇒ 上报 null ⇒ 不画。
+  /// 宁可少画一条，也不能画一条错的 —— 用户会据此判断该不该换源。
+  /// ```
+  ///
+  /// ⚠️ `kBufferRangeMode == 'off'` 时**一条属性都不读**（零开销）。
+  void _bindBufferPoller() {
+    if (kBufferRangeMode == 'off') return;
+    _bufferPoller = _BufferPoller(
+      read: _readMpvDouble,
+      onChanged: (end, statePercent, spanSec) {
+        if (!mounted) return;
+        _bufferStatePercent = statePercent;
+        if (end == null) {
+          // ★ 读不到就如实清空（不保留上一次的值 —— 那会变成"卡住不动"的假区间）
+          if (_bufferedRange != null) {
+            setState(() => _bufferedRange = null);
+          }
+          return;
+        }
+        if (spanSec != null) {
+          final expected = _position.inMilliseconds + (spanSec * 1000).round();
+          if ((end.inMilliseconds - expected).abs() > 2000) {
+            debugPrint(
+              '[PLAYER] 缓冲区间校验不过：end=${end.inMilliseconds}ms '
+              'position=${_position.inMilliseconds}ms span=${spanSec}s ⇒ 本次不画',
+            );
+            if (_bufferedRange != null) {
+              setState(() => _bufferedRange = null);
+            }
+            return;
+          }
+        }
+        final startMs = spanSec == null
+            ? null
+            : (end.inMilliseconds - (spanSec * 1000).round()).clamp(0, 1 << 40);
+        setState(() {
+          _bufferedRange = BufferedRange(
+            end: end,
+            start: startMs == null ? null : Duration(milliseconds: startMs),
+          );
+        });
+      },
+    );
+  }
+
+  /// 读一个 mpv 属性为 double；读不到返回 null（**不抛**）
+  ///
+  /// ⚠️ 判据来自 media_kit 的实现（`real.dart:1278`）：
+  ///    `getProperty` 读不到属性时返回**空串**，不抛异常。
+  ///    所以"空串"是唯一的失败信号，必须显式拦掉，
+  ///    否则 `double.tryParse('')` 虽然也是 null，但会掩盖"属性名写错"这一类错。
+  Future<double?> _readMpvDouble(String key) async {
+    final platform = _player.platform;
+    if (platform is! NativePlayer) return null;
+    try {
+      final raw = await platform.getProperty(key);
+      if (raw.trim().isEmpty) return null;
+      return double.tryParse(raw.trim());
+    } catch (_) {
+      return null;
+    }
+  }
 
   @override
   void dispose() {
@@ -8797,6 +10720,11 @@ class _PlayerPageState extends State<PlayerPage>
      *   否则 flutter_test 会判红（AnimationController 泄漏）。
      */
     _controlsAnim.dispose();
+    // 缺陷 13：轮询定时器必须跟着本页停掉
+    _bufferPoller?.stop();
+    _bufferPoller?.clear();
+    // ★ 2026-10-09：弹幕失败角标的到点隐藏定时器 —— 不 cancel 会泄漏（且回调打到已卸载 State）
+    _danmakuBadgeTimer?.cancel();
     /*
      * ★ 退出前**立刻**落盘
      *
@@ -8818,6 +10746,9 @@ class _PlayerPageState extends State<PlayerPage>
      */
     _onFullscreenChanged = null;
     _onEpisodeChanged = null;
+    // ★ popover 的唯一真值源（ChangeNotifier ⇒ 必须 dispose）
+    _popover.dispose();
+    _positionNotifier.dispose();
     /*
      * ★ 注销 early handler + 释放显式 FocusNode（task-42）
      *
@@ -8984,6 +10915,19 @@ class _PlayerPageState extends State<PlayerPage>
           onPointerSignal: _onPointerSignal,
           child: MouseRegion(
             onHover: (_) => _showControls(),
+            /*
+             * ★★★ task-16（Owner：「全屏左上角这个单独的返回icon,还没消失」）
+             *
+             * 整页级指针进出 —— 悬浮返回键的**常驻**判据就靠这两位。
+             * 见 `_pointerInside` 的长注释（含「为什么不能用 onHover」）。
+             *
+             * ⚠️ 它们与上面的 `onHover` **并列**、互不替代：
+             *    onHover   = 「鼠标在动」⇒ 续命控制条（3 秒计时器重排）
+             *    onEnter/Exit = 「鼠标在不在」⇒ 悬浮键该不该常驻
+             * 两者的触发条件不同（静止的指针不发 hover），所以缺一不可。
+             */
+            onEnter: (_) => _onPointerEnter(),
+            onExit: (_) => _onPointerExit(),
             child: GestureDetector(
               key: _gestureKey, // ★ 探针靠它精确定位到播放页自己这个 detector
               /*
@@ -9449,14 +11393,12 @@ class _PlayerPageState extends State<PlayerPage>
                     ),
 
                     // ── 缓冲指示 ──
+                    //
+                    // ★ OPS-14：原来是 SizedBox(44×44) + 纯白 4px 描边的转圈
+                    //   （Owner 原话：「那个转圈的颜色太浅了,然后这个圆圈是不是有点大?」）
+                    // ⇒ 换成共享组件：直径 44 → 30、描边 4 → 2.8、颜色不再写死纯白。
                     if (_buffering && !_loading)
-                      const Center(
-                        child: SizedBox(
-                          width: 44,
-                          height: 44,
-                          child: CircularProgressIndicator(color: Colors.white),
-                        ),
-                      ),
+                      const Center(child: AppLoading()),
 
                     // ── 加载中 ──
                     if (_loading) const _LoadingOverlay(),
@@ -9522,15 +11464,15 @@ class _PlayerPageState extends State<PlayerPage>
                      *    false ⇒ 整条不渲染）。现在用 `visible` 表达同一件事。
                      */
                     _TopBar(
-                        title: _title,
-                        episodeTitle: _epIndex < _episodes.length
-                            ? _episodes[_epIndex].title
-                            : widget.episodeTitle,
-                        isLive: _isLive,
-                        providerName: _providerName,
-                        onBack: () => unawaited(_exitPlayer()),
-                        onHints: hints.isEmpty ? null : _toggleHints,
-                        /*
+                      title: _title,
+                      episodeTitle: _epIndex < _episodes.length
+                          ? _episodes[_epIndex].title
+                          : widget.episodeTitle,
+                      isLive: _isLive,
+                      providerName: _providerName,
+                      onBack: () => unawaited(_exitPlayer()),
+                      onHints: hints.isEmpty ? null : _toggleHints,
+                      /*
                      * ★ 常驻悬浮返回键（用户缺陷②）
                      *
                      * 用户原话：
@@ -9539,10 +11481,15 @@ class _PlayerPageState extends State<PlayerPage>
                      * 顶栏随控制条 3 秒后一起消失 ⇒ 屏幕上再没有可点的返回口。
                      * 判据与设计见 `_FloatingBackButton` 的长注释。
                      */
-                        onFloatingBack: _canUseFloatingBack
-                            ? () => unawaited(_exitPlayer())
-                            : null,
-                        /*
+                      /*
+                         * ★★★ 缺陷（Owner 2026-10-09）：错误态下**也要**给返回口
+                         *
+                         * 改前只有 `_canUseFloatingBack` ⇒ `_error != null` 时传 null
+                         * ⇒ 悬浮键不画（`_TopBar` 内部 `if (!visible && onFloatingBack != null)`），
+                         * 而顶栏那枚又因 `visible == false` 被 IgnorePointer 挡住。
+                         * 见 `_canUseTopBarBack` 的长注释。
+                         */
+                      /*
                          * ★ 顶栏渐变条的可见性 —— 与**底栏同一条判据**
                          *
                          * 底栏的判据是
@@ -9556,16 +11503,71 @@ class _PlayerPageState extends State<PlayerPage>
                          *    悬浮返回键的可见性由 `_TopBar` 内部
                          *    `if (!visible && onFloatingBack != null)` 单独决定，
                          *    与这条渐变条**解耦**。
+                         *
+                         * ★★★ 2026-10-09 追加（Owner 新增缺陷）：`|| _canUseTopBarBack`
+                         * ```text
+                         * 错误态下 `_controlsVisible && _error == null` 必为 false
+                         * ⇒ `IgnorePointer(ignoring: true)` 把顶栏整条挡住 ⇒ 箭头点不动。
+                         * 补上 `_canUseTopBarBack`（= 桌面端 && 有错误 && 无浮层）后：
+                         *   顶栏那条**保持可见**（顶栏本身就是错误态下唯一的返回视觉），
+                         *   而 IgnorePointer 照旧 `!visible` 参与 ⇒ 箭头可命中。
+                         * ```
+                         * ⚠️ 为什么**不是**复用 `_canUseFloatingBack`：那一位在错误态恒 false
+                         *    （它含 `_error == null`），写进去等于没改。
                          */
-                        visible: _controlsVisible && _error == null,
-                        /*
+                      visible:
+                          (_controlsVisible && _error == null) ||
+                          _canUseTopBarBack,
+                      /*
                          * ★ 2026-10-08（Owner 第 9 条）：顶栏的淡入淡出。
                          *
                          * ⚠️ 只喂给那条渐变条 —— 常驻悬浮返回键走
                          *    `onFloatingBack`，**不参与**淡出（见 `_TopBar.fade` 的说明）。
+                         *    -- ★★★ 2026-10-09 修正（缺陷 2）：上面这句已不成立，原话保留供追溯；
+                         *       现在同一条 _controlsFade 同时喂给 floatingFade，两者不透明度之和恒为 1（交叉淡化）。
+                         *       为何改：硬切会让两枚箭头同屏，用户读作「返回图标残留」。
+                         *
+                         * ★★★ 2026-10-09 追加（Owner 新增缺陷 · 错误态返回箭头）：
+                         *    错误态下 `fade` **必须钉在 kAlwaysCompleteAnimation**。
+                         * ```text
+                         * 根因：`_controlsFade` 的终值是 `_controlsVisible ? 1.0 : 0.0`
+                         *       （`_applyControlsMotion` 里驱动）。错误态下控制条本就是隐藏的
+                         *       => `_controlsFade` 会走到 **0** => `Opacity(opacity: 0)`。
+                         *       于是即使把 `visible` 打开成 true（IgnorePointer 放行命中测试），
+                         *       箭头仍然是**全透明**的 —— 用户还是看不见、也就不会去点。
+                         * ```
+                         * ⇒ 那一支把 fade 钉死为 1（kAlwaysCompleteAnimation 的 value 恒为 1.0，
+                         *    而 `_TopBar` 里是 `fade?.value ?? 1.0` ⇒ 等价且不用改 _TopBar 内部）。
+                         *
+                         * ⚠️ **为什么在错误态钉死是安全的**（不产生缺陷 2 的「两枚箭头同屏」）：
+                         * ```text
+                         * 缺陷 2 的交叉淡化是为了让「顶栏箭头」与「悬浮键」在**互相切换**时
+                         * 不出现两枚同时可见。而错误态下 `_canUseFloatingBack == false`
+                         * （它含 `_error == null`）⇒ `onFloatingBack` 虽然非 null（我们刚补的），
+                         * 但 `if (!visible && onFloatingBack != null)` 里 `visible` 此时为 true
+                         * ⇒ **悬浮键那一支不成立、不会画**。
+                         * ⇒ 屏幕上只有顶栏这一枚 ⇒ 交叉淡化**不需要维持** ⇒ 钉死无冲突。
+                         * ```
+                         * ⚠️ 正常播放时（`_error == null`）表达式退化成原来的 `_controlsFade`
+                         *    **逐字节不变** ⇒ 缺陷 2 的几何/交叉淡化判据（zz_t2 探针）不受影响。
                          */
-                        fade: _controlsFade,
-                      ),
+                      fade: _canUseTopBarBack
+                          ? kAlwaysCompleteAnimation
+                          : _controlsFade,
+                      backArrowKey: _topBarBackKey,
+                      /*
+                         * ★★★ task-16（Owner：「全屏左上角这个单独的返回icon,
+                         *     还没消失」）—— 悬浮键的**常驻**判据。
+                         *
+                         * 根因：悬浮键 opacity 原本恒为 `1 - f`，控制条一藏
+                         * （f → 0）它就是 1 ⇒ 满不透明地常驻在左上角。
+                         * 现在乘上「指针还在页内」这个因子（见 `_pointerInside`）。
+                         *
+                         * ⚠️ 这里传的是**整页级**的 `MouseRegion` 维护的那个值，
+                         *    不是本按钮自己的矩形 —— 用户的本意是
+                         *    「鼠标在画面上就该有返回口」。
+                         */
+                    ),
 
                     /*
                  * ── 直播"只有音频能播"的提示（用户报的黑屏）──
@@ -9780,7 +11782,7 @@ class _PlayerPageState extends State<PlayerPage>
                         !_videoOutputDead)
                       _BottomBar(
                         playing: _playing,
-                        position: _position,
+                        positionNotifier: _positionNotifier,
                         duration: _duration,
                         isLive: _isLive,
                         rate: _rate,
@@ -9794,7 +11796,20 @@ class _PlayerPageState extends State<PlayerPage>
                         onVolume: (v) {
                           // ★ 用户拖底栏音量滑杆 —— 白名单（见 `_lastUserVolumeAction`）
                           _lastUserVolumeAction = DateTime.now();
-                          _player.setVolume(v);
+                          /*
+                           * ★★★ 缺陷 1 / 11：静音期间把滑杆拖到非零，必须同步快照
+                           *
+                           * ```text
+                           * 为什么不能只靠音量监听器（上面那条 _muted 分支）？
+                           *   用户拖到**与当前值相同的数**时，mpv 幂等、**不发**广播
+                           *   => 监听器根本收不到这次动作 => 快照还是旧值
+                           *   （这正是 _lastUserVolumeAction 用"时间窗"而不是"布尔"的理由）
+                           * ⇒ 快照的更新必须有一条"即使无广播也能到达"的入口。
+                           * ```
+                           */
+                          final next = v.clamp(0.0, 100.0);
+                          if (_muted && next > 0) _volumeBeforeMute = next;
+                          _sendVolume(next);
                         },
                         onToggleMute: _toggleMute,
                         onRate: (r) => _player.setRate(r),
@@ -9802,7 +11817,24 @@ class _PlayerPageState extends State<PlayerPage>
                         pipSupported: _pipSupported,
                         pipActive: _pipActive,
                         onTogglePip: _togglePip,
-                        hasEpisodes: _episodes.length > 1,
+                        /*
+                     * ★★★ task-2【④】用户第 15 条：「在非全屏状态下,选集的按钮不应该出现占位置」。
+                     *
+                     * 错在哪：这里原来只判 _episodes.length > 1 ⇒ 只要有多集就在底栏画
+                     * 一枚「选集」。但**非全屏且右侧详情栏可见**时，详情栏里本来就有正常的
+                     * 选集入口（detail_page.dart:2266 _bodyEpisodes），底栏那枚是重复入口。
+                     *
+                     * 为什么改这一个布尔就够：_BottomBar 里**三处**「选集」按钮
+                     * （row / compactRow / row2 三个宽度档）**共用这一个 hasEpisodes**，
+                     * 全部写成 if (hasEpisodes) TextButton.icon(... '选集' ...)
+                     * ⇒ 改这一处 = 三处同时生效，**不需要**去动三处按钮本体。
+                     *
+                     * ★ 禁止写成「非全屏就隐藏」：判据是 widget.hasRightDetailBar
+                     *   （= !fullscreen && wide，由 media_page.dart:729 单一数据源算得），
+                     *   窄屏/全屏/历史记录 push 进来（默认 false）时**必须仍显示**。
+                     */
+                        hasEpisodes:
+                            _episodes.length > 1 && !widget.hasRightDetailBar,
                         onEpisodes: () =>
                             setState(() => _episodeSheetOpen = true),
                         /*
@@ -9900,26 +11932,69 @@ class _PlayerPageState extends State<PlayerPage>
                      * 点了只弹一句提示的按钮”更诚实（详见 _BottomBar
                      * 的 castUrl 文档）。
                      */
-                    onCast: _openCast,
-                    castUrl: _current?.url ?? '',
-                    castHeaders: _current?.httpHeaders ?? const <String, String>{},
-                    castTitle: _castTitle,
-                    /*
+                        // ★ 2026-10-10：投屏已收进「更多」浮层（数据由
+                        //   `castEntry` 带着真的 CastButton 带进来），
+                        //   底栏不再接收 onCast/castUrl/castHeaders/castTitle
+                        //   —— 那四个参数留着是「声明了但一次都没读」的死接线。
+                        /*
                      * ★ 2026-10-08（Owner 第 9 条）：底栏与顶栏**同一个**
                      *    `_controlsFade` 实例 ⇒ 两条一起淡出，
                      *    不会出现「顶栏没了、底栏还在」的半截状态。
                      */
-                    fade: _controlsFade,
+                        fade: _controlsFade,
+                        buffered: _isLive ? null : _bufferedRange,
+                        bufferBarKey: _bufferBarKey,
+                        /*
+                     * ★★★ 2026-10-09（Owner 第 12 条）popover / 「更多」入口数据
+                     */
+                        popover: _popover,
+                        streams: _streams,
+                        currentStream: _current,
+                        onPickStream: (s) => _startPlayback(s),
+                        qualityOptions: _qualityPopoverOptions(),
+                        onPickQuality: _pickQualityByLabel,
+                        currentQuality:
+                            _current?.label ?? _current?.quality ?? '',
+                        trackGroups: _trackPopoverGroups(),
+                        onPickTrack: _pickTrackFromPopover,
+                        moreGroups: _moreMenuGroups(context),
+                        onBuilt: (b) => _bottomBarWidget = b,
                       ),
 
-                    // ── 提示气泡 ──
-                    if (_tip != null)
-                      Positioned(
-                        left: 0,
-                        right: 0,
-                        top: 90,
-                        child: Center(child: _TipBubble(text: _tip!)),
+                    /*
+                     * ★ popover 层 —— 与 `_BottomBar` **兄弟**，挂在整屏这个
+                     *   Stack 里。理由见 `buildPopoverLayer` 的长注释。
+                     */
+                    Positioned.fill(
+                      child: Align(
+                        alignment: Alignment.bottomRight,
+                        child: Padding(
+                          padding: const EdgeInsets.only(
+                            right: Sp.x2,
+                            bottom: _kPlayerBottomBarHeight,
+                          ),
+                          child: ListenableBuilder(
+                            listenable: _popover,
+                            builder: (context, _) => buildPopoverLayer(),
+                          ),
+                        ),
                       ),
+                    ),
+
+                    /*
+     * ── 提示气泡 ──
+     *
+     * ★★★ OPS-10 ⑤：它**必须**排在所有全屏面板之后（原来在上面那个位置）。
+     * ```text
+     * 两个面板（弹幕设置 / B 站导入）都是 `Positioned.fill` + 0.72 黑底的
+     * **全屏 scrim**（player_page.dart:11606 / :11650）。`_flash` 写的是
+     * `_tip`，气泡画在这个 Stack 里 ⇒ 谁在后面谁盖住谁。
+     * 导入是**在面板里**点的按钮：气泡排在面板前面时，用户刚点完
+     * 「导入并绑定」→ `_flash` 真的执行了、`_tip` 也真的写了，
+     * 但那句话被面板的黑底盖住 ⇒ 用户看到的就是「没有任何提示和反馈」
+     * —— 这正是 Owner 报的那一条。
+     * ```
+     */
 
                     // ── 快捷键提示 ──
                     if (_hintsOpen)
@@ -10058,6 +12133,16 @@ class _PlayerPageState extends State<PlayerPage>
                           onReload: _reloadDanmaku,
                           onOpenBili: _openBiliSheet,
                           onHintAction: _runDanmakuHintAction,
+                          /*
+                           * ★ 2026-10-09：屏蔽词 / 分类开关改了就重建播放页 ——
+                           *   过滤发生在 danmaku_overlay 的排版那一层，
+                           *   重建后 `_ensureLayout` 会用新规则重排（旧布局被 key 判为过期）。
+                           *   `_danmakuComments` **不动**：屏蔽只影响"画什么"，
+                           *   不影响"有几条"（面板读数才不会撒谎）。
+                           */
+                          onChanged: () {
+                            if (mounted) setState(() {});
+                          },
                           onClose: () =>
                               setState(() => _danmakuSheetOpen = false),
                         ),
@@ -10161,18 +12246,45 @@ class _PlayerPageState extends State<PlayerPage>
                     Positioned.fill(
                       child: SheetTransition(
                         visible: _episodeSheetOpen,
-                        slideFrom: Device.isDesktop
+                        // ★ 2026-10-09（Owner 第 12 条）：形态按**面板几何**定，
+                        //   不再按 `Device.isDesktop` 分叉 ——
+                        //   桌面/手机横屏都是右侧轻量侧栏，只有竖屏是底部面板。
+                        slideFrom: _episodePanelIsDrawer(context)
                             ? const Offset(24, 0)
                             : const Offset(0, 24),
-                        // ★ 深色皮肤 —— 见 `PlayerPanelTheme` 的说明（①-B）
+                        // ★ 2026-10-10 补回：`df71848`（选集面板重做）把这一层
+                        //   连同旧的 `EpisodePanel` 一起换掉了，深色皮肤随之丢失
+                        //   ⇒ 面板内部读 `Theme.of` 的 Material 控件
+                        //   （两个 `IconButton`、格子 `InkWell`）的
+                        //   splash / hover / 焦点色会取到**外层浅色主题**，
+                        //   落在深色面板上。三个浮层（选集 / 直播 / 线路）
+                        //   必须是**同一个** `PlayerPanelTheme`（①-B）。
+                        //   ⚠️ 它只包 `Align`，**不**包 `Positioned.fill` ——
+                        //      它不产生 RenderObject，不会踩 ParentDataWidget 那个坑。
                         child: PlayerPanelTheme(
-                          child: EpisodePanel(
-                            episodes: _episodes,
-                            currentIndex: _epIndex,
-                            onPick: _gotoEpisode,
-                            onClose: () =>
-                                setState(() => _episodeSheetOpen = false),
-                          ),
+                          child: _episodePanelIsDrawer(context)
+                              ? Align(
+                                  alignment: Alignment.centerRight,
+                                  child: PlayerEpisodePanel(
+                                    episodes: _episodes,
+                                    currentIndex: _epIndex,
+                                    onPick: _gotoEpisode,
+                                    onClose: () =>
+                                        setState(() => _episodeSheetOpen = false),
+                                    style: PlayerEpisodePanelStyle.rightDrawer,
+                                  ),
+                                )
+                              : Align(
+                                  alignment: Alignment.bottomCenter,
+                                  child: PlayerEpisodePanel(
+                                    episodes: _episodes,
+                                    currentIndex: _epIndex,
+                                    onPick: _gotoEpisode,
+                                    onClose: () =>
+                                        setState(() => _episodeSheetOpen = false),
+                                    style: PlayerEpisodePanelStyle.bottomSheet,
+                                  ),
+                                ),
                         ),
                       ),
                     ),
@@ -10366,6 +12478,15 @@ class _PlayerPageState extends State<PlayerPage>
                  *     它反过来把 bug 钉成了契约，见 `test/`
                  *     `player_panel_wiring_test.dart` 的「坑 4」。）
                  */
+                    // ★ OPS-10 ⑤：气泡排在全屏面板**之后**（见上面那段注释）
+                    if (_tip != null)
+                      Positioned(
+                        left: 0,
+                        right: 0,
+                        top: 90,
+                        child: Center(child: _TipBubble(text: _tip!)),
+                      ),
+
                     Positioned.fill(
                       child: SheetTransition(
                         visible: _streamSheetOpen,
@@ -10410,19 +12531,15 @@ class _PlayerPageState extends State<PlayerPage>
 class _LoadingOverlay extends StatelessWidget {
   const _LoadingOverlay();
 
+  /// ★ OPS-14：原来这里是裸的 CircularProgressIndicator，颜色写死为纯白，
+///   （不写出参名，避免撞上测试里那条按字面量匹配的源码门禁；下面三行是真实改动）
+  ///   没给尺寸/描边 ⇒ Material 默认 4px 描边、约束到 40×40，叠在 `black54` 上
+  ///   就是业主说的「太浅 + 太大」。现在整块交给共享组件，尺寸与描边只有一处真源。
+  /// ⚠ 文案**保留**（不改成别的字），只是颜色不再用纯白。
   @override
   Widget build(BuildContext context) => const ColoredBox(
     color: Colors.black54,
-    child: Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          CircularProgressIndicator(color: Colors.white),
-          SizedBox(height: Sp.x4),
-          Text('正在加载…', style: TextStyle(color: Colors.white)),
-        ],
-      ),
-    ),
+    child: Center(child: AppLoading(label: '正在加载…')),
   );
 }
 
@@ -10912,6 +13029,25 @@ double? debugPlayerDurationSeconds() {
 /// ⚠️ `_flash` 会在 1.2 秒后自动清空，所以实测要在点击后**立刻**读。
 String? debugPlayerLastTip() => _livePlayerState?._tip;
 
+/// ★ 缺陷 9 探针（`test/zz_t3_flash_probe_test.dart:75`）用：
+///   把一句话**走生产链路** `_flash` 送进提示条。返回 true = 真的写进了 `_tip`。
+///
+/// ⚠️ 走的必须是**生产**的 `_flash`（含它的 1.2 秒自清空 Timer），
+///    不能是「直接 setState(_tip = msg)」—— 那样证明不了提示条**画得出来**，
+///    只证明我在测试里改了个变量。
+bool debugPlayerFlashForProbe(String msg) {
+  final st = _livePlayerState;
+  if (st == null) return false;
+  st.debugPlayerFlashForProbe(msg);
+  return st._tip == msg;
+}
+
+/// ★ 缺陷 9 探针用：读当前提示条文本（null = 没有提示条）
+///
+/// 与 `debugPlayerLastTip()` 是同一个东西，命名对齐探针里的调用；
+/// 保留两个名字是因为 `debugPlayerLastTip` 已被别的探针引用（改名会连带改别人）。
+String? debugPlayerTipForProbe() => _livePlayerState?._tip;
+
 /// 累计调用 `_seekBy` 的次数（探针用），无播放页时返回 null
 ///
 /// # 为什么用**计数器**而不是只看位置
@@ -11222,24 +13358,40 @@ bool? debugPlayerRewindTimerActive() => _livePlayerState?._rewindTimer != null;
 /// 累计调用 `_takeScreenshot` 的次数（★ task-21 P1-30 探针用），无播放页时返回 null
 int? debugPlayerScreenshotCalls() => _livePlayerState?._screenshotCalls;
 
-/// ★★★ 2026-10-08（Owner 追加：顶栏与底栏联动）
+/// ★★★ 错误态返回箭头探针（Owner 2026-10-09 新增缺陷）
 ///
-/// 读**两条控制条真实的不透明度** —— 判据不是「`_controlsVisible` 是什么」，
-/// 而是「用户眼睛里看到的是不是淡出了」。
+/// 返回 `(顶栏箭头矩形, 顶栏箭头**不透明度**, 顶栏是否参与命中测试)`。
 ///
-/// # 为什么必须读动画值而不是读那个 bool
+/// # 为什么单看「矩形存在」不够（这是本缺陷最容易自欺的地方）
 /// ```text
-/// 本次修的正是「bool 对了、画面没变」这一类缺陷：
-///   · 顶栏改前 `visible: _controlsVisible` 传对了，
-///     但 `_controlsFade.value` 恒 1.0（没人驱动）⇒ 画面**从不变**；
-///   · 而且外层那个 `|| _canUseFloatingBack` 让它**根本没被卸下**。
-/// ⇒ 只读 bool 的断言对这两个都**看不出来**（假绿）。
+/// 改前顶栏那枚箭头的**矩形一直都在**（`Opacity` 与 `IgnorePointer`
+/// 都不改变布局）—— 只断言「矩形非 null」在改前**也会通过**，
+/// 证明不了「点得动」。所以必须同时量：
+///   ② 不透明度：`_TopBar` 里 `Opacity(opacity: fade?.value ?? 1.0)`
+///      —— 控制条隐藏时 `_controlsFade == 0` ⇒ 箭头全透明（看得见才怪）；
+///   ③ 命中测试：`IgnorePointer(ignoring: !visible)` 是否放行。
 /// ```
-///
-/// 返回 `(顶栏不透明度, 底栏不透明度)`；无播放页时返回 null。
-///
-/// ⚠️ 两条读的是**同一个** `_controlsFade` —— 这正是「联动」的实现方式，
-///    所以正常情况下两个数**必须相等**。
+/// ③ 的读法：从箭头中心打一次真实 hitTest，看路径里有没有 `IconButton`；
+/// 这个动作在 `_probeTopBarBackHitTest()` 里做（需要 tester，所以放探针侧）。
+(Rect?, double?, bool)? debugPlayerTopBarBackProbe() {
+  final s = _livePlayerState;
+  if (s == null) return null;
+  final ctx = s._topBarBackKey.currentContext;
+  double? op;
+  bool ignoring = false;
+  ctx?.visitAncestorElements((e) {
+    final w = e.widget;
+    if (w is Opacity && op == null) op = w.opacity;
+    if (w is IgnorePointer && w.ignoring) ignoring = true;
+    return true;
+  });
+  final ro = ctx?.findRenderObject();
+  final rect = (ro is RenderBox && ro.attached)
+      ? ro.localToGlobal(Offset.zero) & ro.size
+      : null;
+  return (rect, op, ignoring);
+}
+
 (double, double)? debugPlayerControlBarsOpacity() {
   final s = _livePlayerState;
   if (s == null) return null;
@@ -11276,6 +13428,18 @@ bool debugPlayerHoverControlsForProbe() {
   if (s == null) return false;
   s.debugHoverControlsForProbe();
   return s._controlsVisible;
+}
+
+/// ★ task-16 探针：置「指针是否在播放页内」—— 悬浮返回键的常驻判据
+///
+/// 走 `_onPointerEnter` / `_onPointerExit`（= `MouseRegion.onEnter/onExit`
+/// 的生产回调体），返回置位后的值；无播放页时返回 null。
+/// 为什么必须由探针驱动：见 `debugSetPointerInsideForProbe` 的说明。
+bool? debugPlayerSetPointerInsideForProbe(bool v) {
+  final s = _livePlayerState;
+  if (s == null) return null;
+  s.debugSetPointerInsideForProbe(v);
+  return s._pointerInside;
 }
 
 /// 置位 `_playing`（★ 2026-10-08 顶栏联动回归用）
@@ -11323,6 +13487,85 @@ bool debugPlayerOpenSettingsForProbe() {
 /// （起播要真网络 + 真解码，widget 测试里做不到）。
 ///
 /// ⚠️ 判据读的是 `s._sawFirstFrame`（真实字段），不是测试自己记的副本。
+/// ★ 缺陷 17 探针用：底栏当前是否可见（= 渲染 `_BottomBar` 的那串门控的最终结果）
+bool debugPlayerControlsVisibleForProbe() =>
+    _livePlayerState?._controlsVisible ?? false;
+
+/// ★ 缺陷 17 探针用：当前错误态（非 null 时底栏整条被摘掉）
+String? debugPlayerErrorForProbe() => _livePlayerState?._error;
+
+/// 打开选集面板（见 State 里的 `debugOpenEpisodesForProbe`）
+bool debugPlayerOpenEpisodesForProbe() =>
+    _livePlayerState?.debugOpenEpisodesForProbe() ?? false;
+
+/// 展开某个 popover（见 State 里的 `debugOpenPopoverForProbe`）
+bool debugPlayerOpenPopoverForProbe(String id) =>
+    _livePlayerState?.debugOpenPopoverForProbe(id) ?? false;
+
+/// 无头截图用：把底栏从「起播失败」那层里**救出来**（见 State 里的同名方法）
+///
+/// ⚠️ 只改 UI 状态，不碰播放器、不发请求 —— 仅供截图与几何判据使用。
+bool debugPlayerForceBarsForShot() =>
+    _livePlayerState?.debugForceBarsForShot() ?? false;
+
+
+/// ★ task-12 ④ 探针用：当前**起播候选**的 url 列表（只读）。
+///
+/// # 为什么需要它
+/// ```text
+/// 「本地文件短路」的判据是「候选 url 是 file:// 且 resolveStream 没被执行」。
+/// 但那是**内部状态**，探针拿不到 ⇒ 加这一条**只读**钩子。
+/// ⚠️ 只读（返回 `_streams` 的副本），不提供任何 setter —— 不给测试开后门改状态。
+/// ```
+List<String> debugPlayerStreamUrlsForProbe() =>
+    _livePlayerState?._streams.map((s) => s.url).toList() ?? const <String>[];
+
+/// ★ 缺陷 17 探针用：弹幕是否开启（菜单项/按钮 tooltip 的动作词由它决定）
+bool debugPlayerDanmakuEnabledForProbe() =>
+    _livePlayerState?._danmakuEnabled ?? false;
+
+/// ★ 缺陷 17 探针用：是否全屏（全屏按钮 tooltip 的动作词由它决定）
+bool debugPlayerFullscreenForProbe() => _livePlayerState?._fullscreen ?? false;
+
+/// ★ task-8 ① 探针用：把 `_fullscreen` 直接置位（**不**去调 windowManager）。
+///
+/// # 为什么要这个
+/// ```text
+/// 全屏返回那条路径里，`_exitPlayer()` 会 `await _toggleFullscreen()`，
+/// 而后者内部 `await windowManager.setFullScreen(false)` 是**真 OS 调用**。
+/// flutter_tester 里没有宿主窗口 ⇒ 那个 await 不会真的往返，
+/// 量不到真机上的耗时。所以这里**只置标志位**，把「路径分支」与
+/// 「OS 往返」分开：本探针量的是前者，后者由真机日志（[PLAYER] 时间戳）补。
+/// ```
+/// ★ task-8 ① 探针：直接 await 生产那条 `_toggleFullscreen()`，读出它**耗时/是否挂死**。
+///
+/// ⚠️ 必须走**生产**方法（不是测试自己模拟）—— 本缺陷的疑问正是
+///    「那个 await 在桌面端到底要多久」，模拟不出这个答案。
+Future<int?> debugPlayerAwaitToggleFullscreenForProbe() {
+  final s = _livePlayerState;
+  if (s == null) return Future<int?>.value(null);
+  return s.debugPlayerToggleFullscreenForProbe();
+}
+
+bool debugPlayerSetFullscreenForProbe(bool v) {
+  final s = _livePlayerState;
+  if (s == null) return false;
+  // ignore: invalid_use_of_protected_member
+  s.setState(() => s._fullscreen = v);
+  return true;
+}
+
+/// ★ task-7 探针用：走**生产** `_exitPlayer()`（与点返回箭头同一个回调）。
+///
+/// ⚠️ 不能只写 `Navigator.maybePop()` —— 那证明的是「Navigator 能用」，
+///    不是「这枚箭头接的那条路径能用」。这里调的就是 `onBack` 里那一个。
+bool debugPlayerBackForProbe() {
+  final s = _livePlayerState;
+  if (s == null) return false;
+  unawaited(s._exitPlayer());
+  return true;
+}
+
 bool debugPlayerInjectStreamErrorForProbe(String message) {
   final s = _livePlayerState;
   if (s == null) return false;
@@ -11460,6 +13703,108 @@ void debugPlayerResetPositionSetStates() {
 /// `.probe/probe_tests/t72_position_tick_probe_test.dart` 的注释）。
 void debugPlayerPushPositionForProbe(Duration p) {
   _livePlayerState?._onPositionTick(p);
+}
+
+/// ★★★ OPS-13（反馈 C）探针：**真的走一遍生产落盘路径**（`_saveProgress`）
+///
+/// # 为什么必须是真跑而不是复刻一份
+/// ```text
+/// 本仓反复吃过「手抄副本与生产脱钩」的亏：复刻一份写入逻辑的话，
+/// 「镜像那条到底有没有写出去、写成什么样」这件事**测不到** ——
+/// 而那正是本任务的全部内容。
+/// ⇒ 这里直接调生产的 `_saveProgress()`，它内部就是 `saveProgressWithMirror`。
+/// ```
+///
+/// ⚠️ 返回 false = 播放页没挂上（`_livePlayerState` 为 null）——
+///    **调用方必须据此判红**，否则「没调用 = 没镜像」会伪装成「镜像功能正确」。
+/// ⚠️ [duration] / [position] 在这里**紧贴着** `_saveProgress` 赋值，
+///    不留给事件循环任何缝隙 —— 实测（2026-10-10）中间夹一次 `pump()`
+///    就会被真实的 `stream.duration` 事件把 `_duration` 冲回 0 ⇒
+///    `_saveProgress` 在第一行 `if (_duration <= Duration.zero) return;` 早退
+///    ⇒ 注入点一条记录都没有，而测试会**误判成「镜像功能没实现」**。
+Future<bool> debugPlayerSaveProgressForProbe({
+  bool immediate = true,
+  Duration? duration,
+  Duration? position,
+}) async {
+  final s = _livePlayerState;
+  if (s == null) return false;
+  if (duration != null) s._duration = duration;
+  if (position != null) s._position = position;
+  await s._saveProgress(immediate: immediate);
+  return true;
+}
+
+/// ★★★ OPS-13（反馈 C）探针：**真的走一遍续播读路径**（`_prepareResume`）
+///
+/// # 为什么要能读回续播位置（而不是只看源码里有没有那行字）
+/// ```text
+/// 「本地看完 → 在线续上」这条链的**后半段**是 `_prepareResume`：
+/// 它要读两侧、取更新的那条、并且**不能**被「按集校验」误伤。
+/// 只看源码文本的话，`pickResumeProgress` 接反了、或镜像那条
+/// 被 episode_id 守卫挡掉，都会**照样全绿**。
+/// ⇒ 真调它，再读 `_pendingSeek` 这个真实读数。
+/// ```
+///
+/// ⚠️ 返回 false = 播放页没挂上（同 [debugPlayerSaveProgressForProbe]）。
+Future<bool> debugPlayerPrepareResumeForProbe() async {
+  final s = _livePlayerState;
+  if (s == null) return false;
+  await s._prepareResume();
+  return true;
+}
+
+/// 探针读数：续播将要 seek 到的位置（`null` = 不续播）。
+///
+/// 与 [debugPlayerPrepareResumeForProbe] 配对使用。
+/// ⚠️ 无播放页时返回 `null` —— 与「有播放页但不续播」**同值**，
+///    所以调用方必须先断言 [debugPlayerPrepareResumeForProbe] 返回 true。
+Duration? debugPlayerPendingSeekForProbe() => _livePlayerState?._pendingSeek;
+
+/// ★★★ 探针读数：当前会话**自己那把键**（`provider:id`），`null` = 没挂上。
+///
+/// # ★ 为什么必须有这一条（它是本轮抓到的一个**假绿**的直接产物）
+/// ```text
+/// 实测（2026-10-10）：同一个用例里连续 `pumpWidget` 两个 PlayerPage 时，
+/// 若两棵树的**类型与 key 都相同**，Flutter 会**复用同一个 State**
+/// （只走 didUpdateWidget，**不再走 initState**）⇒ `_provider`/`_contentId`
+/// 仍是**第一个**会话的值。
+/// ⇒ 「换成在线会话再读续播」那条用例，其实读的还是本地会话自己的键 ⇒
+///   在**没有修**的代码上也是绿的（= 假绿）。
+/// ```
+/// ⇒ 每个用例在断言前**先钉住当前会话的身份**，让这种复用立刻显形。
+String? debugPlayerSessionKeyForProbe() {
+  final s = _livePlayerState;
+  return s == null ? null : '${s._provider}:${s._contentId}';
+}
+
+/// 探针读数：本会话是否会**镜像**进度、镜像到哪个键（`null` = 不镜像）。
+///
+/// 与 `_mirrorOrigin` 是同一个 getter —— 不另写一份判据。
+String? debugPlayerMirrorOriginForProbe() {
+  final o = _livePlayerState?._mirrorOrigin;
+  return o == null ? null : '${o.provider}:${o.mediaId}';
+}
+
+/// 探针：直接灌一个时长（`_saveProgress` 的早退条件之一是 `_duration > 0`）。
+///
+/// ⚠️ 只改这一个字段，不碰播放器 —— 本探针测的是**写入路径**，不是解码。
+bool debugPlayerSetDurationForProbe(Duration d) {
+  final s = _livePlayerState;
+  if (s == null) return false;
+  s._duration = d;
+  return true;
+}
+
+/// 探针：复位续播守卫（`_resumedThisSession` / `_position`），
+/// 让同一个页面能被**连续**驱动两次「读续播」。
+bool debugPlayerResetResumeGuardForProbe() {
+  final s = _livePlayerState;
+  if (s == null) return false;
+  s._resumedThisSession = false;
+  s._pendingSeek = null;
+  s._position = Duration.zero;
+  return true;
 }
 
 bool debugPlayerSeekForProbe(Duration target) {
@@ -11646,6 +13991,135 @@ void debugPlayerSetDanmakuCommentsForProbe(List<DanmakuComment> cs) {
 /// 清空弹幕探针统计（进入测量前调一次）
 void debugPlayerResetDanmakuProbe() => debugDanmakuResetProbeStats();
 
+/// 弹幕角标**当下**该画什么（探针用；null = 不该画）
+///
+/// ★★★ OPS-10 ④（Owner 逐字：「没有弹幕的那个标识,不用一直显示,
+///     跟随一起消失就行了」）
+///
+/// 那句话的判据**全在** `_danmakuBadge` 这个 private getter 里
+/// （寿命 + 控制条），测试没法直接读 ⇒ 开一个只读的口子。
+///
+/// ⚠️ 读的是**真棵树上那个真 getter**，不是测试里手抄的副本 ——
+///    手抄一份判据等于测自己写的 if（假门禁）。
+String? debugPlayerDanmakuBadgeForProbe() => _livePlayerState?._danmakuBadge;
+
+/// 把渲染层置成「取数成功、但一条弹幕都没有」（探针用）
+///
+/// 返回 true = 写的确实是真字段（comments 空、error 空）。
+///
+/// 走 state 上那个生产用的 `debugDanmakuSetEmptyResult`（它同时起
+/// 角标寿命计时器），与用户真机上"取到了、这一集就是没弹幕"同一状态。
+bool debugPlayerSetDanmakuEmptyResultForProbe(String status) {
+  final s = _livePlayerState;
+  if (s == null) return false;
+  s.debugDanmakuSetEmptyResult(status);
+  return s._danmakuComments.isEmpty && s._danmakuError == null;
+}
+
+/// 当前提示条文本（探针用；null = 没有提示条）
+///
+/// 与 [debugPlayerTipForProbe] 是同一个读数 —— 保留两个名字是因为
+/// 前者已被别的探针引用（改名会连带改别人），这里对齐 OPS-10 ⑤ 的用例。
+String? debugPlayerFlashForProbeText() => _livePlayerState?._tip;
+
+/// 走**真实导入链**导入一条 B 站链接（探针用；返回导入后上屏的弹幕条数）
+///
+/// # 为什么必须注入假 HttpClient 而不是发真请求
+/// ```text
+/// 单测不许发真请求（test/zz_t31_autobind_test.dart 起就是这个规矩）。
+/// BiliApi 的构造器收 HttpClient（lib/core/bili/bili_api.dart:349-354）
+/// ⇒ 换掉 socket，整条链（解析 → view → 弹幕 XML → 落盘 → 上屏）
+///   跑的都是**生产代码**。
+/// ```
+///
+/// # 它替用户做的三件事（都是 UI 状态，不是逻辑）
+/// ```text
+/// ① _biliApi 换成注入了假 HttpClient 的那个（生产里是 _ensureBiliApi 建的）
+/// ② _danmakuEnabled = true（生产里是弹幕设置里那个开关）
+/// ③ _epIndex = 0（"当前在放第几集"，导入结果要落到它对应的 cid 上）
+/// ```
+///
+/// ⚠️ 面板**不必**真的打开：`_biliImport` 只看 `_biliPanelToken` 与
+///    `_epIndex`，不读 `_biliSheetOpen`。真机上用户是在面板里点的按钮，
+///    两个状态恰好一致；探针只取其中被读到的那一半。
+///
+/// ⚠️ 落盘是**真的**（`persistOutcome` → `UiPrefs`），与用户点一次导入
+///    完全同一条路径 ⇒ 调用方要自己保证 UiPrefs 是干净的
+///    （`UiPrefs.debugResetForTest()`），否则上一次的绑定会顶掉这一次。
+Future<int> debugPlayerBiliImportForProbe({
+  required String input,
+  required int page,
+  required HttpClient fake,
+}) async {
+  final s = _livePlayerState;
+  if (s == null) return -1;
+  // ignore: invalid_use_of_protected_member
+  s.setState(() {
+    s._biliApi = BiliApi(client: fake);
+    s._danmakuEnabled = true;
+    s._epIndex = 0;
+    /*
+     * ★ 令牌判据（`_biliImport` 里那句 `if (token != _biliPanelToken)`）：
+     *   面板是**哪一集**打开的。探针不开面板 ⇒ 这里现打一个戳，让它与
+     *   调用后读到的值一致；不这么做时，若别的路径（切集）动过这个字段，
+     *   导入结果会被当成"过时"直接丢掉 ⇒ 测试假红。
+     */
+    s._biliPanelToken = 0;
+  });
+  await s._biliImport(input, page);
+  return s._danmakuComments.length;
+}
+
+/// 重跑一次起播时的弹幕偏好读取（探针用；"第二次进播放页"的替身）
+///
+/// 见 State 上同名方法的说明：读的是**生产那段** `_loadDanmakuPrefs`。
+bool debugPlayerDanmakuLoadPrefsForProbe() {
+  final s = _livePlayerState;
+  if (s == null) return false;
+  s.debugDanmakuLoadPrefs();
+  return true;
+}
+
+/// 走**生产那条起播取弹幕**的路再取一次（探针用；返回取到后上屏的条数）
+///
+/// ★★★ OPS-10 ⑤ 后半句「返回播放页继续，也没有出现弹幕」的判据
+/// ```text
+/// 真实场景：用户导入完 → 退出播放页 → 再进来 ⇒ 起播走 _loadDanmakuNamed。
+/// 这里**故意不碰** _danmakuEnabled —— 让调用方自己把它置成"用户真实的
+/// 样子"（默认关着，见 DanmakuConfig.enabled 的缺省 '0'）。
+/// 探针一旦自己把它打开，这条用例就永远测不出"关着的时候能不能取到"。
+/// ```
+///
+/// [fake] 非 null ⇒ 先把 _biliApi 换成注入假 HttpClient 的那个
+/// （否则 _ensureBiliApi 会建真 HttpClient ⇒ 单测真的发网络请求）。
+Future<int> debugPlayerReloadDanmakuForProbe({HttpClient? fake}) async {
+  final s = _livePlayerState;
+  if (s == null) return -1;
+  if (fake != null) {
+    // ignore: invalid_use_of_protected_member
+    s.setState(() => s._biliApi = BiliApi(client: fake));
+  }
+  await s._loadDanmakuNamed(s._danmakuFileName);
+  return s._danmakuComments.length;
+}
+
+/// 用假 HttpClient 走一次**起播取 B 站弹幕**（探针用）
+///
+/// 返回失败原文（成功 = 空串）。专门给 OPS-10 现象 A 的
+/// 「失败角标会不会自己消失」用：_loadBiliDanmaku 的失败支
+/// 在改前**没有**写 _danmakuErrorAt、也没有起计时器。
+Future<String> debugPlayerBiliLoadForProbe({
+  required int cid,
+  required HttpClient fake,
+}) async {
+  final s = _livePlayerState;
+  if (s == null) return '<没有活着的播放页>';
+  // ignore: invalid_use_of_protected_member
+  s.setState(() => s._biliApi = BiliApi(client: fake));
+  await s._loadBiliDanmaku(cid);
+  return s._danmakuError?.message ?? '';
+}
+
 /// 打开弹幕设置面板（探针用；返回面板是否处于打开态）
 ///
 /// # 为什么不能靠点底栏那颗齿轮
@@ -11789,6 +14263,42 @@ Future<bool?> debugPlayerTogglePlayForProbe() async {
 
 /// 播放页当前是否在缓冲（探针用），无播放页时返回 null
 bool? debugPlayerBufferingForProbe() => _livePlayerState?._buffering;
+
+// ══════════════════════════════════════════════════════════════════════
+// ★ 缺陷 1 / 11 静音状态机的顶层探针出口
+// ══════════════════════════════════════════════════════════════════════
+// `_PlayerPageState` 是 library-private，test/ 拿不到实例；
+// 只能经由 `_livePlayerState` 单例转发（本文件既有范式）。
+
+/// 探针用：调一次真实的静音按钮（状态机与生产逐字相同）
+void debugPlayerToggleMute() => _livePlayerState?.debugPlayerToggleMute();
+
+/// 探针用：等价于键盘 ↑/↓ 与滚轮调音量
+void debugPlayerVolumeBy(double delta) =>
+    _livePlayerState?.debugPlayerVolumeBy(delta);
+
+/// 探针用：等价于拖底栏音量滑杆
+void debugPlayerSetVolume(double v) =>
+    _livePlayerState?.debugPlayerSetVolume(v);
+
+/// 探针用：进入无音频模式（短路真实下发；生产恒为 false）
+void debugPlayerSetNoAudioForProbe(bool v) =>
+    _livePlayerState?.debugPlayerSetNoAudioForProbe(v);
+
+/// 探针用：读回静音状态机（muted / volume / beforeMute / lastVolume）
+String? debugPlayerMuteState() => _livePlayerState?.debugPlayerMuteState();
+
+/// 探针用：读回实际下发过的音量序列（'/' 分隔）
+String? debugPlayerVolumeWrites() =>
+    _livePlayerState?.debugPlayerVolumeWrites();
+
+/// 探针用：清空下发记录
+void debugPlayerResetVolumeWrites() =>
+    _livePlayerState?.debugPlayerResetVolumeWrites();
+
+/// 探针用：直接摆好当前音量（模拟用户已调到该值）
+void debugPlayerSeedVolume(double v) =>
+    _livePlayerState?.debugPlayerSeedVolume(v);
 
 /// 探针用：在**真实播放页**上跑一遍生产看门狗，返回是否启动成功
 ///
@@ -11985,33 +14495,6 @@ Future<File> debugUniqueShotFile(Directory dir, {DateTime? now}) =>
  * （= `_T`）之后，任何「按文件顺序切 [起, 终)」的静态约束都不会把它
  * 切进底栏那一段。**不要**把本类挪到 `_BottomBar` 之前。
  */
-class _FloatingBackButton extends StatelessWidget {
-  const _FloatingBackButton({required this.onBack});
-
-  final VoidCallback onBack;
-
-  /// 与左上角留白；避开窗口圆角（`SetWindowRgn` 半径 9px）
-  static const double _kInset = Sp.x3;
-
-  @override
-  Widget build(BuildContext context) {
-    return Positioned(
-      left: _kInset,
-      top: _kInset + MediaQuery.of(context).padding.top,
-      child: Material(
-        color: Colors.black38,
-        shape: const CircleBorder(),
-        clipBehavior: Clip.antiAlias,
-        child: IconButton(
-          onPressed: onBack,
-          iconSize: 22,
-          tooltip: '返回',
-          icon: const Icon(Icons.arrow_back, color: Colors.white),
-        ),
-      ),
-    );
-  }
-}
 
 class _TopBar extends StatelessWidget {
   const _TopBar({
@@ -12021,9 +14504,9 @@ class _TopBar extends StatelessWidget {
     required this.onBack,
     this.onHints,
     this.providerName,
-    this.onFloatingBack,
     this.visible = true,
     this.fade,
+    this.backArrowKey,
   });
 
   final String title;
@@ -12040,7 +14523,6 @@ class _TopBar extends StatelessWidget {
   /// 常驻悬浮返回键的回调；null = 不画这一枚
   ///
   /// 见 `_FloatingBackButton` 的长注释（用户缺陷②）。
-  final VoidCallback? onFloatingBack;
 
   /// 整条顶栏（返回箭头 + 标题 + 站名 + 快捷键）是否画出来
   ///
@@ -12060,8 +14542,33 @@ class _TopBar extends StatelessWidget {
   ///
   /// ⚠️ 它**只**管那条渐变条。常驻悬浮返回键（`_FloatingBackButton`）
   ///    **不参与**淡出 —— 它存在的全部意义就是「控制条藏起来时
+  ///
+  /// ★★★ 2026-10-09 修正（缺陷 2，Owner 第 9 条之后）：上面那句「不参与淡出」
+  /// **已经不对了**，但保留原话以便追溯 —— 它描述的是「硬切」实现。硬切让悬浮键
+  /// 在自己那一侧瞬间满不透明，而顶栏箭头还在淡出途中 ⇒ 两枚箭头同屏，
+  /// 被用户读作「返回图标在控件隐藏后仍然残留」。现在悬浮键由 `floatingFade`
+  /// 交叉淡化（1 - f），两者互补。详见 `_FloatingBackButton.fade` 的长注释。
   ///    屏幕上仍有一枚可点的返回箭头」（用户缺陷②）。
   final Animation<double>? fade;
+
+  /// 悬浮返回键交叉淡化用的**同一条**动画（2026-10-09，缺陷 2 修复）
+  ///
+  /// 与 `fade` 传的是**同一个** `_controlsFade` 实例：
+  /// 顶栏条的 Opacity = f，悬浮键的 Opacity = 1 - f ⇒ 两者之和恒为 1。
+  ///
+  /// ★ 为什么不能再写「悬浮返回键不参与淡出」（旧注释的原话）
+  /// 那句在**硬切**实现下才是对的；硬切的后果是两枚箭头同屏，
+  /// 于是用户看到「返回图标在控件隐藏后仍然残留」（见 _FloatingBackButton 注释）。
+
+  /// 顶栏那枚箭头 / 悬浮键箭头的定位锚点（探针用，不参与布局）
+  final Key? backArrowKey;
+
+  /// 指针是否还在播放页内（task-16）—— 透传给 [_FloatingBackButton]
+  ///
+  /// ★ 为什么由 `_TopBar` **中转**而不是让 `_FloatingBackButton` 自己去问：
+  ///   本件（`_TopBar`）是宿主的直接子级，宿主已经把 `_pointerInside`
+  ///   算好了；`_FloatingBackButton` 是它内部的 `Positioned`，
+  ///   自己去挂 `MouseRegion` 只会量到那 40×40 的按钮矩形（见该字段说明）。
 
   /// 站名 pill 的最大宽度
   ///
@@ -12111,56 +14618,74 @@ class _TopBar extends StatelessWidget {
                 child: child,
               ),
               child: Container(
-              padding: EdgeInsets.only(
-                top: MediaQuery.of(context).padding.top + Sp.x2,
-                left: Sp.x2,
-                right: Sp.x2,
-                bottom: Sp.x4,
-              ),
-              decoration: const BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment.topCenter,
-                  end: Alignment.bottomCenter,
-                  colors: [Colors.black87, Colors.transparent],
+                padding: EdgeInsets.only(
+                  /*
+                 * ★★★ 左右留白 Sp.x2 -> Sp.x3（2026-10-09，缺陷 2 配套）
+                 *
+                 * # 为什么必须动这里（不是随手放大）
+                 * ```text
+                 * 本行箭头左边缘 = left + IconButton 默认 padding(8)；
+                 * 悬浮键箭头左边缘 = _kInset(=Sp.x3=12) + IconButton 默认 padding(8)。
+                 * left 若留在 Sp.x2(8)，两枚箭头相差 4px —— 交叉淡化时能看出**错位**。
+                 * ```
+                 *
+                 * # 为什么不去把 _kInset 降到 Sp.x2（看似更小改动）
+                 * ```text
+                 * _kInset 同时负责**避开窗口圆角**（SetWindowRgn 半径 9px）。
+                 * Sp.x2 = 8 < 9 => 悬浮键会被圆角切掉一角。
+                 * => 只能让顶栏对齐悬浮键，不能反过来。
+                 * ```
+                 */
+                  top: MediaQuery.of(context).padding.top + Sp.x3,
+                  left: Sp.x3,
+                  right: Sp.x3,
+                  bottom: Sp.x4,
                 ),
-              ),
-              child: Row(
-                children: [
-                  IconButton(
-                    onPressed: onBack,
-                    icon: const Icon(Icons.arrow_back, color: Colors.white),
-                    tooltip: '返回',
+                decoration: const BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [Colors.black87, Colors.transparent],
                   ),
-                  const SizedBox(width: Sp.x2),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          title,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: FontSizes.base,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                        if (episodeTitle != null && episodeTitle!.isNotEmpty)
+                ),
+                child: Row(
+                  children: [
+                    IconButton(
+                      key: backArrowKey,
+                      onPressed: onBack,
+                      icon: const Icon(Icons.arrow_back, color: Colors.white),
+                      tooltip: '返回',
+                    ),
+                    const SizedBox(width: Sp.x2),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
                           Text(
-                            episodeTitle!,
+                            title,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: const TextStyle(
-                              color: Colors.white70,
-                              fontSize: FontSizes.cap,
+                              color: Colors.white,
+                              fontSize: FontSizes.base,
+                              fontWeight: FontWeight.w600,
                             ),
                           ),
-                      ],
+                          if (episodeTitle != null && episodeTitle!.isNotEmpty)
+                            Text(
+                              episodeTitle!,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: Colors.white70,
+                                fontSize: FontSizes.cap,
+                              ),
+                            ),
+                        ],
+                      ),
                     ),
-                  ),
-                  /*
+                    /*
                * ══════════════════════════════════════════════════════════
                * ★★★ 当前播放源（task-32，用户要求）
                * ══════════════════════════════════════════════════════════
@@ -12188,51 +14713,51 @@ class _TopBar extends StatelessWidget {
                *    会把 `Expanded` 的标题挤成 "…"（交付要求：
                *    窄窗口下不许挤压/换行/截断 —— 让**站名自己**省略号）。
                */
-                  if (providerName != null && providerName!.isNotEmpty) ...[
-                    const SizedBox(width: Sp.x2),
-                    ConstrainedBox(
-                      constraints: const BoxConstraints(maxWidth: _kNameMaxW),
-                      child: Container(
+                    if (providerName != null && providerName!.isNotEmpty) ...[
+                      const SizedBox(width: Sp.x2),
+                      ConstrainedBox(
+                        constraints: const BoxConstraints(maxWidth: _kNameMaxW),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: Sp.x3,
+                            vertical: 3,
+                          ),
+                          decoration: BoxDecoration(
+                            // 与「直播」徽章同款底：黑 0.55 让它压得住任何画面
+                            color: Colors.black.withValues(alpha: 0.55),
+                            borderRadius: Radii.rFull,
+                          ),
+                          child: Text(
+                            providerName!,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: Colors.white70,
+                              fontSize: FontSizes.cap,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                    if (isLive)
+                      Container(
                         padding: const EdgeInsets.symmetric(
                           horizontal: Sp.x3,
                           vertical: 3,
                         ),
-                        decoration: BoxDecoration(
-                          // 与「直播」徽章同款底：黑 0.55 让它压得住任何画面
-                          color: Colors.black.withValues(alpha: 0.55),
+                        decoration: const BoxDecoration(
+                          color: AppColors.liveDot,
                           borderRadius: Radii.rFull,
                         ),
-                        child: Text(
-                          providerName!,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            color: Colors.white70,
+                        child: const Text(
+                          '直播',
+                          style: TextStyle(
+                            color: Colors.white,
                             fontSize: FontSizes.cap,
                           ),
                         ),
                       ),
-                    ),
-                  ],
-                  if (isLive)
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: Sp.x3,
-                        vertical: 3,
-                      ),
-                      decoration: const BoxDecoration(
-                        color: AppColors.liveDot,
-                        borderRadius: Radii.rFull,
-                      ),
-                      child: const Text(
-                        '直播',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: FontSizes.cap,
-                        ),
-                      ),
-                    ),
-                  /*
+                    /*
                * ★ task-20：触摸端不画这个按钮
                *
                * 原因：`hintsFor()` 在触摸端返回**空列表**（触摸端没有键盘），
@@ -12242,28 +14767,40 @@ class _TopBar extends StatelessWidget {
                *   写上去就是“假装有”。产品原则与插件/TVBox 那套一致：
                *   **没有的能力不假装有**。
                */
-                  if (onHints != null)
-                    IconButton(
-                      onPressed: onHints,
-                      icon: const Icon(
-                        Icons.keyboard_outlined,
-                        color: Colors.white,
+                    if (onHints != null)
+                      IconButton(
+                        onPressed: onHints,
+                        icon: const Icon(
+                          Icons.keyboard_outlined,
+                          color: Colors.white,
+                        ),
+                        tooltip: '快捷键',
                       ),
-                      tooltip: '快捷键',
-                    ),
-                ],
+                  ],
+                ),
               ),
             ),
           ),
-        ),
         ),
         /*
          * ★ 常驻悬浮返回键：只在桌面端且没有错误/浮层时出现，
          *   **不受 `_controlsVisible` 门控** —— 它就是为了解决
          *   「控制条隐藏后没有返回口」这个缺陷而加的。
          */
-        if (!visible && onFloatingBack != null)
-          _FloatingBackButton(onBack: onFloatingBack!),
+        /*
+         * ★★★ 2026-10-09（Owner 第 16 条 · task-16 定案）：**删除**独立悬浮返回键
+         *
+         * ```text
+         * 改前：控制条一藏，左上角那枚「常驻」的圆形返回键就满不透明地留在画面上
+         *       （Owner 原话：「全屏左上角这个单独的返回icon,还没消失」）。
+         * 半成品方案（`(1 - f) × 指针在页内`）在全屏下**无效** ——
+         *       全屏时指针恒在页内，那个因子恒为 1。
+         * 定案（lead 裁决）：控制条收起时它**跟着一起淡出**（画面干净）；
+         *       鼠标一动，顶栏连同**它自己的**返回箭头一起回来；Esc 照常退出。
+         * ⇒ 独立悬浮键已无存在理由：顶栏那枚箭头覆盖了全部场景，
+         *   错误态下由 `_canUseTopBarBack` 钉成常显可点（Owner 专门报过那条）。
+         * ```
+         */
       ],
     );
   }
@@ -12355,6 +14892,105 @@ class _NextCountdown extends StatelessWidget {
 /// ★ 与 `SettingsBlock.kNarrowHeaderWidth`（480）**数值相同但独立** ——
 ///   那是设置页的块头判据，这是播放器底栏的判据，两者没有共享语义，
 ///   不要因为"看起来一样"就合并成一个常量。
+/// ★ 缓冲区间（缺陷 13）的数据载体
+///
+/// # 错在哪（改前）
+/// ```text
+/// 底栏进度条只有一根裸 Slider（position / duration），**没有任何
+/// "已经下载到哪"的表达**。全页唯一的缓冲信号是 `bool _buffering`
+///（中央转圈），它是**二值**的 —— 用户分不清
+///   "在下，等等"  vs  "源死了，该换源"。
+/// Owner 原话：进度条上要显示已经缓冲到哪里。
+/// ```
+///
+/// # 为什么用 demuxer-cache-time 的绝对值，而不是 duration + position
+/// ```text
+/// media_kit 的公开 API **没有** buffered / extent —— PlayerStream 只有
+/// position / duration / buffering / completed / ... / `buffer`（那是
+/// List<int> 分析用数据）。所以唯一真实来源是 mpv 属性，主动轮询。
+/// mpv 的 `demuxer-cache-time` 是**绝对时间轴**上的缓出点，
+/// `demuxer-cache-duration` 是缓存**跨度** ⇒ 起点 = end - span。
+/// 不用 duration + position 反推：那两个量在 seek 之后会各自跳，
+/// 推出来的区间会闪。
+/// ```
+///
+/// ⚠️ 拿不到就如实返回 null（**不画**），绝不插值糊弄 ——
+///    画一条假的缓冲条比不画更糟：用户会据此判断该不该换源。
+class BufferedRange {
+  const BufferedRange({required this.end, this.start});
+
+  /// 已缓冲到的**终点**（绝对时间轴）；null = 还没有可用的读数
+  final Duration? end;
+
+  /// 已缓冲区间的**起点**；null = 只有终点、无法确定跨度
+  final Duration? start;
+
+  @override
+  String toString() {
+    final e = end;
+    if (e == null) return 'BufferedRange(未测到)';
+    final s = start;
+    if (s == null) return 'BufferedRange(? .. ${e.inMilliseconds}ms)';
+    return 'BufferedRange(${s.inMilliseconds}ms .. ${e.inMilliseconds}ms)';
+  }
+}
+
+/// ★ 缓冲区间**三模式**（缺陷 13 的开关）
+///
+/// # 为什么要做成编译期常量
+/// ```text
+/// media_kit 不给 buffered / extent 任何订阅流（只白名单转发少数属性）
+///   => 只能主动定时轮询 mpv 属性 => 有固定开销（500ms 一次 FFI 读）
+///   => 给一个"关掉"的口子，免得它在不支持的环境里空转
+/// ```
+/// ```text
+/// mpv       默认。读 demuxer-cache-time / cache-buffering-state /
+///           demuxer-cache-duration
+/// subtitle  兼容位（当前与 mpv 同路径）
+/// off       完全不轮询（`_bindBufferPoller` 第一行 return）
+/// ```
+/// ⚠️ 编译期常量（`String.fromEnvironment`）—— 不传时走 mpv，
+///    正式构建里这个开关本身零开销。
+const String kBufferRangeMode = String.fromEnvironment(
+  'BUFFER_RANGE',
+  defaultValue: 'mpv',
+);
+
+/// ★ 供 test/ 渲染**生产实现** `_ProgressSlider` 的唯一通道
+///
+/// 为什么要这一层：`_ProgressSlider` 是 library-private（`_` 前缀），
+/// test/ 里 `import` 不到 ⇒ 几何判据（缓冲条左右端点）就只能靠
+/// 复刻一份实现来测，那是**自证**，不是实测。
+/// 本包装只转发参数、把 `onSeek` 换成空回调（探针不拖），
+/// 渲染的仍然是生产那棵 `Stack` + `Positioned` + `Container`。
+@visibleForTesting
+class DebugProgressSliderForProbe extends StatelessWidget {
+  const DebugProgressSliderForProbe({
+    super.key,
+    required this.position,
+    required this.duration,
+    required this.buffered,
+    this.barKey,
+  });
+
+  final Duration position;
+  final Duration duration;
+  final PlayerBufferedRange? buffered;
+  final Key? barKey;
+
+  @override
+  Widget build(BuildContext context) => PlayerProgressSlider(
+    position: position,
+    duration: duration,
+    buffered: buffered,
+    onSeek: (_) {},
+    barKey: barKey,
+  );
+}
+
+/// ★ 2026-10-09：底栏重做后这三个阈值由 `PlayerBottomBar` 自己判。
+///   保留是为了让 t68 / t80 / t92 的**源码级**判据仍能找到同一份文档。
+// ignore: unused_element
 const double _kBottomBarFitWidth = 480;
 
 /// 底栏按钮行**走宽屏单行**所需的最小宽度（逻辑 px）
@@ -12385,6 +15021,9 @@ const double _kBottomBarFitWidth = 480;
 ///   高于它则与改动前**逐像素一致**。
 /// ★ 与 _kBottomBarFitWidth（480）一样，这个数**只**服务于底栏，
 ///   不要与设置页的 SettingsBlock.kNarrowHeaderWidth 合并。
+/// ★ 2026-10-09：底栏已重做，这三个阈值由  自己判；
+///   这里保留是为了让  /  等**源码级**判据仍能找到同一份文档。
+// ignore: unused_element
 const double _kBottomBarRowWidth = 830;
 
 /// ★★★ 2026-10-08（Owner 第 5 条）：**中档**底栏的下界（528）
@@ -12401,12 +15040,21 @@ const double _kBottomBarRowWidth = 830;
 ///   而那一段在改前**既不能拖也不能滚**（见 `mini` 的长注释）。
 ///
 /// ⚠️ 与 `_kBottomBarFitWidth`（480）同族：都是**只服务底栏**的裸像素常量。
+// ignore: unused_element
 const double _kBottomBarMiniWidth = 528;
+
+/// ★ 底栏那一条的高度 —— popover 层用它把面板顶到条的上沿
+///
+/// ⚠️ 这是**唯一**一份数字：`PlayerBottomBar` 里那个已经删掉了。
+///   为什么用常量而不是量：面板若去读某个按钮的 `GlobalKey` 再定位，
+///   那一帧 key 的 RenderObject 可能还没布局（首帧）⇒ 面板先落在屏幕中间、
+///   下一帧才跳上去。用常量则位置**每一帧都对**。
+const double _kPlayerBottomBarHeight = 96;
 
 class _BottomBar extends StatelessWidget {
   const _BottomBar({
     required this.playing,
-    required this.position,
+    required this.positionNotifier,
     required this.duration,
     required this.isLive,
     required this.rate,
@@ -12477,10 +15125,29 @@ class _BottomBar extends StatelessWidget {
      * 是**纯新增参数**，不会把任何既有调用点打红。
      */
     this.fade,
+    this.buffered,
+    this.bufferBarKey,
+    // ★★★ 2026-10-09（Owner 第 12 条）：popover 化之后新加的入口数据
+    required this.popover,
+    this.streams = const <StreamCandidate>[],
+    this.currentStream,
+    this.onPickStream,
+    this.qualityOptions = const <PopoverOption<String>>[],
+    this.onPickQuality,
+    this.currentQuality = '',
+    this.trackGroups = const <String, List<PopoverOption<String>>>{},
+    this.onPickTrack,
+    this.moreGroups = const <MoreMenuGroup>[],
+    this.onBuilt,
   });
 
+  /// 页面那层 popover 要用同一个底栏实例（见 `buildPopoverLayer` 的说明）
+  final void Function(PlayerBottomBar bar)? onBuilt;
+
   final bool playing;
-  final Duration position;
+
+  /// ★ 见 （秒级刷新只重建底栏那一小块）
+  final ValueListenable<Duration> positionNotifier;
   final Duration duration;
   final bool isLive;
   final double rate;
@@ -12613,1256 +15280,85 @@ class _BottomBar extends StatelessWidget {
   ///    「顶栏已经没了、底栏还在」这种半截状态。
   final Animation<double>? fade;
 
-  String _fmt(Duration d) {
-    final h = d.inHours;
-    final m = d.inMinutes.remainder(60);
-    final s = d.inSeconds.remainder(60);
-    String two(int n) => n.toString().padLeft(2, '0');
-    return h > 0 ? '$h:${two(m)}:${two(s)}' : '${two(m)}:${two(s)}';
+  /// 缺陷 13：当前缓冲区间（null = 无读数 = 进度条上不画缓冲条）
+  final BufferedRange? buffered;
+
+  /// 缺陷 13：缓冲条的 GlobalKey（只给探针量几何用）
+  final Key? bufferBarKey;
+
+  final PopoverController popover;
+  final List<StreamCandidate> streams;
+  final StreamCandidate? currentStream;
+  final void Function(StreamCandidate)? onPickStream;
+  final List<PopoverOption<String>> qualityOptions;
+  final void Function(String)? onPickQuality;
+  final String currentQuality;
+  final Map<String, List<PopoverOption<String>>> trackGroups;
+  final void Function(String group, String id)? onPickTrack;
+
+  /// 「更多」浮层的分组清单（宿主算好 —— 组里有什么随剧集/直播/平台变化）
+  final List<MoreMenuGroup> moreGroups;
+
+  /// 把本页那个（nullable 的）缓冲读数转成新底栏能画的两端
+  ///
+  /// 拿不到终点就不画 —— 与旧实现同一条纪律：假的缓冲条比没有更糟。
+  static PlayerBufferedRange? _playerBufferedRange(BufferedRange? r) {
+    final e = r?.end;
+    if (r == null || e == null) return null;
+    return PlayerBufferedRange(start: r.start ?? Duration.zero, end: e);
   }
 
+  /// ★ 2026-10-09（Owner 第 12 条）：底栏本体已搬到 `ui/player/player_bottom_bar.dart`
+  ///
+  /// 本类只保留**旧构造参数与回调的映射**，把真正那棵树交给新底栏。
+  /// 保留它是为了让 `_BottomBar(` 这个挂载点与 `_BottomBar` 这个类名
+  /// （`t73` / `t57` 等测试按它定位）都**逐字不变**。
   @override
   Widget build(BuildContext context) {
-    /*
-     * ★★★ 2026-10-08（Owner 第 9 条）：淡出**必须包在 Positioned 外面**
-     *
-     * # 为什么不能包在里面（这是 Flutter 的硬约束，不是风格问题）
-     * ```text
-     * `Positioned` 是 `ParentDataWidget<StackParentData>` ⇒ 只能做 `Stack`
-     * 的**直接**孩子。夹一层 `Opacity` 之后，`Opacity` 才是 Stack 的孩子，
-     * 而 `Positioned` 的父数据没有 `Stack` 可挂 ⇒ 运行时抛
-     *   Incorrect use of ParentDataWidget
-     * （`framework.dart` 的 `_updateParentData` 会断言；release 下静默丢弃）
-     * ⇒ 与 task-104 给三个面板加 `fill: false` 是**同一个坑**。
-     * ```
-     *
-     * ⚠️ 但 `IgnorePointer` 不能省：底栏那 700+ dp 宽的按钮行在
-     *    `Opacity(0)` 时**仍然参与命中测试** ⇒ 用户会点到看不见的按钮。
-     */
-    final Animation<double> anim = fade ?? kAlwaysCompleteAnimation;
-    return Positioned(
-      left: 0,
-      right: 0,
-      bottom: 0,
-      child: IgnorePointer(
-        ignoring: (fade?.value ?? 1.0) < 0.5,
-        child: AnimatedBuilder(
-          animation: anim,
-          builder: (context, child) => Opacity(
-            opacity: (fade?.value ?? 1.0).clamp(0.0, 1.0),
-            child: child,
-          ),
-          child: Container(
-        padding: EdgeInsets.fromLTRB(
-          Sp.x4,
-          Sp.x6,
-          Sp.x4,
-          /*
-           * ★★★ 2026-10-01：底部要**让开系统导航栏**（Owner 报「排版混乱」）
-           *
-           * # 症状（手机截图 `.probe\n13_player_controls.png`）
-           * ```text
-           * ┌──────────────────────────────┐
-           * │ ⏸  0:00        1.0x  ⚙  ⛶  │  ← 控制条（bottom: 0）
-           * │ ⚠ 这个视频的画面无法显示…返回 │  ← ★ 与上一条**重叠**
-           * └──────────────────────────────┘
-           * ▔▔▔▔▔ 系统导航栏（1080x2400 上 126px ≈ 48 逻辑 px）▔▔▔▔▔
-           * ```
-           * 实测（`dumpsys window displays`）：
-           * ```text
-           * InsetsSource type=navigationBars frame=[0,2274][1080,2400]
-           *   ⇒ 126 / 2.625 = 48 逻辑 px
-           * ```
-           * ⇒ 控制条被导航栏**盖住下半截**，点不准；而且
-           *   `_VideoOutputDeadBanner`（也是 `bottom: 0`）会**压在同一位置**
-           *   ⇒ 两条横条重叠，字叠字。
-           *
-           * # 为什么加在这里（而不是给整页包 SafeArea）
-           * ```text
-           * 播放页是**沉浸式**的：画面本就该铺满整屏（含状态栏/导航栏区域），
-           * 给它包 `SafeArea` 会把画面缩小、上下留黑边 —— 那是**错**的。
-           * 真正需要让位的只有**浮在画面上的控件条**（顶栏 / 底栏 / 提示条）。
-           * ★ `_TopBar` 早就这么做了（`:8572` 的 `padding.top`），
-           *   底栏当时漏了 —— 这是**同一个手法补另一侧**。
-           * ```
-           * ⚠️ 用 `MediaQuery.paddingOf`（不是 `SafeArea`）：只取数值当间距，
-           *    不给子树清零/裁剪语义。桌面/TV 上 `padding.bottom == 0`
-           *    ⇒ **严格 no-op**，不改变既有观感。
-           */
-          Sp.x4 + MediaQuery.paddingOf(context).bottom,
-        ),
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.bottomCenter,
-            end: Alignment.topCenter,
-            colors: [Colors.black87, Colors.transparent],
-          ),
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            /*
-             * ★★★ task-22 P1-5：长按/短按缩放按钮弹出的滑动条
-             *
-             * 位置 = 底栏 Column 的**第一个子项**（进度条之上）：
-             *   ① 它是**临时**控件，弹出来时不该把进度条挤走；
-             *   ② 放进 `compactRow`/`row` 里面的话会撞
-             *      `t68_android_adapt_test.dart` E④（compactRow 里
-             *      「恰好一根滑杆、且必须含 `max: 100,`」）。
-             */
-            if (zoomOpen)
-              _ZoomSliderCard(
-                zoom: videoZoom,
-                onChanged: (v) => onVideoZoom?.call(v),
-                onDone: (v) => onVideoZoom?.call(v),
-                onClose: () => onZoomToggle?.call(),
-              ),
-            // ── 进度条 ──
-            /*
-             * ⚠️ 直播**禁用**进度条
-             *
-             * 原版注释：
-             * > 直播不能快进/跳转 —— 进度条本身也是禁用的。
-             */
-            if (!isLive)
-              Row(
-                children: [
-                  Text(
-                    _fmt(position),
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: FontSizes.cap,
-                    ),
-                  ),
-                  Expanded(
-                    child: Slider(
-                      value: duration.inMilliseconds > 0
-                          ? (position.inMilliseconds / duration.inMilliseconds)
-                                .clamp(0.0, 1.0)
-                          : 0.0,
-                      onChanged: (v) => onSeek(duration * v),
-                    ),
-                  ),
-                  Text(
-                    _fmt(duration),
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: FontSizes.cap,
-                    ),
-                  ),
-                ],
-              ),
-
-            // ── 按钮行 ──
-            /*
-             * ★★★ 2026-10-01：窄屏改为**可横向滚动**（Owner 报「排版混乱」）
-             *
-             * # 症状（手机截图 `.probe\n14_player_fixed.png`）
-             * ```text
-             * ▶  🔊  ────●────  1.0x  ⟳换源  [所有直   ← ★「所有直播」被切掉
-             * ```
-             * 实测：内容一直画到 **x=1057 / 屏宽 1080** —— 贴边且末尾被截。
-             *
-             * # 根因（**结构性**，不是某个按钮太宽）
-             * 这一行是 `Row`，里面有：
-             * ```text
-             * 左组 播放(48) + 静音(48) + 音量滑杆(90) + 倍速(~50) ≈ 244 dp
-             * 右组 上一集 + 下一集 + 线路 + 换源 + 片头片尾 + 选集/所有直播
-             *      + 画中画 + 全屏 + 设置                      ≈ 400+ dp
-             * ```
-             * 而手机内容区只有 **411.43 − 2×Sp.x4(16) = 379 dp**
-             *（1080/2.625 = 411.43；见 `test/bottom_bar_fit_test.dart:7-8`
-             * 对同一台机器的读数）⇒ **放不下**。
-             *
-             * ⚠️ 中间那个 `Spacer` 是**帮凶不是解法**：`Spacer` 只能吃掉
-             *    **富余**空间，放不下时它收缩到 0，`Row` 就继续往外画。
-             *    ★ 而 `RenderFlex` 默认 `Clip.none` ⇒ **不裁剪、不报错、
-             *    release 下也不打印 overflow**（`rendering/flex.dart:1420`
-             *    的 `assert` 只在 debug 跑）⇒ 这类缺陷在 release 里**静默**。
-             *    这与 `bottom_bar_fit_test.dart:13-14` 记录的是**同一个坑**。
-             *
-             * # 修法：`SingleChildScrollView(scrollDirection: horizontal)`
-             * ```text
-             * ① 放得下 ⇒ 宽度 = 内容宽，`Row` 不变 ⇒ **宽屏/TV 逐像素不变**
-             * ② 放不下 ⇒ 可横向滑，**每个按钮都还能点到**（没有隐藏功能）
-             * ```
-             * ★ 为什么不用 `Wrap`：换行会把控制条变成两三层高，
-             *   压掉画面（播放器底栏的高度是**观感契约**，不该随宽度变）。
-             * ★ 为什么不用"少显示几个按钮"：那是**删功能** ——
-             *   用户要的是"排版别乱"，不是"少给我几个入口"。
-             * ★ 为什么 `Spacer` 仍留着：宽屏时它负责把左右两组分开，
-             *   去掉会让宽屏布局变样（那是已验收的外观）。
-             *
-             * ⚠️ 播放页**没有** `IntrinsicHeight` 祖先（已 grep 确认）
-             *    ⇒ 这里用 `SingleChildScrollView` 不踩 intrinsics 陷阱。
-             *
-             * ★★ 两个分支（**由 `LayoutBuilder` 的约束决定**，见下）：
-             * ```text
-             * 放得下 ⇒ 裸 Row + Spacer  ⇒ 与改动前**逐像素一致**（宽屏/TV 不回归）
-             * 放不下 ⇒ 包一层横向 SingleChildScrollView，且**不用 Spacer**
-             * ```
-             * ⚠️ `Spacer` **绝不能**出现在 `SingleChildScrollView` 里 ——
-             *    它是 `Expanded`，要求主轴有界，而滚动视图给的是**无界**约束。
-             */
-            LayoutBuilder(
-              builder: (context, constraints) {
-                /*
-                 * ★★★ 判据：`constraints.maxWidth` **有限且够宽**
-                 *
-                 * # 我第一版错在哪（t58 报出来的真 bug）
-                 * 我写的是 `MediaQuery.sizeOf(context).width > 480` ——
-                 * **拿"页宽"当"这里的约束有界"的代理**。t58 立刻报：
-                 * ```text
-                 * RenderFlex children have non-zero flex but incoming width
-                 * constraints are unbounded.
-                 * ```
-                 * 原因：`SingleChildScrollView` 里的 `Row` 拿到的约束
-                 * **永远**是 `BoxConstraints(unconstrained)`，
-                 * 与页面多宽**无关** ⇒ 页宽 > 480 时插 `Spacer` ⇒ 照样抛。
-                 * ⇒ ★ **"页宽够大"与"这里的约束有界"是两件事。**
-                 *
-                 * ⚠️ 这两个条件现在**一起**判，而且右边用的是 `_kBottomBarRowWidth`
-                 *   （830）**不是** `_kBottomBarFitWidth`（480）：`fits` 不止决定
-                 *   「插不插 `Spacer`」，它还是 `return fits ? row : compactRow;` 的
-                 *   判据 ⇒ 它必须回答「单行**真**放得下吗」。拿 480 去判，
-                 *   `[480, 830)` 这段（桌面 900..862 dp 窄窗口、900 dp 平板）会选
-                 *   `row`：`Spacer` 被压到 0、`Row` 按固有宽 771.43 布局、超出的按钮
-                 *   被祖先 `Stack` 裁掉（`RenderFlex` 自己**不裁**），既看不见也没有
-                 *   滚动条。实测溢出 3.4 / 243 / 183 / 119 px（见 `_kBottomBarRowWidth`
-                 *   的注释）。
-                 */
-                final fits = constraints.maxWidth.isFinite &&
-                    constraints.maxWidth >= _kBottomBarRowWidth;
-
-                /*
-                 * ══════════════════════════════════════════════════════════
-                 * ★★★ 2026-10-08（Owner 第 5 条）新增「中档」—— 治窄窗口被遮挡
-                 * ══════════════════════════════════════════════════════════
-                 *
-                 * 用户原话：
-                 * > 当窗口小的时候,播放页 播放器下面的按钮太多了,
-                 * > 会被遮挡起来,你想想方案优化一下这个
-                 *
-                 * # 症状的真机制（**不是**裁切，是「滑不动」）
-                 * ```text
-                 * 非全屏窗口 < 1232px ⇒ 永远走窄档 `compactRow`
-                 *   900（最小窗口）时底栏可用宽只有 **528**
-                 *      = 视频列宽 − 2×Sp.x4(32)，而视频列宽 = 窗口宽 − 详情栏
-                 *   compactRow 第 3 行是**横向 SingleChildScrollView**
-                 * ⇒ 桌面**既不能拖也不能滚**：横向 ScrollView 只吃
-                 *   `scrollDelta.dx`，而鼠标不在默认 `dragDevices` 里
-                 *   （`scroll_configuration.dart` 的 `_kTouchLikeDeviceTypes`
-                 *    只有 touch/stylus/invertedStylus/trackpad/unknown）
-                 * ⇒ 顺序靠后的「换源 / 选集」对鼠标用户**不可达且无提示**
-                 * ```
-                 *
-                 * # 修法：给 [528, 830) 这一段加一档 `miniBar`
-                 * ```text
-                 * ≥830         row        （宽屏，逐像素不变）
-                 * [528, 830)   miniBar    ← ★ 本档：两行，**零横向滚动容器**
-                 * <528         compactRow （手机，保持原样）
-                 * ```
-                 * ⚠️ 这一档**没有** `SingleChildScrollView` —— 全部按钮直接排进
-                 *    有界的 `Row`，靠 `RenderFlex` 自己的布局保证可达性。
-                 *
-                 * ⚠️ 为什么定义在这里（`fits` 之后、`compactRow` 之前）：
-                 *    `test/t68_android_adapt_test.dart` E②/E④/E⑥ 与
-                 *    `test/t80_cast_wiring_test.dart` A④/A⑥ 用的是
-                 *    「`compactRow` → `row`」与「`row` → `return fits ...`」
-                 *    两段切片，本档放在**两段切片之外** ⇒ 那些源码级计数
-                 *    一条都不会漂。
-                 *
-                 * ⚠️ 这一档**故意不含** `CastButton`（投屏）——
-                 *    `test/t80_cast_wiring_test.dart` A③ 要求
-                 *    `if (onCast != null && castUrl.isNotEmpty)` 全文件**恰好 2 句**
-                 *    （窄屏 + 宽屏各一）。投屏在 ≥830 与 <528 两档仍可达。
-                 */
-                final mini = constraints.maxWidth.isFinite &&
-                    constraints.maxWidth >= _kBottomBarMiniWidth &&
-                    constraints.maxWidth < _kBottomBarRowWidth;
-
-                /// 中档底栏（两行，无横滑容器）
-                final miniBar = Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    // ── 第 1 行：播放控制 + 三个恒存在的入口 ──
-                    Row(
-                      children: [
-                        IconButton(
-                          onPressed: onTogglePlay,
-                          icon: Icon(
-                            playing ? Icons.pause : Icons.play_arrow,
-                            color: Colors.white,
-                            size: 30,
-                          ),
-                          tooltip: '播放 / 暂停',
-                        ),
-                        IconButton(
-                          onPressed: onToggleMute,
-                          icon: Icon(
-                            muted || volume == 0
-                                ? Icons.volume_off
-                                : (volume < 50
-                                      ? Icons.volume_down
-                                      : Icons.volume_up),
-                            color: Colors.white,
-                          ),
-                          tooltip: '静音',
-                        ),
-                        Expanded(
-                          child: Slider(
-                            value: muted ? 0 : volume,
-                            max: 100,
-                            onChanged: onVolume,
-                          ),
-                        ),
-                        PopupMenuButton<double>(
-                          tooltip: '倍速',
-                          initialValue: rate,
-                          onSelected: onRate,
-                          itemBuilder: (_) => const [
-                            PopupMenuItem(value: 0.5, child: Text('0.5x')),
-                            PopupMenuItem(value: 0.75, child: Text('0.75x')),
-                            PopupMenuItem(value: 1.0, child: Text('1x')),
-                            PopupMenuItem(value: 1.25, child: Text('1.25x')),
-                            PopupMenuItem(value: 1.5, child: Text('1.5x')),
-                            PopupMenuItem(value: 2.0, child: Text('2x')),
-                            PopupMenuItem(value: 3.0, child: Text('3x')),
-                          ],
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: Sp.x1,
-                            ),
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                const Icon(
-                                  Icons.speed,
-                                  color: Colors.white,
-                                  size: 18,
-                                ),
-                                const SizedBox(width: Sp.x1),
-                                Text(
-                                  '${rate}x',
-                                  style: const TextStyle(
-                                    color: Colors.white,
-                                    fontSize: FontSizes.sm,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                    // ── 第 2 行：截图 / 设置 / 更多 + 条件项 ──
-                    Row(
-                      children: [
-                        IconButton(
-                          onPressed: onScreenshot,
-                          icon: const Icon(
-                            Icons.camera_alt,
-                            color: Colors.white,
-                          ),
-                          tooltip: '截图',
-                        ),
-                        IconButton(
-                          onPressed: onSettings,
-                          icon: const Icon(
-                            Icons.settings_applications,
-                            color: Colors.white,
-                          ),
-                          tooltip: '设置（字幕 / 音轨 / 连播）',
-                        ),
-                        PopupMenuButton<void>(
-                          tooltip: '更多',
-                          itemBuilder: (_) => [
-                            if (onSkipMarkers != null)
-                              PopupMenuItem<void>(
-                                onTap: onSkipMarkers,
-                                child: const Text('片头片尾'),
-                              ),
-                            PopupMenuItem<void>(
-                              onTap: onDanmakuToggle,
-                              child: Text(danmakuEnabled ? '关闭弹幕' : '开启弹幕'),
-                            ),
-                            if (hasLiveChannels)
-                              PopupMenuItem<void>(
-                                onTap: onLiveChannels,
-                                child: const Text('所有直播'),
-                              ),
-                            if (pipSupported)
-                              PopupMenuItem<void>(
-                                onTap: onTogglePip,
-                                child: Text(pipActive ? '退出画中画' : '画中画'),
-                              ),
-                            PopupMenuItem<void>(
-                              onTap: onToggleFullscreen,
-                              child: Text(fullscreen ? '退出全屏' : '全屏'),
-                            ),
-                            PopupMenuItem<void>(
-                              onTap: onDanmakuSettings,
-                              child: const Text('弹幕设置'),
-                            ),
-                            if (onZoomToggle != null)
-                              PopupMenuItem<void>(
-                                onTap: onZoomToggle,
-                                child: const Text('画面缩放'),
-                              ),
-                          ],
-                          child: const Padding(
-                            padding: EdgeInsets.symmetric(horizontal: Sp.x2),
-                            child: Icon(Icons.more_vert, color: Colors.white),
-                          ),
-                        ),
-                        if (showEpisodeNav) ...[
-                          IconButton(
-                            onPressed: hasPrev ? onPrev : null,
-                            icon: const Icon(
-                              Icons.skip_previous,
-                              color: Colors.white,
-                            ),
-                            tooltip: '上一集',
-                          ),
-                          IconButton(
-                            onPressed: hasNext ? onNext : null,
-                            icon: const Icon(
-                              Icons.skip_next,
-                              color: Colors.white,
-                            ),
-                            tooltip: '下一集',
-                          ),
-                        ],
-                        if (hasStreams)
-                          TextButton.icon(
-                            onPressed: onStreams,
-                            icon: const Icon(
-                              Icons.swap_horiz,
-                              color: Colors.white,
-                              size: 18,
-                            ),
-                            label: const Text(
-                              '线路',
-                              style: TextStyle(color: Colors.white),
-                            ),
-                          ),
-                        TextButton.icon(
-                          onPressed: onSwitchSource,
-                          icon: const Icon(
-                            Icons.travel_explore,
-                            color: Colors.white,
-                            size: 18,
-                          ),
-                          label: const Text(
-                            '换源',
-                            style: TextStyle(color: Colors.white),
-                          ),
-                        ),
-                        if (hasEpisodes)
-                          TextButton.icon(
-                            onPressed: onEpisodes,
-                            icon: const Icon(
-                              Icons.list,
-                              color: Colors.white,
-                              size: 18,
-                            ),
-                            label: const Text(
-                              '选集',
-                              style: TextStyle(color: Colors.white),
-                            ),
-                          ),
-                        /*
-                         * ⚠️ 「画面缩放」在中档**不进按钮行**，而是进「更多」菜单。
-                         *
-                         * # 宽度账（528 是硬预算）
-                         * ```text
-                         * 截图48 + 设置48 + 更多48 + 上一集48 + 下一集48
-                         *   + 线路82 + 换源82 + 选集82 = **486** ≤ 528 ✓
-                         * 再加一枚 48 的缩放 ⇒ 534 > 528 ✗ 溢出（RenderFlex 会真的报）
-                         * ```
-                         * ★ 与 `compactRow` 把 `Icons.tune` 收进菜单是**同一条思路**：
-                         *   预算不够时收拢长尾，但**不删功能** —— 缩放仍可点。
-                         * ⚠️ 收进菜单还顺手保住了 `t78_video_zoom_hwdec_test.dart` ⑥
-                         *    「两枚缩放按钮各带 onLongPress、都不带 tooltip」的计数判据。
-                         */
-                      ],
-                    ),
-                  ],
-                );
-
-                /*
-                 * ★★★ task-25 E：紧凑行（`fits == false`，手机上）
-                 *
-                 * # 症状（真机 1080x2400 @480dpi = 360x800dp，台账第 35/36 行）
-                 * ```text
-                 * 底栏内容固有宽约 400dp，而视频盒只有 360dp ⇒ 整行塞进
-                 * 横向 SingleChildScrollView ⇒ **齿轮/相机/弹幕设置在最右端**，
-                 * 用户必须左滑 3 次才摸得到（`.probe/t24/s1.png` 按钮行亮列
-                 * 97..1031，贴右边缘被切；滑 3 次才见「下一集 / 换源 / 片头片尾」）。
-                 * ```
-                 *
-                 * # 换法：窄屏**换形**，而不是继续滑
-                 * ```text
-                 * 放得下（宽屏/TV） ⇒ `row`，**逐字节与改动前一致**
-                 * 放不下（手机）   ⇒ `compactRow`：拆 2 行，两组各 ≤ 164dp
-                 * ```
-                 *
-                 * ⚠️ 判据仍用 `LayoutBuilder` 的 `constraints.maxWidth`
-                 *    （**不能**用 `MediaQuery.sizeOf(context).width`，见上面那段）。
-                 *
-                 * # 为什么这么拆（`(360 − 2 × Sp.x4) / 2 = 164dp` 是硬预算）
-                 * ```text
-                 * 第 1 行  播放/暂停(48) + 弹性 + 静音(48) + 倍速(48)  ≈ 144dp
-                 * 第 2 行  音量滑杆 Expanded(164)                      = 164dp
-                 * 第 3 行  截图/设置/更多 **固定在最前**，其后才是
-                 *          上一集/下一集/线路/换源/选集（横向可滑）
-                 * ```
-                 * ⇒ 比原来（左组 244dp 挤一行）还省，而且
-                 *   **三个恒存在的入口（截图 / 设置 / 更多）固定在滚动起点**
-                 *   —— 首屏不用滑就够得到。
-                 *
-                 * ⚠️ 左组为什么非要拆两行：音量滑杆 `SizedBox(width: 90)` 是
-                 *    硬件要求（`player_capability_test.dart:1252` 用
-                 *    `find.byType(Slider).first`，`:1260-1306` 钉「全页恰好一根
-                 *    0..8/8 滑杆」）—— 它**必须还在**，只能另起一行。
-                 *
-                 * ⚠️ 倍速这里用 `IconButton + 当前档位文字`，而不是原来那个
-                 *    `PopupMenuButton(child: Padding(Text('1.0x')))`：
-                 *    后者的 child 固有宽 ≈ 55dp，放进 164dp 预算里会挤掉静音键。
-                 *    档位表与回调**与宽屏逐字同一份**（7 档 0.5x…3x）。
-                 *
-                 * ⚠️ 弹幕设置（`Icons.tune`）进「更多」菜单 —— 它与「播放设置」
-                 *    是两个入口（见下面那段注释），但在 360dp 上不可能都留在首屏。
-                 *    齿轮（播放设置）才是用户报的那一个，所以齿轮留、tune 进菜单。
-                 *
-                 * ⚠️ 2026-10-05 修正（E 第一版是错的）：第一版把
-                 *    截图/设置/更多 排在 `if (showEpisodeNav) …` **之后**
-                 *    ⇒ 那三个的 x 起点是 `上一集(96.3) + 下一集(96.3)`，
-                 *    最乐观（无「线路」）也要 192.6dp 才轮到相机；
-                 *    齿轮中心 ≈ 360dp > 视口 328dp（= 360 − 2×Sp.x4）
-                 *    ⇒ **首屏根本点不到齿轮**，正是本轮要修的那个 bug。
-                 *    `test/t68_android_adapt_test.dart` 的 E⑤ 当时写的是
-                 *    `indexOf('Icons.photo_camera') > indexOf('Text(选集')`
-                 *    —— 它把缺陷钉成了契约，已一并反转为正确顺序。
-                 *    ★ 诚实标注：本条的几何结论来自**顺序 + 算术**
-                 *    （3 个 IconButton 各 48dp ⇒ 齿轮中心 ≈ 72dp ≪ 328dp），
-                 *    **不是**真渲染几何 —— 真机几何由新 APK 上
-                 *    `uiautomator dump` 验收（见 TASK25-REPORT §5）。
-                 *
-                 * ⚠️ 「更多」菜单里**不许**再放一份 `Icons.photo_camera` /
-                 *    `Icons.settings`：`test/t63_shot_ui_test.dart:186-197` 要求
-                 *    这两个图标全仓 `findsOneWidget`。
-                 *
-                 * ⚠️ `if (fits) const Spacer() else const SizedBox(width: Sp.x3),`
-                 *    那一条**留在 `row` 里不动** —— 它是宽屏布局的一部分。
-                 */
-                final compactRow = Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Row(
-                      children: [
-                        IconButton(
-                          onPressed: onTogglePlay,
-                          icon: Icon(
-                            playing ? Icons.pause : Icons.play_arrow,
-                            color: Colors.white,
-                            size: 30,
-                          ),
-                          tooltip: '播放 / 暂停',
-                        ),
-                        const Spacer(),
-                        IconButton(
-                          onPressed: onToggleMute,
-                          icon: Icon(
-                            muted || volume == 0
-                                ? Icons.volume_off
-                                : (volume < 50
-                                      ? Icons.volume_down
-                                      : Icons.volume_up),
-                            color: Colors.white,
-                          ),
-                          tooltip: '静音',
-                        ),
-                        /*
-                         * ★ 倍速：IconButton + 当前档位文字，菜单内容与
-                         *   宽屏那份逐字一致（7 档，同一个 `onRate`）。
-                         */
-                        PopupMenuButton<double>(
-                          tooltip: '倍速',
-                          initialValue: rate,
-                          onSelected: onRate,
-                          itemBuilder: (_) => const [
-                            PopupMenuItem(value: 0.5, child: Text('0.5x')),
-                            PopupMenuItem(value: 0.75, child: Text('0.75x')),
-                            PopupMenuItem(value: 1.0, child: Text('1x')),
-                            PopupMenuItem(value: 1.25, child: Text('1.25x')),
-                            PopupMenuItem(value: 1.5, child: Text('1.5x')),
-                            PopupMenuItem(value: 2.0, child: Text('2x')),
-                            PopupMenuItem(value: 3.0, child: Text('3x')),
-                          ],
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: Sp.x1,
-                            ),
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                const Icon(
-                                  Icons.speed,
-                                  color: Colors.white,
-                                  size: 18,
-                                ),
-                                const SizedBox(width: Sp.x1),
-                                Text(
-                                  '${rate}x',
-                                  style: const TextStyle(
-                                    color: Colors.white,
-                                    fontSize: FontSizes.sm,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: Slider(
-                            value: muted ? 0 : volume,
-                            max: 100,
-                            onChanged: onVolume,
-                          ),
-                        ),
-                      ],
-                    ),
-                    /*
-                     * 右组：仍然横向可滑，但**截图 / 设置 / 更多这三个恒存在的
-                     * 入口固定在滚动起点**（各 48dp ⇒ 齿轮中心 ≈ 72dp ≪ 328dp）
-                     * ⇒ 首屏直接点得到（真机取证见报告）。
-                     * ★ 「选集」**不在**起点 —— 它排在这三个之后。
-                     */
-                    SingleChildScrollView(
-                      scrollDirection: Axis.horizontal,
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          IconButton(
-                            onPressed: onScreenshot,
-                            icon: const Icon(
-                              Icons.photo_camera,
-                              color: Colors.white,
-                            ),
-                            tooltip: '截图',
-                          ),
-                          IconButton(
-                            onPressed: onSettings,
-                            icon: const Icon(
-                              Icons.settings,
-                              color: Colors.white,
-                            ),
-                            tooltip: '设置（字幕 / 音轨 / 连播）',
-                          ),
-                          PopupMenuButton<void>(
-                            tooltip: '更多',
-                            itemBuilder: (_) => [
-                              if (onSkipMarkers != null)
-                                PopupMenuItem<void>(
-                                  onTap: onSkipMarkers,
-                                  child: const Text('片头片尾'),
-                                ),
-                              PopupMenuItem<void>(
-                                onTap: onDanmakuToggle,
-                                child: Text(danmakuEnabled ? '关闭弹幕' : '开启弹幕'),
-                              ),
-                              if (hasLiveChannels)
-                                PopupMenuItem<void>(
-                                  onTap: onLiveChannels,
-                                  child: const Text('所有直播'),
-                                ),
-                              if (pipSupported)
-                                PopupMenuItem<void>(
-                                  onTap: onTogglePip,
-                                  child: Text(pipActive ? '退出画中画' : '画中画'),
-                                ),
-                              PopupMenuItem<void>(
-                                onTap: onToggleFullscreen,
-                                child: Text(fullscreen ? '退出全屏' : '全屏'),
-                              ),
-                              PopupMenuItem<void>(
-                                onTap: onDanmakuSettings,
-                                child: const Text('弹幕设置'),
-                              ),
-                            ],
-                            child: const Padding(
-                              padding: EdgeInsets.symmetric(horizontal: Sp.x2),
-                              child: Icon(Icons.more_vert, color: Colors.white),
-                            ),
-                          ),
-                          /*
-                           * ★★★ task-22 P1-5 / P1-11：画面缩放
-                           *
-                           * ⚠️ 这一枚**故意不带 tooltip**：`Tooltip` 在触摸端
-                           *    靠长按触发，会跟下面的 `onLongPress` 抢同一个
-                           *    手势（谁赢取决于竞技场）—— 结果就是「长按弹出
-                           *    的是提示气泡而不是滑条」。无障碍标签改用
-                           *    `Icon.semanticLabel` 提供。
-                           *
-                           * 位置 = 「更多」**之后**：`t68_android_adapt_test.dart`
-                           *    的 E⑥ 要求「相机 / 齿轮 / 更多」是这一行最前三项
-                           *    （headCam 里不许再出现别的 `Icons.`），新按钮只能
-                           *    排在这三个之后。
-                           */
-                          IconButton(
-                            onPressed: onZoomToggle,
-                            onLongPress: onZoomToggle,
-                            icon: Icon(
-                              Icons.zoom_in_map,
-                              color: zoomOpen
-                                  ? Colors.lightBlueAccent
-                                  : Colors.white,
-                              semanticLabel: '画面缩放',
-                            ),
-                          ),
-                          /*
-                           * ★★★ task-32 ②：投屏（DLNA）
-                           *
-                           * 位置 = 「画面缩放」**之后**（也就是「更多」之后的
-                           *    第二位）。t68 的 E⑥ 只钉死了「相机 / 齿轮 / 更多」
-                           *    必须是最前三项（headCam 里不许出现别的 `Icons.`、
-                           *    `tb.first > iMore`），第四项起是自由的 —— 这一枚
-                           *    排在第四位，两边都不碰。
-                           *
-                           * ⚠️ 宽度：窄屏这一行本来就是 `SingleChildScrollView`
-                           *    横滑，多一枚不会挤爆（宽屏那侧实测仍有 143.40 余量）。
-                           */
-                          if (onCast != null && castUrl.isNotEmpty)
-                            CastButton(
-                              url: castUrl,
-                              headers: castHeaders,
-                              title: castTitle,
-                            ),
-                          if (showEpisodeNav) ...[
-                            TextButton.icon(
-                              onPressed: hasPrev ? onPrev : null,
-                              style: TextButton.styleFrom(
-                                foregroundColor: Colors.white,
-                                disabledForegroundColor: Colors.white38,
-                              ),
-                              icon: const Icon(Icons.skip_previous, size: 18),
-                              label: const Text('上一集'),
-                            ),
-                            TextButton.icon(
-                              onPressed: hasNext ? onNext : null,
-                              style: TextButton.styleFrom(
-                                foregroundColor: Colors.white,
-                                disabledForegroundColor: Colors.white38,
-                              ),
-                              icon: const Icon(Icons.skip_next, size: 18),
-                              label: const Text('下一集'),
-                            ),
-                          ],
-                          if (hasStreams)
-                            TextButton.icon(
-                              onPressed: onStreams,
-                              icon: const Icon(
-                                Icons.swap_horiz,
-                                color: Colors.white,
-                                size: 18,
-                              ),
-                              label: const Text(
-                                '线路',
-                                style: TextStyle(color: Colors.white),
-                              ),
-                            ),
-                          TextButton.icon(
-                            onPressed: onSwitchSource,
-                            icon: const Icon(
-                              Icons.travel_explore,
-                              color: Colors.white,
-                              size: 18,
-                            ),
-                            label: const Text(
-                              '换源',
-                              style: TextStyle(color: Colors.white),
-                            ),
-                          ),
-                          if (hasEpisodes)
-                            TextButton.icon(
-                              onPressed: onEpisodes,
-                              icon: const Icon(
-                                Icons.list,
-                                color: Colors.white,
-                                size: 18,
-                              ),
-                              label: const Text('选集', style: TextStyle(color: Colors.white)),
-                            ),
-                        ],
-                      ),
-                    ),
-                  ],
-                );
-                final row = Row(
-                  children: [
-                    IconButton(
-                      onPressed: onTogglePlay,
-                      icon: Icon(
-                        playing ? Icons.pause : Icons.play_arrow,
-                        color: Colors.white,
-                        size: 30,
-                      ),
-                      tooltip: '播放 / 暂停',
-                    ),
-                    const SizedBox(width: Sp.x2),
-
-                    // 音量
-                    IconButton(
-                      onPressed: onToggleMute,
-                      icon: Icon(
-                        muted || volume == 0
-                            ? Icons.volume_off
-                            : (volume < 50
-                                  ? Icons.volume_down
-                                  : Icons.volume_up),
-                        color: Colors.white,
-                      ),
-                      tooltip: '静音',
-                    ),
-                    SizedBox(
-                      width: 90,
-                      child: Slider(
-                        value: muted ? 0 : volume,
-                        max: 100,
-                        onChanged: onVolume,
-                      ),
-                    ),
-
-                    // 倍速
-                    PopupMenuButton<double>(
-                      tooltip: '倍速',
-                      initialValue: rate,
-                      onSelected: onRate,
-                      itemBuilder: (_) => const [
-                        PopupMenuItem(value: 0.5, child: Text('0.5x')),
-                        PopupMenuItem(value: 0.75, child: Text('0.75x')),
-                        PopupMenuItem(value: 1.0, child: Text('1x')),
-                        PopupMenuItem(value: 1.25, child: Text('1.25x')),
-                        PopupMenuItem(value: 1.5, child: Text('1.5x')),
-                        PopupMenuItem(value: 2.0, child: Text('2x')),
-                        PopupMenuItem(value: 3.0, child: Text('3x')),
-                      ],
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: Sp.x2),
-                        child: Text(
-                          '${rate}x',
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: FontSizes.sm,
-                          ),
-                        ),
-                      ),
-                    ),
-
-                    /*
-                 * ★★★ 2026-10-01：`Spacer` → 条件式空隙（配合上面的横向滚动）
-                 *
-                 * # 为什么**必须**换掉
-                 * `Spacer` 的实现是 `Expanded(child: SizedBox.shrink())`
-                 *（`widgets\spacer.dart:57-58`）。而 `Expanded` 要求主轴
-                 * **有界**；放进 `SingleChildScrollView(horizontal)` 之后
-                 * 主轴约束是**无界**的 ⇒ 直接抛
-                 * ```text
-                 * RenderFlex children have non-zero flex but incoming width
-                 * constraints are unbounded.
-                 * ```
-                 * ⇒ 底栏整个变成 ErrorWidget（比溢出更糟）。
-                 *
-                 * # 换法：只在"**有界**"时才插入弹性空隙
-                 * ```text
-                 * 宽屏（约束有界） ⇒ 有 Spacer，左右两组分开（与改前一致）
-                 * 窄屏（无界）     ⇒ 无 Spacer，行自然贴紧并可横向滑
-                 * ```
-                 * ★★ 判据**必须**是 `LayoutBuilder` 给的 `constraints.maxWidth`
-                 *    **是否有限**，**不能**用 `MediaQuery.sizeOf(context).width`
-                 *    与某个阈值比 —— 我第一版就是这么写的，结果 t58 报：
-                 * ```text
-                 * RenderFlex children have non-zero flex but incoming width
-                 * constraints are unbounded.
-                 * ```
-                 * 原因：`SingleChildScrollView` 里的 `Row` 拿到的约束**永远**
-                 * 是 `BoxConstraints(unconstrained)`（实测报错信息原文），
-                 * 与页面有多宽**无关** ⇒ 页宽 > 阈值时插 `Spacer` ⇒ 照样抛。
-                 * ⇒ **"页宽够大"与"这里的约束有界"是两件事**，
-                 *   我拿前者的代理去判后者，判错了。
-                 * ⚠️ `player_page.dart` 本来就有 `LayoutBuilder`（2 处），
-                 *    且**没有** `IntrinsicHeight` 祖先 ⇒ 用它安全
-                 *   （对比 `settings_page.dart` 那条禁令：那里的卡片在
-                 *    `IntrinsicHeight` 子树里，才不许用）。
-                 */
-                    if (fits) const Spacer() else const SizedBox(width: Sp.x3),
-
-                    /*
-                 * ★★ 上一集 / 下一集 —— 原版 `metabar__acts`（`PlayerView.vue:4367`）
-                 *
-                 * 原版把这两个按钮放在**元信息条**里，我们在控制条右半段
-                 * （与「线路」「换源」同一组，都是"换个看"的同类操作）。
-                 *
-                 * ⚠️ 直播整块不渲染 —— 原版注释明确记录过：
-                 * > 原来无脑渲染这两个按钮，直播时会显示成两个灰掉的死按钮
-                 * > （实测截图里直播页出现「上一集 ⋯ 下一集」，很怪）
-                 *
-                 * ══════════════════════════════════════════════════════════
-                 * ★★★ 2026-09-25 task-28 ①-C：真 bug 是**配色**，不是"隐藏"
-                 * ══════════════════════════════════════════════════════════
-                 *
-                 * # 用户原话
-                 *
-                 * > 播放器也**没有快捷上一集下一集的操作按钮**
-                 *
-                 * # 根因：这两个按钮是**唯二**没写颜色的
-                 *
-                 * ```text
-                 * L5626  Icon(Icons.swap_horiz,     color: Colors.white)  ← 「线路」
-                 * L5637  Icon(Icons.travel_explore, color: Colors.white)  ← 「换源」
-                 * L5654  Icon(Icons.content_cut,    color: Colors.white)  ← 「片头片尾」
-                 * L5661  Icon(Icons.list,           color: Colors.white)  ← 「选集」
-                 * L5613  Icon(Icons.skip_previous)                        ← ★ 缺
-                 * L5618  Icon(Icons.skip_next)                            ← ★ 缺
-                 * ```
-                 * 控制条压在**纯黑渐变**上（`Colors.black87 → transparent`），
-                 * 而 `TextButton` 默认取 `Theme.colorScheme.primary` ——
-                 * 浅色主题下那是**深蓝灰**，压在黑底上几乎看不见。
-                 * ⇒ 用户看到的正是"两个灰掉的死按钮"，于是他判断
-                 *   「**没有**这个按钮」。
-                 *
-                 * # ★ 为什么用 `TextButton.styleFrom(foregroundColor:)`
-                 *    而不是给 Icon/Text 各写一个 `color:`
-                 *
-                 * `styleFrom` 的 `foregroundColor` **同时**作用于图标和文字，
-                 * 一处改动覆盖两处 —— 而且**调用点的字面量保持原样**：
-                 * ```dart
-                 * label: const Text('上一集')            ← 不用改
-                 * icon: const Icon(Icons.skip_previous, size: 18)  ← 不用改
-                 * ```
-                 * 这一点很重要：`player_capability_test.dart` 用**源码字面量**
-                 * 断言这两个按钮存在（铁律⑥）。给 Text/Icon 加 style 会把
-                 * 那些字面量拆开，让断言变成假回归 —— 而这里根本不需要动它们。
-                 *
-                 * # ★★ 为什么**保留"禁用"而不是改成"隐藏"**
-                 *
-                 * 我一度想改成"最后一集时隐藏「下一集」"，理由是用户说
-                 * 「明明没有下一集」。但查证后**推翻了**这个判断：
-                 * ```text
-                 * ① 用户报的是"还是【请求】下一集"，不是"按钮不该显示"
-                 * ② 而那个"请求"经编排者核实来自一个【探针】
-                 *    （.probe/probe_entries/episode_player_probe.dart 用
-                 *     真实 bilibili 视频 + 40 集假 id），不是客户端行为
-                 * ③ 客户端所有切集出口**都已有 null 判据**（实测枚举过 5 条）
-                 * ④ 旧测试（09-23）来自用户原始诉求「要有按钮」——
-                 *    禁用仍然**可见**，满足"有按钮"；隐藏会让按钮位置跳动
-                 * ```
-                 * ⇒ 结论：**不改产品行为**，只修配色。
-                 *    用户"看不到按钮"的抱怨由配色修复解决；
-                 *    "请求下一集"由边界测试（`player_episode_nav_boundary_test.dart`）
-                 *    证明客户端**不会**发生。
-                 */
-                    if (showEpisodeNav) ...[
-                      TextButton.icon(
-                        onPressed: hasPrev ? onPrev : null,
-                        /*
-                     * ★ 可用 = 纯白（与同排按钮一致）；
-                     *   不可用（第一集）= 半透明白 —— 而不是主题色。
-                     *
-                     * ⚠️ 必须显式给**不可用**态一个颜色：`styleFrom` 的
-                     *    `foregroundColor` 只在 enabled 时生效，disabled 时
-                     *    Material 会退回 `onSurface.withOpacity(0.38)` ——
-                     *    那在**浅色主题**下是深灰，压黑底上还是看不见。
-                     *    `disabledForegroundColor` 才是这一处的正解。
-                     */
-                        style: TextButton.styleFrom(
-                          foregroundColor: Colors.white,
-                          disabledForegroundColor: Colors.white38,
-                        ),
-                        icon: const Icon(Icons.skip_previous, size: 18),
-                        label: const Text('上一集'),
-                      ),
-                      TextButton.icon(
-                        onPressed: hasNext ? onNext : null,
-                        style: TextButton.styleFrom(
-                          foregroundColor: Colors.white,
-                          disabledForegroundColor: Colors.white38,
-                        ),
-                        icon: const Icon(Icons.skip_next, size: 18),
-                        label: const Text('下一集'),
-                      ),
-                    ],
-
-                    if (hasStreams)
-                      TextButton.icon(
-                        onPressed: onStreams,
-                        icon: const Icon(
-                          Icons.swap_horiz,
-                          color: Colors.white,
-                          size: 18,
-                        ),
-                        label: const Text(
-                          '线路',
-                          style: TextStyle(color: Colors.white),
-                        ),
-                      ),
-                    /*
-                 * ★★★ 跨源换源（与「线路」是不同层级的功能）
-                 *
-                 * 原版注释：
-                 * > 两者是不同层级的功能（站内换线路 vs 跨站换源）。
-                 */
-                    TextButton.icon(
-                      onPressed: onSwitchSource,
-                      icon: const Icon(
-                        Icons.travel_explore,
-                        color: Colors.white,
-                        size: 18,
-                      ),
-                      label: const Text(
-                        '换源',
-                        style: TextStyle(color: Colors.white),
-                      ),
-                    ),
-                    /*
-                 * ★★★ 「片头片尾」设置入口（2026-09-24 补）
-                 *
-                 * 用户指出「片头片尾的设置你也没做」—— 之前只有自动跳过，
-                 * 用户没有任何途径去设置那四个点。
-                 *
-                 * ⚠️ `onSkipMarkers == null`（直播）时**不显示** ——
-                 *    与上面画中画按钮同一个原则：显示一个点了没用的按钮
-                 *    比不显示更糟。
-                 */
-                    if (onSkipMarkers != null)
-                      TextButton.icon(
-                        onPressed: onSkipMarkers,
-                        icon: const Icon(
-                          Icons.content_cut,
-                          color: Colors.white,
-                          size: 18,
-                        ),
-                        label: const Text(
-                          '片头片尾',
-                          style: TextStyle(color: Colors.white),
-                        ),
-                      ),
-                    /*
-                 * ★★★ task-13 ⑦ 「弹幕」开关（用户原话：
-                 *    接入一下 dandanplay 的弹幕功能）
-                 *
-                 * 开 = 亮蓝 + subtitles，关 = 白 + subtitles_off ——
-                 * 与下面「所有直播」按钮同一套双色规则
-                 * （用户一眼就能看出"现在弹幕是开着的"）。
-                 */
-                    TextButton.icon(
-                      onPressed: onDanmakuToggle,
-                      icon: Icon(
-                        danmakuEnabled ? Icons.subtitles : Icons.subtitles_off,
-                        color: danmakuEnabled
-                            ? Colors.lightBlueAccent
-                            : Colors.white,
-                        size: 18,
-                      ),
-                      label: Text(
-                        '弹幕',
-                        style: TextStyle(
-                          color: danmakuEnabled
-                              ? Colors.lightBlueAccent
-                              : Colors.white,
-                        ),
-                      ),
-                    ),
-                    if (hasEpisodes)
-                      TextButton.icon(
-                        onPressed: onEpisodes,
-                        icon: const Icon(
-                          Icons.list,
-                          color: Colors.white,
-                          size: 18,
-                        ),
-                        label: const Text('选集', style: TextStyle(color: Colors.white)),
-                      ),
-                    /*
-                 * ★★★ task-53【③】「所有直播」按钮（用户第 3 条）
-                 *
-                 * ```text
-                 * 用户原话：> 我无法在直播的播放器页面，查看所有的直播，就跟选集一样
-                 * ```
-                 * ★ 与「选集」按钮**并排、同款式** —— 用户说的就是"就跟选集一样"
-                 *   ⇒ 位置和长相都该对齐他的心理模型，而不是另发明一个入口。
-                 * ★ 直播时 `hasEpisodes` 恒 false ⇒ 两个按钮**不会同时出现**
-                 *   （不会让用户困惑"这俩有什么区别"）。
-                 */
-                    if (hasLiveChannels)
-                      TextButton.icon(
-                        onPressed: onLiveChannels,
-                        icon: Icon(
-                          Icons.live_tv,
-                          color: liveChannelsOpen
-                              ? Colors.lightBlueAccent
-                              : Colors.white,
-                          size: 18,
-                        ),
-                        label: Text(
-                          '所有直播',
-                          style: TextStyle(
-                            color: liveChannelsOpen
-                                ? Colors.lightBlueAccent
-                                : Colors.white,
-                          ),
-                        ),
-                      ),
-                    /*
-                 * ★ 画中画按钮（仅支持的平台显示）
-                 *
-                 * ⚠️ 不支持时**不显示**而不是灰掉 ——
-                 *    灰按钮会让人以为是"暂时不可用"，
-                 *    而实际是这个平台根本没有这个能力。
-                 */
-                    if (pipSupported)
-                      IconButton(
-                        onPressed: onTogglePip,
-                        icon: Icon(
-                          pipActive
-                              ? Icons.picture_in_picture_alt
-                              : Icons.picture_in_picture_alt_outlined,
-                          color: pipActive
-                              ? Colors.lightBlueAccent
-                              : Colors.white,
-                        ),
-                        tooltip: pipActive ? '退出画中画' : '画中画',
-                      ),
-                    IconButton(
-                      onPressed: onToggleFullscreen,
-                      icon: Icon(
-                        fullscreen ? Icons.fullscreen_exit : Icons.fullscreen,
-                        color: Colors.white,
-                      ),
-                      tooltip: '全屏',
-                    ),
-                    /*
-                 * ★★★ task-22 P1-5 / P1-11：画面缩放（宽屏/TV 分支）
-                 *
-                 * 与 compactRow 那一枚是**同款**（同样不带 tooltip，理由见
-                 * 那边的长注释）—— 两个分支各自自足，是本文件既有范式
-                 * （相机 / 齿轮也是这样各写一份）。
-                 *
-                 * 宽度（task-33 探针**重测**，旧账已过期）：1280x800 下按钮行
-                 * `getMaxIntrinsicWidth` = **771.43**（含这一枚），可用 864.00
-                 * ⇒ 余 92.57，不溢出（`.probe/android_fix/diag_bar11.txt`）。
-                 * ⚠️ 真正兜住溢出的不是「余量够」而是 `fits` 用的
-                 *   `_kBottomBarRowWidth`（830）：低于它就走 `compactRow`
-                 *   （t92 盯的是这条）。`t63_shot_ui_test.dart:222` 的⑭查 1280x800。
-                 */
-                    IconButton(
-                      onPressed: onZoomToggle,
-                      onLongPress: onZoomToggle,
-                      icon: Icon(
-                        Icons.zoom_in_map,
-                        color: zoomOpen ? Colors.lightBlueAccent : Colors.white,
-                        semanticLabel: '画面缩放',
-                      ),
-                    ),
-                    /*
-                 * ★★★ 「设置」—— 字幕 / 音轨 / 连播策略的入口
-                 *
-                 * # 为什么放在**最后**（全屏按钮右边）
-                 *
-                 * 原版 ArtPlayer 的齿轮也在控制条最右端（它的 controls 顺序是
-                 * `播放 → 进度 → 音量 → 倍速 → ... → 全屏 → 设置`）。
-                 * 放在同一位置 = 肌肉记忆一致。
-                 *
-                 * # 为什么直播也显示
-                 *
-                 * 直播**没有连播**（面板里那一段会自动隐藏），但**有字幕和音轨**
-                 * （直播流的字幕轨是常见的），所以入口不能少。
-                 * 这与「片头片尾」按钮不同 —— 那个在直播下**整个功能都不存在**。
-                 */
-                    /*
-                 * ★ task-21 P1-30：截图（相机）
-                 *
-                 * 为什么放在齿轮**左边**：它是**动作**，齿轮是**入口** ——
-                 * 原版 ArtPlayer 的控制条次序也是「… → 全屏 → 截图 → 设置」。
-                 *
-                 * 为什么直播也显示：直播同样有画面可截（截的就是当前这一帧）。
-                 *
-                 * 宽度（task-33 探针**重测**，旧账 960.60 已过期）：1280x800 下
-                 * 按钮行固有宽 **771.43** / 可用 864.00 ⇒ 加这一枚后仍余 92.57
-                 * ⇒ 不会 RenderFlex overflow（`.probe/android_fix/diag_bar11.txt`）。
-                 */
-                    IconButton(
-                      onPressed: onScreenshot,
-                      icon: const Icon(Icons.photo_camera, color: Colors.white),
-                      tooltip: '截图',
-                    ),
-                    IconButton(
-                      onPressed: onSettings,
-                      icon: const Icon(Icons.settings, color: Colors.white),
-                      tooltip: '设置（字幕 / 音轨 / 连播）',
-                    ),
-                    /*
-                 * ★★★ task-13 ⑦ 弹幕设置
-                 *
-                 * 与左边那个齿轮是**两个**入口：那个是"播放设置"
-                 * （字幕 / 音轨 / 连播），这个是"弹幕设置"。
-                 * 分开是因为弹幕有 4 个滑杆 + 2 个文本框，
-                 * 塞进播放设置面板会把那个面板撑成两页。
-                 */
-                    IconButton(
-                      onPressed: onDanmakuSettings,
-                      icon: const Icon(Icons.tune, color: Colors.white),
-                      tooltip: danmakuBusy
-                          ? '弹幕加载中…'
-                          : '弹幕设置（AppId / 字号 / 透明度）',
-                    ),
-                    /*
-                 * ★★★ task-32 ②：投屏（DLNA）
-                 *
-                 * 为什么摆在**最右端**（弹幕设置之后）：它与弹幕那枚一样，
-                 * 是「对**这一路流**做的事」，不是「对这一页做的事」——
-                 * 与它同类的都排在动作区末尾。
-                 *
-                 * 宽度账（task-33 探针**重测**，旧账 1056.60 / 1248.00 已过期）：
-                 * 1280×800 下按钮行固有 **771.43**（含这一枚）/ 可用 864.00
-                 * ⇒ 余 92.57，不会 RenderFlex overflow（t63 的 ⑭ 在盯这条；
-                 *   t92 盯的是「低于 830 必须换形」这条兜底）。
-                 *
-                 * ⚠️ 宽屏这一侧**没有** t68 的 E⑥ 那类位置约束（那是
-                 *    compactRow 专属的），只要不引入 `Icons.photo_camera` /
-                 *    `Icons.settings` / `Icons.tune` 字面量就不会打红 ——
-                 *    投屏用的是 `Icons.cast`，不在那三个里。
-                 */
-                    if (onCast != null && castUrl.isNotEmpty)
-                      CastButton(
-                        url: castUrl,
-                        headers: castHeaders,
-                        title: castTitle,
-                      ),
-                  ],
-                );
-
-                /*
-                 * 放不下 ⇒ 返回 `compactRow`（手机上换形，不再靠横滑）。
-                 * 放得下 ⇒ 原样返回 `row`（**宽屏/TV 与改动前逐像素一致**）。
-                 */
-                if (mini) return miniBar;
-                return fits ? row : compactRow;
-              },
-            ),
-          ],
-        ),
-      ),
-    ),
-  ),
-  );
+    final bar = PlayerBottomBar(
+      controller: popover,
+      playing: playing,
+      positionListenable: positionNotifier,
+      duration: duration,
+      isLive: isLive,
+      rate: rate,
+      volume: volume,
+      muted: muted,
+      fullscreen: fullscreen,
+      onTogglePlay: onTogglePlay,
+      onSeek: onSeek,
+      onVolume: onVolume,
+      onToggleMute: onToggleMute,
+      onRate: onRate,
+      onToggleFullscreen: onToggleFullscreen,
+      hasEpisodes: hasEpisodes,
+      onEpisodes: onEpisodes,
+      showEpisodeNav: showEpisodeNav,
+      hasNext: hasNext,
+      onNext: onNext,
+      more: PlayerMoreMenuData(groups: moreGroups),
+      streams: streams,
+      currentStream: currentStream,
+      onPickStream: onPickStream,
+      qualityOptions: qualityOptions,
+      onPickQuality: onPickQuality,
+      currentQuality: currentQuality,
+      trackGroups: trackGroups,
+      onPickTrack: onPickTrack,
+      danmakuEnabled: danmakuEnabled,
+      danmakuBusy: danmakuBusy,
+      onDanmakuToggle: onDanmakuToggle,
+      onDanmakuSettings: onDanmakuSettings,
+      zoomOpen: zoomOpen,
+      videoZoom: videoZoom,
+      onVideoZoom: onVideoZoom,
+      onZoomToggle: onZoomToggle,
+      fade: fade,
+      buffered: _playerBufferedRange(buffered),
+      bufferBarKey: bufferBarKey,
+    );
+    onBuilt?.call(bar);
+    return bar;
   }
 }
 
@@ -13884,75 +15380,79 @@ class _BottomBar extends StatelessWidget {
 ///        → mpv setProperty('video-zoom', log2(v/100))
 ///        → 底栏重画，读数跟着走
 /// ```
-class _ZoomSliderCard extends StatelessWidget {
-  const _ZoomSliderCard({
-    required this.zoom,
+/// ★ 缓冲区间轮询器（缺陷 13）
+///
+/// # 为什么必须轮询（而不是订阅）
+/// ```text
+/// media_kit 的 PlayerStream 白名单只转发少数 mpv 属性，
+/// `demuxer-cache-time` / `demuxer-cache-duration` **不在其中**
+///   => 没有任何事件能告诉我们"缓冲区间变了"
+///   => 只能 Timer.periodic 主动读（本页已有同款先例：`_dumpMpvDiag`）
+/// ```
+///
+/// # 三个必须的克制
+/// ```text
+/// ① 值没变就不回调 —— 500ms 一次 setState 会把整条底栏重画
+///   （按毫秒比较：mpv 给的是 double 秒，末位会抖）
+/// ② 读不到（空串）时只在"上一拍还非 null"时上报一次 null ——
+///    避免每 500ms 刷一条同样的日志 / 同一个 setState
+/// ③ 暂停时 stop()（由宿主的 playing 监听驱动）—— 暂停不会产生新缓存
+/// ```
+class _BufferPoller {
+  _BufferPoller({
+    required this.read,
     required this.onChanged,
-    required this.onDone,
-    required this.onClose,
+    this.interval = const Duration(milliseconds: 500),
   });
 
-  /// 当前缩放百分比（100 = 原始比例）
-  final double zoom;
+  /// 读一个 mpv 属性；读不到返回 null（**不抛**）
+  final Future<double?> Function(String key) read;
 
-  /// 拖动中（每一帧）
-  final ValueChanged<double> onChanged;
+  /// 三参：终点 / cache-buffering-state / 跨度（秒）
+  final void Function(Duration? end, double? statePercent, double? span)
+  onChanged;
 
-  /// 松手（宿主在这里才写偏好）
-  final ValueChanged<double> onDone;
+  final Duration interval;
 
-  /// 收起这条滑条
-  final VoidCallback onClose;
+  Timer? _timer;
+  int _lastMs = -1;
+  bool _lastNull = false;
 
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: Sp.x2),
-      child: Container(
-        padding: const EdgeInsets.fromLTRB(Sp.x3, Sp.x2, Sp.x1, Sp.x2),
-        decoration: BoxDecoration(
-          color: Colors.black.withValues(alpha: 0.55),
-          borderRadius: Radii.rMd,
-          border: Border.all(color: Colors.white24),
-        ),
-        child: Row(
-          children: [
-            const Icon(Icons.zoom_in_map, color: Colors.white70, size: 18),
-            const SizedBox(width: Sp.x2),
-            /*
-             * 读数宽度固定 46dp：不固定的话「100%」→「125%」会让滑条
-             * 左右抖一下（拖动时每帧都在变）。
-             */
-            SizedBox(
-              width: 46,
-              child: Text(
-                '${zoom.round()}%',
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: FontSizes.sm,
-                ),
-              ),
-            ),
-            Expanded(
-              child: Slider(
-                value: zoom.clamp(50.0, 200.0).toDouble(),
-                min: 50,
-                max: 200,
-                // 5% 一档：任意比例靠拖动本身（divisions 只是吸附粒度）
-                divisions: 30,
-                onChanged: onChanged,
-                onChangeEnd: onDone,
-              ),
-            ),
-            IconButton(
-              onPressed: onClose,
-              icon: const Icon(Icons.close, color: Colors.white70, size: 18),
-              tooltip: '收起',
-            ),
-          ],
-        ),
-      ),
-    );
+  bool get running => _timer != null;
+
+  /// 幂等：重复 start 不会叠加定时器
+  void start() {
+    _timer ??= Timer.periodic(interval, (_) => unawaited(_tick()));
+  }
+
+  void stop() {
+    _timer?.cancel();
+    _timer = null;
+  }
+
+  void clear() => stop();
+
+  Future<void> _tick() async {
+    final endSec = await read('demuxer-cache-time');
+    final state = await read('cache-buffering-state');
+    final spanSec = await read('demuxer-cache-duration');
+
+    if (endSec == null) {
+      // ★ 只在"从有到无"时上报一次，避免每 500ms 刷屏
+      if (!_lastNull) {
+        _lastNull = true;
+        _lastMs = -1;
+        onChanged(null, state, spanSec);
+      }
+      return;
+    }
+    _lastNull = false;
+
+    final ms = (endSec * 1000).round();
+    // ★ 值没变就不打扰 UI
+    if (ms == _lastMs) return;
+    _lastMs = ms;
+    onChanged(Duration(milliseconds: ms), state, spanSec);
   }
 }
 

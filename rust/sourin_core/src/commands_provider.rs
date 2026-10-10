@@ -288,6 +288,37 @@ pub struct PluginEntry {
     pub id: String,
     pub name: String,
     pub version: String,
+    /// ★ 插件声明的作者（`@author`）—— 界面据此显示**来源标识**（task-5 / 缺陷 5）
+    ///
+    /// # 为什么这个字段必须一路传到界面
+    ///
+    /// Owner 缺陷 5 原文：
+    /// > ……而且要加上标识，**自己平台的插件**还是 **tvbox 的兼容**
+    ///
+    /// 这个区分**只有源码知道** —— `@author tvbox-convert` 是转换器写的，
+    /// 内置源模板写的是 `@author dsh`（从原版继承的名字），
+    /// 新增的 emby 模板写的是 `@author sourin`。
+    ///
+    /// ⚠️ 不能用 `kind` 代替：TVBox **配置订阅**导入的原生源 `kind = "tvbox"`，
+    ///    而 TVBox **插件**转换出来的源 `kind = "js"` —— 后者与手写 JS 插件
+    ///    无法用 `kind` 区分，只有 `@author` 能区分。
+    ///
+    /// ⚠️ 空串表示"源码里没写 `@author`"（不是"第三方"）——
+    ///    界面据此**不显示**标识，而不是猜一个。
+    pub author: String,
+    /// ★ 插件声明的**上游接口地址**（task-5 / 缺陷 5 的另一个诉求）
+    ///
+    /// Owner 缺陷 5 原文：
+    /// > 你既然已经支持了 tvbox，那么就应该把所有的 tvbox 插件都**还原成原本的链接**，
+    /// > 而不是现在转换后的插件
+    ///
+    /// ★★ 关键事实：**链接从来没丢过**。TVBox 转换器把原始接口逐字写进了生成的
+    ///    `.js` 里（头部注释 ` * 上游接口（苹果CMS v10）：http://...`），
+    ///    只是**界面从来没显示过** —— 所以这不是"还原"，是"显示出来"。
+    ///
+    /// 解析规则见 [crate::plugins::upstream_of]（只读源码，零副作用）。
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub upstream: String,
     /// 是否成功加载（false 时 `error` 有原因）
     pub loaded: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -371,6 +402,15 @@ pub fn list_plugins(state: &AppState) -> Result<PluginListResult, String> {
                 }
             };
             let meta = crate::plugins::parse_meta(&src);
+            /*
+             * ★ task-5（缺陷 5）：上游接口地址也在这里一起解析
+             *
+             * ⚠️ 放在**读源码的地方**而不是放进上面的 `registered` 循环 ——
+             *    `registered` 是已注册的 Provider，**加载失败的插件不在里面**，
+             *    而"某个源挂了"恰恰是用户最想看它上游是谁的时候。
+             *    这里只依赖 `src`（已经读进来了），零额外 IO。
+             */
+            let upstream = crate::plugins::upstream_of(&src);
 
             /*
              * ★ 从 registered 里找（已 hydrate）——
@@ -404,6 +444,9 @@ pub fn list_plugins(state: &AppState) -> Result<PluginListResult, String> {
                 id: meta.id,
                 name,
                 version,
+                // ★ task-5：来源标识 + 上游链接（都只用于显示，不参与运行）
+                author: meta.author,
+                upstream,
                 loaded: loaded_ok,
                 error,
                 config,

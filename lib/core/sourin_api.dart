@@ -38,6 +38,10 @@
 // Dart 侧**统一返回 Future** —— 因为即使本地命令也不该阻塞 UI 线程。
 // `call` 走同步路径（快），`callAsync` 走线程池（慢/网络）。
 
+// ⚠️ 只为了 `@visibleForTesting`（task-11 的三个探针注入点）——
+//    用 `show` 限定，不把整个 foundation 拉进来。
+import 'package:flutter/foundation.dart' show visibleForTesting;
+
 import 'ffi.dart';
 import 'json_utils.dart';
 import 'models.dart';
@@ -76,6 +80,62 @@ class SourinApi {
   /// ```
   static Future<Map<String, dynamic>> start(String dataDir) =>
       SourinCore.startAsync(dataDir);
+
+  // ═══════════════════════════════════════════════════════════════════
+  //  ★★ 探针钩子：让**真进程**探针包住三个取数函数来数调用次数
+  // ═══════════════════════════════════════════════════════════════════
+  //
+  // # 为什么必须包住真函数（而不是让探针另写一份计数逻辑）
+  //
+  // 本项目踩过两次「仪器与被测对象不是同一个东西」：
+  // ```text
+  // ① fix-autoscroll 用「日志文本计数」当判据 ⇒ binding 接管 debugPrint ⇒ 恒 0
+  // ② 探针自己循环取流，而产品走的是 probe() 的并发池 ⇒ 数的是另一条路
+  // ```
+  // ⇒ 判据必须与判据对象**同源**：要数「首页切源发了几次列表请求」，
+  //   就包住**首页真正调的那两个函数**（getList / getRank）。
+  //
+  // ⚠️ 默认全为 null ⇒ 生产路径**逐字不变**（只是多一次判空）。
+  //   探针进程退出即恢复默认（进程级），不会影响别的入口。
+  // ⚠️ 真机探针的实测结论见 `.probe/t11-cache.txt`。
+
+  /// 探针注入点：`get_home`（首页分区骨架）
+  ///
+  /// ⚠️ **生产路径永不为非 null** —— 只有真机探针（`lib/t11_cache_probe.dart`）
+  ///    会在启动时装一次，进程退出即消失。产品代码里没有任何地方写它。
+  @visibleForTesting
+  static Future<List<ProviderGroup>> Function()? debugHomeFetcher;
+
+  /// 探针注入点：`get_list` / `get_rank`（首页区块内容）
+  ///
+  /// ⚠️ 同上：**生产路径永不为非 null**，只给探针数「切源那一刻发了几次请求」。
+  @visibleForTesting
+  static Future<Page<MediaItem>> Function(
+    String provider,
+    String categoryId, {
+    int page,
+  })? debugListFetcher;
+  @visibleForTesting
+  static Future<Page<MediaItem>> Function(
+    String provider,
+    String rankId, {
+    int page,
+  })? debugRankFetcher;
+
+  /// 装/卸这两个注入点（`null` = 恢复真实实现）
+  static void debugSetListFetchers({
+    Future<Page<MediaItem>> Function(String, String, {int page})? getList,
+    Future<Page<MediaItem>> Function(String, String, {int page})? getRank,
+  }) {
+    debugListFetcher = getList;
+    debugRankFetcher = getRank;
+  }
+
+  static void debugSetHomeFetcher(
+    Future<List<ProviderGroup>> Function()? getHome,
+  ) {
+    debugHomeFetcher = getHome;
+  }
 
   /// 核心是否已启动
   static bool get isStarted => SourinCore.isStarted;
@@ -180,6 +240,25 @@ class SourinApi {
   /// 首页只列出「有哪些分类区块」，具体内容等用户切过去时再拉。
   /// 见 `Section.items` 的说明。
   static Future<List<ProviderGroup>> getHome() async {
+    // ★ 探针注入点（默认 null ⇒ 生产路径逐字不变）
+    final hook = debugHomeFetcher;
+    if (hook != null) return hook();
+    return getHomeReal();
+  }
+
+  /// **真实实现**（不经 hook）—— 只给探针在计数包装里"转发"用
+  ///
+  /// ⚠️ 为什么必须单独暴露它（第一版踩到的硬 bug，实测炸过）
+  /// ```text
+  /// 探针的计数包装里写的是 `SourinApi.getHome()` —— 而 getHome 又调 hook
+  ///   （= 那个计数包装）⇒ **自己调自己**：
+  ///   Unhandled Exception: Stack Overflow（15200+ 帧）
+  ///   countingGetHome → getHome → hook(=countingGetHome) → …
+  /// ```
+  /// ⇒ 计数包装必须调 **Real**。★ 这也修掉了"仪器与被测对象不同源"：
+  ///   探针转发到的就是**生产走的那段代码**，外面只多包了一层计数。
+  @visibleForTesting
+  static Future<List<ProviderGroup>> getHomeReal() async {
     final r = await SourinCore.callAsync('get_home');
     return jlist<ProviderGroup>(r, ProviderGroup.fromJson).toList();
   }
@@ -192,6 +271,19 @@ class SourinApi {
 
   /// 某源的排行榜
   static Future<Page<MediaItem>> getRank(
+    String provider,
+    String rankId, {
+    int page = 1,
+  }) async {
+    // ★ 探针注入点（默认 null ⇒ 生产路径逐字不变）
+    final hook = debugRankFetcher;
+    if (hook != null) return hook(provider, rankId, page: page);
+    return getRankReal(provider, rankId, page: page);
+  }
+
+  /// 真实实现（不经 hook）—— 理由同 [getHomeReal]
+  @visibleForTesting
+  static Future<Page<MediaItem>> getRankReal(
     String provider,
     String rankId, {
     int page = 1,
@@ -209,6 +301,19 @@ class SourinApi {
   /// ⚠️ 参数名 `category_id` —— 原版前端传 `categoryId`，
   /// Rust 的 `Args::get` 会自动回退到 camelCase。
   static Future<Page<MediaItem>> getList(
+    String provider,
+    String categoryId, {
+    int page = 1,
+  }) async {
+    // ★ 探针注入点（默认 null ⇒ 生产路径逐字不变）
+    final hook = debugListFetcher;
+    if (hook != null) return hook(provider, categoryId, page: page);
+    return getListReal(provider, categoryId, page: page);
+  }
+
+  /// 真实实现（不经 hook）—— 理由同 [getHomeReal]
+  @visibleForTesting
+  static Future<Page<MediaItem>> getListReal(
     String provider,
     String categoryId, {
     int page = 1,
@@ -1401,8 +1506,63 @@ class SourinApi {
   static Future<void> disconnectSync() =>
       SourinCore.callAsync('disconnect_sync');
 
+  // ═══════════════════════════════════════════════════════════════════
+  //  云盘同步 · 探针注入点
+  // ═══════════════════════════════════════════════════════════════════
+  //
+  // ⚠️ **生产路径永不为非 null** —— 只有 widget 测试会装一次，
+  //    测试结束即复原。产品代码里没有任何地方写它们。
+  //
+  // # 为什么需要（这是实测逼出来的）
+  //
+  // 面板**绝大部分 UI 只在「已连接」时存在**：
+  //
+  // ```text
+  // 连接详情（服务/地址/账号/目录/上次同步/上次备份）  ← 只有已连接才有
+  // 四个动作按钮（测试连接/立即同步/立即备份/断开）   ← 只有已连接才有
+  // 自动同步设置区                                  ← 只有已连接才有
+  // 云端备份列表（含删除按钮）                       ← 只有已连接才有
+  // ```
+  //
+  // 而 `flutter test` 环境里**加载不了核心库**（worktree 根目录没有
+  // `sourin_core.dll`）⇒ `syncStatus()` 抛异常 ⇒ 面板走降级分支
+  // ⇒ 永远停在「未配置」态 ⇒ 上面那些**一条都渲染不出来**。
+  //
+  // 结果就是：这块 UI 既没有截图、也没有布局断言，等于没测。
+  // 有了下面这几个注入点，测试就能造出「已连接 + 有备份列表」的形态，
+  // 把真正会被用户看到的界面**渲染出来并量它**。
+  //
+  // # 纪律：只给**只读**的三个接口
+  //
+  // 注入点只覆盖 `sync_status` / `sync_settings_get` / `sync_backup_list`
+  // —— 它们都只是读。写接口（configure / test / sync / 备份 / 删除）
+  // **不给注入点**：测试不需要它们，而且注入了就等于把「按钮点了会发生什么」
+  // 从测试里拿掉，那正是最该测的部分（真跑由 t94 在 Rust 侧端到端覆盖）。
+  @visibleForTesting
+  static Future<SyncStatus> Function()? debugSyncStatusFetcher;
+
+  @visibleForTesting
+  static Future<SyncSettings> Function()? debugSyncSettingsFetcher;
+
+  @visibleForTesting
+  static Future<List<SyncBackupEntry>> Function()? debugSyncBackupListFetcher;
+
+  /// 装/卸这三个注入点（`null` = 恢复真实实现）
+  @visibleForTesting
+  static void installSyncDebugFetchers({
+    Future<SyncStatus> Function()? status,
+    Future<SyncSettings> Function()? settings,
+    Future<List<SyncBackupEntry>> Function()? backups,
+  }) {
+    debugSyncStatusFetcher = status;
+    debugSyncSettingsFetcher = settings;
+    debugSyncBackupListFetcher = backups;
+  }
+
   /// 同步状态（设置页据此显示「已连接 / 未配置」）
   static Future<SyncStatus> syncStatus() async {
+    final f = debugSyncStatusFetcher;
+    if (f != null) return f();
     final r = await SourinCore.callAsync('sync_status');
     return SyncStatus.fromJson(jmap(r) ?? {});
   }
@@ -1430,6 +1590,8 @@ class SourinApi {
   /// `autoBackupIntervalMinutes: 1440`、`autoEnabled: false`）。
   /// 因为它比「用户配云盘」早得多就会被调用（一进「备份与恢复」页就调）。
   static Future<SyncSettings> syncSettings() async {
+    final f = debugSyncSettingsFetcher;
+    if (f != null) return f();
     final r = await SourinCore.callAsync('sync_settings_get');
     return SyncSettings.fromJson(jmap(r) ?? {});
   }
@@ -1466,6 +1628,8 @@ class SourinApi {
   ///
   /// ★ 没配云盘时后端返回**空列表**（不是报错）—— 界面会无条件调它。
   static Future<List<SyncBackupEntry>> syncBackupList() async {
+    final f = debugSyncBackupListFetcher;
+    if (f != null) return f();
     final r = await SourinCore.callAsync('sync_backup_list');
     return jlist<SyncBackupEntry>(r, SyncBackupEntry.fromJson).toList();
   }

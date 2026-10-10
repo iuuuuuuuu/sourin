@@ -52,12 +52,12 @@ import 'package:flutter/services.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:liquid_glass_widgets/liquid_glass_widgets.dart';
 import 'package:media_kit/media_kit.dart';
-import 'package:forui/forui.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'package:path_provider/path_provider.dart';
 
 import 'core/app_tray.dart';
+import 'ui/app_update_bootstrap.dart';
 import 'core/device.dart';
 import 'core/ffi.dart';
 import 'core/ui_prefs.dart';
@@ -81,8 +81,9 @@ import 'core/models.dart' show Episode, Favorite, Progress, followRemainingByKey
 import 'ui/browse_page.dart';
 import 'ui/spatial_nav.dart';
 import 'ui/app_theme.dart';
-import 'ui/theme_bridge.dart';
+import 'ui/theme/theme_pack.dart';
 import 'ui/tokens.dart';
+import 'ui/widgets/app_toast.dart';
 import 'ui/widgets/window_frame.dart';
 // ★ task-17：手机端系统栏（状态栏/导航栏）刷成内容区同色
 import 'ui/system_ui.dart';
@@ -97,6 +98,8 @@ import 'ui/titlebar_visibility.dart';
 //   已把它们去掉（留着就是 unused import）。唯一真源是
 //   `AppMetrics.effectiveTextScale`（`ui/tokens.dart`），它同时管住
 //   「挂上去的 TextScaler」与「卡片文字区高度」。
+// ★ task-3 ⑲「已缓存」底部页（列表 = 真扫下载目录）
+import 'ui/cache_page.dart';
 import 'ui/detail_page.dart';
 import 'ui/follow_page.dart';
 import 'ui/home_page.dart';
@@ -109,6 +112,8 @@ import 'ui/player_page.dart';
 import 'ui/remote_bridge.dart';
 // ★ 真机拖拽自检（默认关，`SOURIN_DRAG_SELFTEST=1` 才跑）
 import 't458_drag_selftest.dart';
+import 'ui/app_palette.dart';
+import 'ui/app_scaffold.dart';
 
 /// ★ 是否桌面平台（Windows / macOS / Linux）
 ///
@@ -143,6 +148,23 @@ enum AppTab {
   live('直播', '/live'),
   follow('追更', '/follow'),
   search('搜索', '/search'),
+  /*
+   * ★ task-3 ⑲ 新增「已缓存」页（Owner 原话）：
+   * > 对于已下载的,底部是不是应该加个已缓存的页面?
+   * > 然后有封面,并且显示出来缓存了多少
+   *
+   * ⚠️ 顺序即**底栏顺序**：这里必须排在 settings **之前** ——
+   *    用户看到的第 5 项就是「已缓存」，设置被挤到第 6 项。
+   *    枚举顺序另有语义：`_transitionDir` 靠 index 差算切换方向，
+   *    插在中间（而不是末尾）会让「搜索 → 已缓存」的动画方向
+   *    与「搜索 → 设置」不同 —— 这正是我们要的（它物理上排在前）。
+   * ⚠️ 往这里加成员会**同时**影响 5 处，改完必须全部核对：
+   *    `_icons` / `_iconsActive`（漏加 = **运行时 null 崩**，见 :167 的 `[this]!`）、
+   *    `_pageFor` 的 switch（无 default ⇒ 漏 case 是编译期非穷尽错误）、
+   *    `_pageCache`（按 values.length 自动扩容，无需改）、
+   *    底部栏宽度 `_tabWidthFor`（用 values.length 均分 ⇒ 每格变窄）。
+   */
+  cached('已缓存', '/cached'),
   settings('设置', '/settings');
 
   const AppTab(this.label, this.path);
@@ -154,6 +176,9 @@ enum AppTab {
     AppTab.live: Icons.live_tv_outlined,
     AppTab.follow: Icons.star_border_rounded,
     AppTab.search: Icons.search_rounded,
+    // ★「已缓存」用 download_done 语义（**不是** folder）——
+    //   Owner 要的是"已经存下来的东西"，folder 会让人以为是下载目录入口。
+    AppTab.cached: Icons.download_done_outlined,
     AppTab.settings: Icons.settings_outlined,
   };
   static const _iconsActive = {
@@ -161,6 +186,7 @@ enum AppTab {
     AppTab.live: Icons.live_tv,
     AppTab.follow: Icons.star_rounded,
     AppTab.search: Icons.search_rounded,
+    AppTab.cached: Icons.download_done_rounded,
     AppTab.settings: Icons.settings,
   };
 
@@ -686,6 +712,15 @@ Future<void> main() async {
     return; // 自检自己 exit，这里只是让分析器知道流程结束
   }
 
+  /*
+   * ★ 把数据目录告诉主题包存储 —— `ThemePackStore.loadAll()` 是**同步**的
+   *   （主题页是保活的 tab 页，可能在数据目录解析完成前就被打开），
+   *   所以不能在那里 await。启动时注入一次最省事。
+   * ⚠️ 拿不到就让它自己按 `--dart-define` / `%APPDATA%` 兜底，
+   *   最坏结果只是"主题包列表为空"，内置主题照常全在。
+   */
+  ThemePackStore.debugSetDataDir(coreDataDir);
+
   runApp(SourinApp(coreError: coreError, coreDataDir: coreDataDir));
 
   /*
@@ -709,6 +744,11 @@ Future<void> main() async {
    *    而托盘晚 50ms 出现对用户毫无影响。失败已由 `start()` 自己吞并留日志。
    */
   unawaited(AppTray.instance.start());
+
+  // ★ 版本更新检查（每天至多一次，用户可在「关于」里关闭）。
+  //   不 await：检查走网络，等它会让首帧等一次 HTTP。
+  //   逻辑全在 `ui/app_update_bootstrap.dart`，这里只是挂钩点。
+  unawaited(AppUpdateBootstrap.run());
 }
 
 /// 让桌面窗口显示出来（★ 只在 `kIsDesktop` 下调用）
@@ -1526,10 +1566,7 @@ class _SourinAppState extends State<SourinApp>
     final brightness = AppTheme.resolve(
       systemBrightness: MediaQuery.platformBrightnessOf(context),
     );
-    final theme = AppTheme.themeFor(brightness);
-    final materialTheme = brightness == Brightness.light
-        ? buildLightMaterialTheme(theme)
-        : buildMaterialTheme(theme);
+    final materialTheme = AppTheme.themeFor(brightness);
 
     /*
      * ══════════════════════════════════════════════════════════════════
@@ -1668,14 +1705,14 @@ class _SourinAppState extends State<SourinApp>
        *    所以这里只是消掉产品里那一处，不是通用解。
        */
       scrollBehavior: const _SourinScrollBehavior(),
-      localizationsDelegates: FLocalizations.localizationsDelegates,
-      supportedLocales: FLocalizations.supportedLocales,
+      localizationsDelegates: GlobalMaterialLocalizations.delegates,
+      supportedLocales: [Locale("zh", "CN"), Locale("en", "US")],
       /*
        * ★ 两层 theme 都要给（2026-09-22 实测踩到）
        *
        * ```text
        * theme:          → MaterialApp 的（给 Material 组件兜底背景色）
-       * FTheme(data:)   → forui 的（给 FScaffold / FButton 等）
+       * AppThemeHost(data:)   → forui 的（给 FScaffold / FButton 等）
        * ```
        * 只给 FTheme 而漏掉 MaterialApp.theme 的后果：
        * **整个窗口是一片深蓝色**，什么都没有 ——
@@ -1740,8 +1777,8 @@ class _SourinAppState extends State<SourinApp>
        *    用 `_TitleBarHost`（下面）根据"当前是否在播放页"动态收起。
        */
       builder: (context, child) => _TextScaleHost(
-        child: FTheme(
-          data: theme,
+        child: AppThemeHost(
+          data: materialTheme,
         /*
          * ══════════════════════════════════════════════════════════════
          * ★★★ 2026-10-01：删掉 `FToaster`（原本是 `child: FToaster(`）
@@ -1979,20 +2016,20 @@ class _SourinAppState extends State<SourinApp>
              * ```dart
              * color: brightness == Brightness.light
              *     ? LightTokens.bgBase
-             *     : FTheme.of(context).colors.background,  // ← 就是这一行
+             *     : AppPalette.of(context).background,  // ← 就是这一行
              * ```
              * `brightness` 是自己解析的（对），但深色分支取色走的是
              * `FTheme.of(context)` —— 而**这个 `context` 在 `FTheme` 上面**：
              * ```text
              * MaterialApp
              *  ├ builder(context, child)   ← 这个 context 不是 FTheme 的子孙
-             *  │   └ FTheme(data: theme)   ← 注入在 builder 的**返回值**里
+             *  │   └ AppThemeHost(data: materialTheme)   ← 注入在 builder 的**返回值**里
              *  └ theme: materialTheme
              * ```
              * forui 的 `FTheme.of` 找不到祖先时**不抛异常**，
-             * 而是静默兜底成 `FTheme.neutral.light.touch`
+             * 而是静默兜底成 `AppTheme.themeFor(Brightness.light)`
              * （forui `src/theme/theme.dart:140`：
-             *  `return theme?.data ?? FTheme.neutral.light.touch;`）——
+             *  `return theme?.data ?? AppTheme.themeFor(Brightness.light);`）——
              * 也就是**浅色**，`background = #FFFFFF` 纯白。
              *
              * ⇒ 深色下这层地板画成了**纯白**，标题栏玻璃透出白底
@@ -2043,7 +2080,12 @@ class _SourinAppState extends State<SourinApp>
             child: Device.isTouchOnly
                 ? SystemUiHost(
                     brightness: brightness,
-                    child: _TitleBarHost(child: child ?? const SizedBox()),
+                    // ★ 与桌面分支同一个 toast 宿主（见下面那段注释）：
+                    //   手机端少了这一层 ⇒ showAppToast 在手机端静默失效，
+                    //   设置页的"已保存/保存失败"全部没反应。
+                    child: ToastHost(
+                      child: _TitleBarHost(child: child ?? const SizedBox()),
+                    ),
                   )
                 : RemoteBridgeHost(
               globals: _globals,
@@ -2087,7 +2129,13 @@ class _SourinAppState extends State<SourinApp>
                *    `setGlobals`，虽然单例桥能容忍（后注册的覆盖），
                *    但两个 `dispose` 会互相干扰。
                */
-              child: _TitleBarHost(child: child ?? const SizedBox()),
+              /*
+               * ★ 统一 toast 宿主 —— 必须在这一层（与自绘标题栏同一层，
+               *   Navigator 之外）⇒ 首页/详情页/播放页都能弹到。
+               */
+              child: ToastHost(
+                child: _TitleBarHost(child: child ?? const SizedBox()),
+              ),
             ),
           ),
         ),
@@ -2301,6 +2349,13 @@ class _ShellPageState extends State<ShellPage>
   final _searchKey = GlobalKey<SearchPageState>();
   final _settingsKey = GlobalKey<SettingsPageState>();
 
+  /// ★ task-3 ⑲「已缓存」页的 key —— 与上面四个同契约（一页一个，只出现一次）
+  ///
+  /// ⚠️ 必须用 `CachePageState` 这个**具体**类型：`_switchTo` 要调
+  ///    `loadAll()`，而 GlobalKey 的 `currentState` 是 `State<T>` ——
+  ///    泛型给错就取不到那个方法（编译期报错，好在不会静默失败）。
+  final _cachedKey = GlobalKey<CachePageState>();
+
   /// ★★ task-65：**待激活**的追更页 tab（`null` = 无请求）
   ///
   /// # 为什么需要这个字段（而不是直接调 `_followKey.currentState.showTab`）
@@ -2418,6 +2473,17 @@ class _ShellPageState extends State<ShellPage>
   /// **测试要控制前提**，不该依赖"按多少次键能走到"这种脆弱假设。
   void debugSwitchTo(AppTab t) => _switchTo(t);
 
+  /// 缺陷 3 探针读数口：当前离场页的淡出不透明度 + 离场窗口是否还在
+  ///
+  /// 返回 `(leavingTabName, leavingFadeValue, leaveControllerValue)`；
+  /// 没有离场页时第一项为 null。用于 `.probe/zz_t3_overlap_probe_test.dart`
+  /// 逐帧核对 `enter(t) + leavingFade(t) == 1.000`。
+  (String?, double, double) debugLeavingFadeForProbe() => (
+        _leavingTab?.name,
+        _leavingFade.value,
+        _leaveC.value,
+      );
+
   /// 上一个 tab 的序号 —— 用来算切换方向
   int _prevIndex = 0;
 
@@ -2476,6 +2542,12 @@ class _ShellPageState extends State<ShellPage>
 
   /// 离场页的不透明度：1.0（刚就位）→ 0.0（彻底消失）
   ///
+  /// [2026-10-09 / Owner 第 3 条] 曲线 = `Motion.easeOut`，**与进入页
+  /// `_KeepAliveTransition._c` 同源** => 两条动画同一 ticker 时间轴、
+  /// 同一 duration => `enter(t) + leave(t) === 1.000`（逐帧互斥）。
+  /// 改前用 `Motion.easeInOut`，与进入页互为反相 —— 真机峰值 sum 1.719。
+  /// 全部推导与读数见下面 `_leaveC` 处那段长注释。
+  ///
   /// 只在 `t == _leavingTab` 的那一页上生效（见 build 里的传参）。
   late final Animation<double> _leavingFade = Tween<double>(
     begin: 1.0,
@@ -2483,8 +2555,62 @@ class _ShellPageState extends State<ShellPage>
   ).animate(
     CurvedAnimation(
       parent: _leaveC,
-      curve: MotionPrefs.curve(context, Motion.easeInOut),
-      reverseCurve: MotionPrefs.curve(context, Motion.easeInOut),
+      /*
+       * [2026-10-09 / Owner 第 3 条「切页文字重叠」] 曲线从 easeInOut 换成
+       *   **与进入页同源**的 easeOut。
+       *
+       * # 改前的真机读数（.probe/zz_t3_overlap_probe_test.dart v4）
+       * ```text
+       * t=  0ms  enter out=0.000  |  leave out=1.000  |  sum(out)=1.000
+       * t= 16ms  enter out=0.261  |  leave out=0.997  |  sum(out)=1.257
+       * t= 40ms  enter out=0.565  |  leave out=0.977  |  sum(out)=1.542
+       * t= 80ms  enter out=0.840  |  leave out=0.879  |  sum(out)=1.719  <-- 峰值
+       * t=130ms  enter out=0.961  |  leave out=0.500  |  sum(out)=1.461
+       * t=260ms  enter out=1.000  |  leave out=1.000  |  sum(out)=2.000  <-- 见下
+       * ```
+       * 80ms 时两页**同时**处于 0.84 / 0.88 的「都很亮」区间
+       *   => 屏幕上是两份文字叠在一起 = Owner 说的「文字重叠」
+       *
+       * # 根因：不是「层数」，是**两条曲线互为反相**
+       * ```text
+       * 进入页  _c      走 Motion.easeOut   = Cubic(0.22, 1, 0.36, 1)
+       * 离场页  _leaveC 走 Motion.easeInOut = Cubic(0.65, 0, 0.35, 1)
+       *   -> easeOut  : 起步快、收尾长 —— 16ms 就 0.261、80ms 已 0.841
+       *   -> easeInOut: 起步平、收尾也平 —— 80ms 才掉到 0.880
+       * => 恰好是「一个猛涨、一个不动」=> 峰值 sum 1.72 出现在 81ms
+       * ```
+       * 原注释（下方 2026-10-08 记录）以为「离场用 easeInOut 前段几乎不动
+       * 才能继续挡住 floorColor」—— 挡住 floorColor 是**对的**（确实要挡），
+       * 但它没算「新页此时已经很亮」=> 挡住的代价就是叠影。
+       *
+       * # 为什么换成 easeOut 就是**精确互斥**
+       * ```text
+       * 离场页绘制不透明度 = _leavingFade = 1.0 -> 0.0，由 _leaveC 驱动
+       * 两个 controller 都在**同一个 setState 帧**里 forward(from: 0)
+       *   => 同一 ticker 时间轴、同一 duration(Motion.base) => elapsed 相同
+       * => leave(t) = 1 - easeOut(t) = 1 - enter(t)
+       * => enter(t) + leave(t) === 1.000 **对每一个 t 都成立**
+       * ```
+       * 数值验算（同一求值器）：峰值 = 1.000 @ 0ms，sum>1.5 持续 **0ms**。
+       * 逐帧：0.000/1.000、0.261/0.739、0.565/0.435、0.840/0.160、0.961/0.039。
+       * => 任意时刻两页不透明度之**和恒为 1** => 数学上不可能「两页都亮」。
+       *
+       * # 为什么这一改**同时收掉**缺陷 18（切页残影）
+       * ```text
+       * 改前 t>=260ms: _leavingTab 已被 _leavingTimer 清成 null => 外层
+       *   FadeTransition 被整个移除（下方 lf == null 分支）=> 离场页回到
+       *   **不透明度 1**（读数 sum=2.000）=> 若此刻它还没被 offstage
+       *   （换位/重建的时序差），就是一块**满亮的残影**
+       * 改后 t>=260ms: _leaveC 走到 1 => _leavingFade = 0 => 即使外层
+       *   那层被移除，离场页在退出窗口那一刻**本身就是 0**
+       *   => 残影从「靠时序侥幸」变成「数学上为 0」
+       * ```
+       *
+       * 曲线**只在**离场侧改；进入页仍是 Motion.easeOut（一行未动）。
+       * `Motion.easeInOut` 在 tokens.dart:170 仍被别处使用，**不删**。
+       */
+      curve: MotionPrefs.curve(context, Motion.easeOut),
+      reverseCurve: MotionPrefs.curve(context, Motion.easeOut),
     ),
   );
 
@@ -2563,7 +2689,11 @@ class _ShellPageState extends State<ShellPage>
         sum += v;
       }
       if (!mounted) return;
-      if (sum != _unread) setState(() => _unread = sum);
+      if (sum != _unread) {
+        setState(() => _unread = sum);
+        _bottomBarState.value =
+            _BottomBarState(tab: _tab, unread: sum);
+      }
       debugPrint('[SHELL] 追更徽标(还剩未看) = $sum（${following.length} 部追更）');
     } catch (e) {
       debugPrint('[SHELL] 追更徽标取数失败（保留旧值 $_unread）: $e');
@@ -3246,6 +3376,7 @@ class _ShellPageState extends State<ShellPage>
     //      只释放一个会漏（本项目踩过"两处同构必须一起改"）。
     _activeTab.dispose();
     _liveVisible.dispose();
+    _bottomBarState.dispose();
     // ★★★ task-14 ⑨（2026-10-04）：离场窗口的定时器必须一起取消 ——
     //   否则 shell 被销毁后它还挂着，flutter_test 会直接判红：
     //   A Timer is still pending even after the widget tree was disposed.
@@ -3350,6 +3481,8 @@ class _ShellPageState extends State<ShellPage>
        * "页面已切但可见性还没变"的一帧（隐藏页会晚一拍才停播放器）。
        */
       _activeTab.value = t;
+      // ★ 底栏订阅的值（见 `_bottomBar`）：只有这两项变化才重建底栏
+      _bottomBarState.value = _BottomBarState(tab: t, unread: _unread);
     });
     // ★ 投影到既有 LivePage(visible:) 签名（单向，见 `_syncVisibility`）
     //
@@ -3444,9 +3577,36 @@ class _ShellPageState extends State<ShellPage>
      * > 遥控可能被别的入口改过（比如底栏长按），
      * > 回来不刷新会显示过期状态。
      */
+    /*
+     * ★ task-3 ⑲「已缓存」页：切回来重新扫盘
+     *
+     * 与上面几支同一个理由，而且这一支**更需要**刷新：盘上的文件
+     * 会被别处改 —— 用户在播放页删了缓存、在详情页新下了一集、
+     * 或直接在资源管理器里拖走一个文件。不重扫就会显示过期数字。
+     *
+     * ⚠️ 只能调 `load()`（重扫）**不能**调 `_pageFor(AppTab.cached)` ——
+     *    后者会 new 出一个新 CachePage ⇒ 保活失效（本文件的核心不变量）。
+     */
+    if (t == AppTab.cached) {
+      _cachedKey.currentState?.load();
+    }
     if (t == AppTab.settings) {
       _settingsKey.currentState?.loadAll();
     }
+    /*
+     * ★★★ 底栏徽标也顺手刷一次（Owner「很多地方我感觉都卡卡的」）
+     *
+     * 徽标是"还需要看多少集"，它会因**任何**页面的写操作变：
+     * 播放页看完一集、详情页点追更/收藏 —— 那些都不经过追更页。
+     * 改前只有 `initState` 跑一次 `_refreshUnread()` ⇒ 徽标可以
+     * 整晚停在旧数字上（用户只有切到追更页才会看到刷新）。
+     *
+     * 为什么放在 `_switchTo` 的**末尾**（而不是每个分支里）：
+     * 它是一次 FFI 往返，必须排在本次切页真正要做的取数**之后**，
+     * 否则用户会看到"切页卡了一下才出内容"。
+     * ⚠️ 不 await —— 与其它四支一致（刷新是"最终一致"的）。
+     */
+    unawaited(_refreshUnread());
   }
 
   /// ★ 按 tab 序号算切换方向（对齐原版 L41–45）
@@ -3459,7 +3619,7 @@ class _ShellPageState extends State<ShellPage>
 
   @override
   Widget build(BuildContext context) {
-    final colors = FTheme.of(context).colors;
+    final colors = AppPalette.of(context);
     /*
      * ★ 自绘标题栏只在桌面显示（2026-09-22）
      *
@@ -3626,7 +3786,7 @@ class _ShellPageState extends State<ShellPage>
      */
     return ShellScope(
         notifier: _activeTab,
-        child: FScaffold(
+        child: AppScaffold(
         /*
          * ══════════════════════════════════════════════════════════════════
          * ★★★ 关掉 forui 的 childPadding（2026-10-03 双端像素实测反解）
@@ -3677,7 +3837,6 @@ class _ShellPageState extends State<ShellPage>
          *   `merge_view_probe.dart` 里的 `FScaffold` 是独立诊断入口
          *   （各自 `-t` 启动），不承载 Owner 的界面契约，本轮不动。
          */
-        childPad: false,
         /*
          * ══════════════════════════════════════════════════════════════════
          * ★★★ 页面底色必须与吸顶条同源（2026-09-25 用户报「搜索这里有一块阴影」）
@@ -3750,9 +3909,7 @@ class _ShellPageState extends State<ShellPage>
          *    `?? original.X`（`scaffold.design.dart:152-159`）⇒ `childPadding` /
          *    `footerDecoration` / `headerDecoration` 全部保持 forui 原值。
          */
-        scaffoldStyle: FScaffoldStyleDelta.delta(
-          backgroundColor: Theme.of(context).colorScheme.surface,
-        ),
+        backgroundColor: Theme.of(context).colorScheme.surface,
         /*
          * ⚠️ 这里**不再**挂标题栏（2026-09-24 改）
          *
@@ -4306,20 +4463,69 @@ class _ShellPageState extends State<ShellPage>
            *    永远不会因为屏幕尺寸而判错。这里照做。
            */
             child: BottomBarMarker(
-              child: _BottomBar(
-                current: _tab,
-                unread: _unread,
-                colors: colors,
-                onSelect: _switchTo,
-              ),
+              child: _bottomBar(colors),
             ),
           ),
         ],
       ),
       ),   // ← Material(type: transparency) 的收尾（见上方的长注释）
-    ),     // ← FScaffold 的收尾
+    ),     // ← AppScaffold 的收尾
     );     // ← ShellScope 的收尾
   }
+
+  /// ★★★ 底栏只订阅「它真正依赖的两个值」（Owner「很多地方我感觉都卡卡的」）
+  ///
+  /// # 改前的形态与它的代价
+  ///
+  /// `_BottomBar` 直接写在 `_ShellPageState.build` 里，读 `_tab` / `_unread`
+  /// ⇒ **每一次 shell 的 `setState` 都会重建整条底栏**：
+  ///
+  /// ```text
+  /// shell 的 setState 来源（实测逐条列过）：
+  ///   · _switchTo              切 tab
+  ///   · 离场窗口结束的 Timer    每次切 tab 后 260ms 又一次
+  ///   · _refreshUnread         徽标数字变了
+  ///   · _syncMaximized         窗口最大化状态变了
+  ///   · 空间导航/搜索结果的回调
+  /// ⇒ 而底栏里躺着一整块**液态玻璃**（BackdropFilter / saveLayer 一类），
+  ///   外加 5 个 `_BottomItem`（各自带 AnimatedContainer + FocusableActionDetector）
+  /// ```
+  ///
+  /// 底栏本身只在 **`_tab` 变**和 **`_unread` 变**时需要重建。
+  /// 其余那些 `setState`（尤其是切 tab 之后 260ms 那次"离场窗口收尾"）
+  /// 与它**毫无关系** —— 却每次都要把玻璃重画一遍。
+  ///
+  /// # 改法（结构不变，观感逐字不变）
+  ///
+  /// 把 `_tab` 与 `_unread` 折成一个 `ValueNotifier<_BottomBarState>`，
+  /// 用 [ValueListenableBuilder] 订阅 ⇒
+  /// ```text
+  /// 切 tab / 徽标变 → 重建底栏（与改前逐帧相同）
+  /// 其它 setState    → **底栏完全不重建**
+  /// ```
+  ///
+  /// ⚠️ 为什么不是 `const`/`identical`：`_BottomBar` 的入参里 `colors`
+  ///   与 `onSelect` 每次都可能是新对象，而 `ValueListenableBuilder` 的
+  ///   **builder 只在值变化时**被调 —— 那才是我们要的粒度。
+  ///
+  /// ⚠️ 底栏的液态玻璃**观感必须逐字不变**（Owner 唯一满意的部分）：
+  ///   本改动只改**什么时候重建**，不动 `GlassContainer` 的任何一个参数。
+  Widget _bottomBar(AppPalette colors) {
+    return ValueListenableBuilder<_BottomBarState>(
+      valueListenable: _bottomBarState,
+      builder: (context, s, _) => _BottomBar(
+        current: s.tab,
+        unread: s.unread,
+        colors: colors,
+        onSelect: _switchTo,
+      ),
+    );
+  }
+
+  /// 底栏订阅的值（只有这两项 —— 见 [`_bottomBar`] 的说明）
+  final _bottomBarState = ValueNotifier<_BottomBarState>(
+    const _BottomBarState(tab: AppTab.home, unread: 0),
+  );
 
   Widget _pageFor(AppTab t) {
     switch (t) {
@@ -4553,6 +4759,23 @@ class _ShellPageState extends State<ShellPage>
           isTv: Device.isTv,
           onOpenDetail: _openDetail,
         );
+      /*
+       * ★ task-3 ⑲「已缓存」页（Owner 要的「底部已缓存页 + 封面 + 缓存了多少」）
+       *
+       * 数据源 = **真扫盘**（`scanCacheWorks(DownloadDir.root())`）：
+       * lib/core/sourin_api.dart 里**根本没有**下载记录这类接口，
+       * 盘上的文件才是唯一真相 —— 也因此这里的数字与用户
+       * 在资源管理器里看到的是同一个。
+       *
+       * `onOpen` 复用「我的」版块那条现成入口（push 合并页 MediaPage：
+       * 上播放器 + 下详情，见 `onShelfPlay`），不新造一条播放路径。
+       */
+      case AppTab.cached:
+        return CachePage(
+          key: _cachedKey,
+          isTv: Device.isTv,
+          onOpen: _openCachedWork,
+        );
       case AppTab.settings:
         /*
          * ★ 设置页（2026-09-23）
@@ -4579,6 +4802,64 @@ class _ShellPageState extends State<ShellPage>
   // ═══════════════════════════════════════════════════════════════════
   //  导航回调（发现页 → 其它页）
   // ═══════════════════════════════════════════════════════════════════
+
+  /// ★ Owner 第 1009 批 13：点「已缓存」页的一张卡片 ⇒ 进**本地播放页**
+  ///
+  /// # 为什么这里永远走本地（而不是「有缓存就走本地」）
+  /// ```text
+  /// Owner 原话：「现在哪个已缓存之后,应该**只在已缓存页面**进入那个缓存页面」
+  ///
+  /// 改前的判据是"目录里有没有旁文件"—— 那条规则的后果是
+  ///   **从任何别的地方进来都可能走成本地文件**。
+  /// 而本方法是**唯一**的本地播放入口：首页 / 追更 / 历史 / 搜索 / 浏览
+  ///   全部走 `_openDetail` ⇒ 正常在线路径，即使本地有缓存也**不变**（Owner 要求）。
+  /// ```
+  ///
+  /// # 会话由 **CachePage 组织**（`buildLocalPlayRequest`）
+  /// 本方法只往 `MediaPage` 喂值，**不猜任何字段**。
+  void _openCachedWork(CachedPlayRequest req) {
+    final w = req.work;
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => MediaPage(
+          provider: req.provider,
+          id: req.mediaId,
+          title: w.displayTitle,
+          // ★ 封面优先用**本地那张**（断网也能看见，见 Owner 13）
+          cover: w.localCoverPath ?? w.cover,
+          episodeId: req.episode.fileName,
+          localPath: req.episodeAbsolutePath,
+          /*
+           * ★★★ OPS-13（反馈 C）：把**原来源**一起带下去。
+           *
+           * # 为什么必须在这里传（它是这条链上唯一的断点）
+           * ```text
+           * CachedPlayRequest 里**本来就有** originProvider/originMediaId
+           *   （cache_page.dart:744-745 :765 :767-768，
+           *    buildLocalPlayRequest 在 :965-966 填好）
+           * 但本方法组 MediaPage 时**没传** ⇒ 来源信息到这一层就没了
+           * ⇒ 播放器只知道自己是 local，**永远不知道该镜像到哪个站点键**
+           * ⇒ Owner 看到的「本地和线上的就彻底分开了」。
+           * ```
+           *
+           * ⚠️ 只加这两个可选参数，**不动**本方法任何既有字段 ——
+           *    provider 仍是 `local`（那是续播的命名空间，改了旧进度全丢，
+           *    见 cache_page.dart:722-734 的裁决）。
+           */
+          originProvider: req.originProvider,
+          originMediaId: req.originMediaId,
+          /*
+           * ★ 作品信息（标题/简介/年份/地区/类型/角标）一并发过去 ——
+           *   它就是在线播放页**同一个**详情区组件，差别只在数据来自哪。
+           */
+          localMeta: w,
+          isTv: Device.isTv,
+          isTouchOnly: Device.isTouchOnly,
+        ),
+      ),
+    );
+  }
+
 
   /// 打开**合并页**（task-58：上播放器 + 下详情）
   ///
@@ -4743,8 +5024,37 @@ class _ShellPageState extends State<ShellPage>
   /// 打开直播频道
   ///
   /// 直播没有剧集/多源可选，跳详情页反而是多余的一步，故直接进播放器。
-  void _openLiveChannel(String channelId, String name) {
-    debugPrint('[NAV] 打开直播: $channelId ($name)');
+  ///
+  /// ══════════════════════════════════════════════════════════════════
+  /// ★★★ task-6：新增第一个参数 [provider]（这个频道**属于哪个源**）
+  /// ══════════════════════════════════════════════════════════════════
+  ///
+  /// # 错在哪
+  ///
+  /// 旧签名只有 `(channelId, name)`，而下面 push 的 `PlayerPage` 里
+  /// `provider` 被**写死成 'cctv'`**：
+  /// ```text
+  /// 旧 :4913  void _openLiveChannel(String channelId, String name)
+  /// 旧 :4923    provider: 'cctv',        ← ★ 无论频道来自哪个源都写 cctv
+  /// ```
+  /// 而调用方（首页直播条的 `onOpenLive`）**本来就知道源** ——
+  /// 它每个频道都是按 `(provider, channelId)` 探出来的。
+  /// 信息在回调边界上被丢掉 ⇒ 一旦用户在首页切到别的源再看直播，
+  /// 播放器仍然去 cctv 取流 ⇒ 取不到 ⇒ **黑屏**。
+  /// （正是 Owner 第 8 条要消灭的症状；task-4 实测：cctv 的 20 个频道
+  ///   视频线 100% `drmProtected: true`，写死 cctv 等于写死黑屏。）
+  ///
+  /// # 为什么这么改
+  ///
+  /// 让**知道源的那一层**把源如实传上来，参数顺序与
+  /// `HomePage.onOpenLive` / `LivePage.onWatchLive`（`(provider, channelId, name)`）
+  /// 保持一致 —— 同一个语义在三个回调上用同一种形状，少一次"顺序记错"的机会。
+  ///
+  /// ⚠️ 刻意**不给默认值**：写死 'cctv' 正是本次要修的 bug，
+  ///    留个默认值等于把它换个地方留着（下一个人漏传时静默回到黑屏）。
+  ///    没有默认值 ⇒ 漏传是**编译错误**。
+  void _openLiveChannel(String provider, String channelId, String name) {
+    debugPrint('[NAV] 打开直播: $provider/$channelId ($name)');
     // 同 `_openPlayer`：置位，让全局 handler 把方向键让给播放器
     _playerOpen = true;
     // 同 `_openPlayer`：代号守卫（否则被遥控替换掉时，
@@ -4753,7 +5063,8 @@ class _ShellPageState extends State<ShellPage>
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => PlayerPage(
-          provider: 'cctv',
+          // ★ task-6：源来自调用方（旧代码在这里写死 'cctv'）
+          provider: provider,
           id: channelId,
           title: name,
           liveChannelId: channelId,
@@ -4865,6 +5176,17 @@ class _ShellPageState extends State<ShellPage>
 ///
 /// ⚠️ 桌面以外的平台**完全不渲染** —— Android 没有"窗口"概念，
 ///    minimize/toggleMaximize 在那平台上不存在（点了不会有反应）。
+/// 标题栏那一支的**兜底字色**（亮色档）
+///
+/// 取自 `ui/app_typeface.dart:48-50`（`AppTypeface.forPlatform` 的亮色分支）——
+/// 与主题**同源**，但不依赖 `Theme.of` / `ThemePackStore`（原因见
+/// `_TitleBarHostState.build` 里那段长注释：那里够不着主题，且这一层
+/// 不该随用户偏好变化）。
+///
+/// ⚠️ 深色态（播放页）**不用**它 —— `_CustomTitleBar` 自己按 `dark`
+///    算出 `Colors.white` / `Colors.white70` 并给每个 Text 显式传色。
+const Color _kTitleBarFallbackTextColor = Color(0xFF0A0A0A);
+
 class _TitleBarHost extends StatefulWidget {
   const _TitleBarHost({required this.child});
 
@@ -4939,7 +5261,94 @@ class _TitleBarHostState extends State<_TitleBarHost>
 
     final show = titleBarVisible.value;
     final isDark = titleBarDark.value;
-    return Column(
+    /*
+     * ══════════════════════════════════════════════════════════════════
+     * ★★★ OPS-20（业主反馈 ①）：整支**自己**钉死默认文字样式
+     * ══════════════════════════════════════════════════════════════════
+     *
+     * # 业主原话（逐字，m01667 第①条）
+     *
+     * > 「这个名字下面不要加下划线,太丑了难看」
+     *
+     * # 现象
+     *
+     * 标题栏里「源影」两个字下面有**两条黄线**（双下划线）。
+     * 像素取证（`.probe/ops/att_crop_128x46.png`）：字形下方 y28 与 y31
+     * 两条纯黄 (246,247,89) 水平线，x34-58 ⇒ 双下划线、线距 3px。
+     *
+     * # 根因：它是**继承**来的，不在本仓库任何一行代码里
+     *
+     * ```text
+     * ① material_ui 的 MaterialApp 把自己的**兜底样式**当 textStyle
+     *    传给 WidgetsApp：
+     *      material_ui-1.6.0/lib/src/app.dart:45-54   _errorTextStyle
+     *        decoration: TextDecoration.underline         ← 下划线
+     *        decorationColor: Color(0xFFFFFF00)           ← 纯黄
+     *        decorationStyle: TextDecorationStyle.double  ← 双线
+     *        fontSize: 48.0 / fontFamily: 'monospace'
+     *      同文件 :1034 / :1070 都是 `textStyle: _errorTextStyle,`
+     * ② Flutter 把它装成**整棵树的根 DefaultTextStyle**：
+     *      flutter/packages/flutter/lib/src/widgets/app.dart:1737-1738
+     *        if (widget.textStyle != null) {
+     *          result = DefaultTextStyle(style: widget.textStyle!, child: result);
+     *        }
+     * ③ 标题栏挂在 `MaterialApp.builder` 里、**在 Navigator 之外**
+     *    （本文件 :2087 / :2137），这一支没有任何 Material/Scaffold 祖先
+     *    ⇒ 最近的 DefaultTextStyle 就是 ② 那个 _errorTextStyle。
+     * ④ `Text('源影')` 的 TextStyle 是 `inherit: true` 且没写 decoration
+     *    ⇒ `TextStyle.merge` 逐字段 copyWith
+     *      （flutter/.../painting/text_style.dart:1109
+     *       `decoration: other.decoration,` —— other.decoration 为 null 时
+     *       copyWith 保留 this 的值）
+     *    ⇒ 颜色/字号被自己的样式覆盖（所以不是红的、不是 48px），
+     *      **但 underline + 纯黄 + double 全留着**。
+     * ```
+     *
+     * # 为什么必须包在**这一层**（而不是只给那个 Text 补一行 decoration）
+     *
+     * 实测范围（`test/zz_ops20_scope_probe_test.dart`，遍历真实渲染树）：
+     * ```text
+     * A 标题栏本体（本类之下、Navigator 之上）  5 个 RenderParagraph
+     *     └ 只有「源影」吃到兜底（underline / double / 纯黄）
+     *     └ 另 4 个都是 Icon —— Icon 自带 decoration: none，天然免疫
+     * B 路由内容（Navigator 之下）             17 个 RenderParagraph
+     *     └ 吃到兜底 = 0（Material/Scaffold 自带更近的 DefaultTextStyle）
+     * ```
+     * ⇒ 兜底样式**只在标题栏那一支**能活下来，因为只有它没有 Material 祖先。
+     *   所以这里包住整支：这一支里**将来任何**没写 decoration 的 Text 都
+     *   不会再踩（`ui/widgets/settings_sub_page.dart:12-19` 描述的
+     *   「自绘标题栏没有返回按钮」那一类新加内容同样受保护）。
+     *
+     * ⚠️ 但**不能**把它挪到 Navigator 之下：路由那边本来就有更近的
+     *    Material 兜底样式（B 支实测 0 命中），改过去是**无谓的观感变更**。
+     *
+     * # 为什么钉死「三项」而不是只写 decoration
+     *
+     * 只写 `decoration` 是治症状：兜底样式里还有 `decorationColor` /
+     * `decorationStyle`，将来有人在这支里加一个没写 decoration 的 Text，
+     * 而某个祖先又把 decoration 设回 underline，黄双线会**原样回来**。
+     * 三项一起钉死，`merge` 之后无论怎么叠加都是 none。
+     *
+     * # 为什么不用 `AppTypeface.bodyStyle` / `AppPalette`（想过，不行）
+     *
+     * ```text
+     * AppTypeface.forPlatform()  → 只看 Brightness，不看主题包
+     * AppPalette.of(context)     → 读 Theme.of(context) 的 extension，而
+     *                              这个 context 在 AppThemeHost **之上**
+     *                              （本类的调用点在 :1780 的返回值**里面**），
+     *                              找不到 ⇒ 走 :140-146 兜底并**打一行日志**
+     * AppTheme.colorsFor(b)      → 走 ThemePackStore，会读磁盘偏好
+     * ```
+     * 而这里只需要一个**"安全"的兜底**，不是一个"好看"的兜底：
+     * `_CustomTitleBar` 自己算好 `barFg` / `barFgStrong` 并给**每个 Text
+     * 显式传色**（见 `_titleBarRow`）⇒ 本样式里的 color/fontSize
+     * **当前没有任何 Text 会用到**，它的意义只是「万一漏传，也不丑」。
+     * 用磁盘/主题包去换那点"万一"的好看，代价是给这一层引入一个
+     * **随用户偏好变化**的依赖（而它现在是纯常量）。
+     * ⇒ 用与主题同源的常量：字色 `0xFF0A0A0A` 取自
+     *   `ui/app_typeface.dart:50`（亮色档），字族/字号同源同文件。
+     */
+    final Widget column = Column(
       children: [
         /*
          * ★ 用 AnimatedSize 做"收起"动画
@@ -5033,6 +5442,23 @@ class _TitleBarHostState extends State<_TitleBarHost>
         Expanded(child: ClipRect(child: widget.child)),
       ],
     );
+
+    /*
+     * ⚠️ 两个分支都必须走这一层 —— 非桌面在上面就 return 了（:5249），
+     *    能到这里的都是桌面，也就是标题栏**真的**会渲染。
+     */
+    return DefaultTextStyle(
+      style: const TextStyle(
+        color: _kTitleBarFallbackTextColor,
+        fontFamily: 'Microsoft YaHei UI',
+        fontFamilyFallback: <String>['Microsoft YaHei', 'Noto Sans SC', 'Segoe UI'],
+        fontSize: 14,
+        decoration: TextDecoration.none,
+        decorationColor: Colors.transparent,
+        decorationStyle: TextDecorationStyle.solid,
+      ),
+      child: column,
+    );
   }
 }
 
@@ -5064,7 +5490,7 @@ class _CustomTitleBar extends StatelessWidget implements PreferredSizeWidget {
 
   @override
   Widget build(BuildContext context) {
-    final colors = FTheme.of(context).colors;
+    final colors = AppPalette.of(context);
     /*
      * ══════════════════════════════════════════════════════════════════
      * ★ 播放页：整条标题栏换成**深色**（修用户报的"闪白条"）
@@ -5212,11 +5638,22 @@ class _CustomTitleBar extends StatelessWidget implements PreferredSizeWidget {
         const SizedBox(width: 9),
         Text(
           '源影',
+          /*
+           * ★ OPS-20（业主反馈 ①）：这里**必须**自己写死 `decoration: none`。
+           *
+           * 只靠外面那层 `DefaultTextStyle`（`_TitleBarHostState.build`）
+           * 也能修好，但这一行是这个缺陷**唯一**被业主看见的地方
+           * （「这个名字下面不要加下划线,太丑了难看」）——
+           * 双保险的成本是 1 行，收益是：哪怕将来有人把这支从
+           * `DefaultTextStyle` 里挪出去（比如搬进某个 Material 页面），
+           * 这个具体症状也不会**复发**。
+           */
           style: TextStyle(
             fontSize: FontSizes.cap,
             fontWeight: FontWeight.w600,
             letterSpacing: 0.3,
             color: fgStrong,
+            decoration: TextDecoration.none,
           ),
         ),
 
@@ -5286,7 +5723,7 @@ class _WinButton extends StatefulWidget {
   /// 图标常态色
   ///
   /// ⚠️ 必须有这个参数：深色态（播放页）下若还用
-  ///    `FTheme.of(context).colors.foreground`（深色主题里是**深色**字），
+  ///    `AppPalette.of(context).foreground`（深色主题里是**深色**字），
   ///    图标会变成"黑底黑图标"看不见。
   final Color? iconColor;
 
@@ -5316,7 +5753,7 @@ class _WinButtonState extends State<_WinButton> {
               size: widget.small ? 12 : 15,
               color: _hover && widget.hoverIcon != null
                   ? widget.hoverIcon
-                  : (widget.iconColor ?? FTheme.of(context).colors.foreground),
+                  : (widget.iconColor ?? AppPalette.of(context).foreground),
             ),
           ),
         ),
@@ -5406,7 +5843,7 @@ class _CoreErrorView extends StatelessWidget {
      * `AppTheme.floorColor`"的坑是两回事 —— 那条约束针对的是
      * builder 自己的 context（它在 FTheme **之外**）。
      */
-    final colors = FTheme.of(context).colors;
+    final colors = AppPalette.of(context);
 
     /*
      * 用 forui 的 `error` 角色而不是硬编码红色 ——
@@ -5548,9 +5985,8 @@ class _CoreErrorView extends StatelessWidget {
                * 「已在运行 → 直接返回」），所以重复调用是安全的。
                * 用户修好存储权限后**不必重启应用**。
                */
-              FButton(
-                variant: FButtonVariant.outline,
-                onPress: _retry,
+              OutlinedButton(
+                onPressed: _retry,
                 child: const Text('重新尝试启动'),
               ),
               const SizedBox(height: Sp.x4),
@@ -5661,7 +6097,7 @@ class _ErrCard extends StatelessWidget {
 
   final String title;
   final String body;
-  final FColors colors;
+  final AppPalette colors;
   final bool mono;
 
   /// 是否提供「复制」（只有真实路径才值得复制）
@@ -5757,6 +6193,22 @@ class _ErrCard extends StatelessWidget {
 // ```
 // ⚠️ **不要**指望 `FocusTraversalGroup` 让方向键移动焦点 ——
 //    它只响应 Tab/Shift+Tab（实测：按 → 十次 tab 不动）。
+/// 底栏订阅的那两个值（相等性可判 ⇒ 不会误触发重建）
+@immutable
+class _BottomBarState {
+  const _BottomBarState({required this.tab, required this.unread});
+
+  final AppTab tab;
+  final int unread;
+
+  @override
+  bool operator ==(Object other) =>
+      other is _BottomBarState && other.tab == tab && other.unread == unread;
+
+  @override
+  int get hashCode => Object.hash(tab, unread);
+}
+
 class _BottomBar extends StatelessWidget {
   const _BottomBar({
     required this.current,
@@ -5767,7 +6219,7 @@ class _BottomBar extends StatelessWidget {
 
   final AppTab current;
   final int unread;
-  final FColors colors;
+  final AppPalette colors;
   final ValueChanged<AppTab> onSelect;
 
   @override
@@ -6253,7 +6705,7 @@ const double _tabWidthMin = 44;
 ///   原来  forui FScaffold.childPadding  horizontal 12/side = 24
 ///         本文件 _BottomBar 的 Padding                 = 48
 ///                                          合计       = 72
-///   现在  `FScaffold(childPad: false)` 关掉 forui 那 24
+///   现在  `AppScaffold(childPad: false)` 关掉 forui 那 24
 ///         ⇒ 只剩我们自己的 48
 /// ```
 /// 那 12/side 来自 forui 的两个默认值（不是我们的代码）：
@@ -6262,7 +6714,7 @@ const double _tabWidthMin = 44;
 ///      `childPadding = style.pagePadding.copyWith(top: 0, bottom: 0)`
 ///    `forui theme/style.dart:37`
 ///      `pagePadding = .symmetric(vertical: 8, horizontal: 12)`
-/// 修在**真实外壳**的 `FScaffold(childPad: false)`（见本文件上方那段
+/// 修在**真实外壳**的 `AppScaffold(childPad: false)`（见本文件上方那段
 /// 长注释）—— 只改外壳，`Layout` 的数值与语义一个都不动。
 ///
 /// ⚠️ 若这里漏改，窄屏下 `usable` 会**少算 24**：手机 411.43 下
@@ -6369,7 +6821,7 @@ class _BottomItem extends StatefulWidget {
   final AppTab tab;
   final bool active;
   final int badge;
-  final FColors colors;
+  final AppPalette colors;
   final VoidCallback onTap;
 
   @override
@@ -6560,8 +7012,8 @@ class _BottomItemState extends State<_BottomItem> {
 ///
 /// # 判据用 forui 的 `colors.brightness`，不用 Material 的
 ///
-/// `FColors` **自带 `brightness`**（forui `src/theme/colors.dart:32`），
-/// 而 `FTheme.of(context).colors` 是**本文件已经在用**的那一条链路
+/// `AppPalette` **自带 `brightness`**（forui `src/theme/colors.dart:32`），
+/// 而 `AppPalette.of(context)` 是**本文件已经在用**的那一条链路
 /// （`_BottomItem` 的 `widget.colors` 就是从这里传下来的）。
 /// `Theme.of(context).brightness` 在「同一个 shell 里两套 Material 串台」
 /// 那类 bug 下会走兜底值 —— 本项目为这个已经踩过一次 1.16:1 的对比度事故，
@@ -6605,7 +7057,7 @@ class _BottomPalette {
   final Color activeForeground;
 
   static _BottomPalette of(BuildContext context) {
-    final isLight = FTheme.of(context).colors.brightness == Brightness.light;
+    final isLight = AppPalette.of(context).brightness == Brightness.light;
     return isLight ? _light : _dark;
   }
 

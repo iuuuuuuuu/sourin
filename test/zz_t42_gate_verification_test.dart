@@ -80,21 +80,22 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 
 import 'package:sourin_spike/ui/live_page.dart';
+import 'package:sourin_spike/ui/app_scaffold.dart';
+import 'package:sourin_spike/ui/app_theme.dart';
 
 // ═══════════════════════════════════════════════════════════════════════
 //  工具
 // ═══════════════════════════════════════════════════════════════════════
 
 Widget _themed({required Widget home, GlobalKey<NavigatorState>? navKey}) {
-  final theme = FTheme.neutral.dark.desktop;
+  final theme = AppTheme.themeFor(Brightness.dark);
   return MaterialApp(
     navigatorKey: navKey,
-    theme: theme.toApproximateMaterialTheme(),
-    builder: (context, child) => FTheme(
+    theme: theme,
+    builder: (context, child) => AppThemeHost(
       data: theme,
       child: child ?? const SizedBox(),
     ),

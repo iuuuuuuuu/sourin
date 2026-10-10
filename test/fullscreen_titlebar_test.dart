@@ -99,11 +99,29 @@ void main() {
         isTrue,
         reason: '必须有统一的退出方法（含"先退全屏再 pop"的逻辑）',
       );
+      /*
+       * ★★★ 2026-10-09（task-15）：只去掉 `()` 与末尾 `;`，**保留 `await`**
+       *
+       * # 为什么要改（task-8 引入的真红）
+       * ```text
+       * 原来写死 `'if (_fullscreen) {\n      await _toggleFullscreen();'`。
+       * task-8 ① 把调用改成 `await _toggleFullscreen(awaitOs: false);`
+       *   （lead 要求的修法：保住 await 帧序，只摘掉那次 OS 往返）
+       * ⇒ 旧字面量匹配不到 ⇒ Expected: true, Actual: false。
+       * ```
+       * ★★ 关键：判据的**语义是「必须 await」**，所以新的匹配串**必须以 `await ` 开头** ——
+       *    绝不能改成匹配 `unawaited(`（那正是 lead 推翻过的写法）。
+       *    改成 `await _toggleFullscreen(` 后：
+       *      · `await _toggleFullscreen();`            旧写法仍过
+       *      · `await _toggleFullscreen(awaitOs: false);` 新写法也过
+       *      · `unawaited(_toggleFullscreen());`       **仍然不过** ✓ 语义保住了
+       */
       expect(
-        player.contains('if (_fullscreen) {\n      await _toggleFullscreen();'),
+        player.contains('if (_fullscreen) {\n      await _toggleFullscreen('),
         isTrue,
         reason: '`_exitPlayer` 必须**先 await 退出全屏**再 pop —— '
-            'fire-and-forget 会在页面销毁后才生效，中间用户看到全屏的详情页。',
+            'fire-and-forget 会在页面销毁后才生效，中间用户看到全屏的详情页。'
+            '（匹配串刻意保留 `await ` 前缀：`unawaited(` 不许通过）',
       );
 
       /*

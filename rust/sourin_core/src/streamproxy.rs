@@ -2797,8 +2797,19 @@ mod tests {
         let url = format!("http://127.0.0.1:{}/f", addr.port());
 
         // ── A: 共享一个 Client（改后的行为）──
+        // ★★ 必须 `no_proxy()`：本机若设了 HTTP_PROXY（本仓开发机就设了
+        //   127.0.0.1:7890），reqwest 默认 auto_sys_proxy 会把**回环地址**的
+        //   请求也交给代理 ⇒ 连接在代理那边断开，服务端每请求都看到一条新连接。
+        //   实测（2026-10-10，同一台机器）：
+        //       默认 client  ：8 请求 → 8 条连接（复用失效）
+        //       no_proxy()   ：8 请求 → 1 条连接（复用正常）
+        //   ⇒ 这条测的是「共享 Client 复用连接」这件���本身，
+        //     不该被「机器上恰好有代理」干扰。
+        //   ⚠️ 生产代码**不能**照抄这一句：流代理要拉的是真实远端地址，
+        //     那些**应该**尊重系统代理（墙/加速场景需要）。
         let shared = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(5))
+            .no_proxy()
             .build()
             .unwrap();
         SEEN.get_or_init(Default::default).lock().unwrap().clear();
@@ -2816,6 +2827,7 @@ mod tests {
         for _ in 0..N {
             let c = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(5))
+                .no_proxy() // 同上：对照组也必须绕开系统代理
                 .build()
                 .unwrap();
             let r = c.get(&url).send().await.unwrap();

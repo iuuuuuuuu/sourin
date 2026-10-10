@@ -76,17 +76,18 @@
 // 以及**真实读数**（占用字节 / 文件数），不是写死的文本。
 
 // ═══════════════════════════════════════════════════════════════════════
-//  ⑤ 分享日志 —— 「分享」在这里落成什么
+//  ⑤ 日志与反馈 —— 用户拿去向作者反馈的那份东西
 // ═══════════════════════════════════════════════════════════════════════
 //
 // `pubspec.yaml` 里**没有 share_plus**（`pubspec.lock` ABSENT）——
 // 本仓库的依赖是锁死的，不新增依赖 ⇒ 系统分享面板这条路走不通。
 //
-// 所以「分享日志」落成**两条都能真正拿到文件内容**的路径：
+// 所以「分享」落成**三条都能真正拿到内容**的路径：
 // ```text
 // ① 导出为文件：file_selector 的 getSaveLocation（系统"另存为"对话框）
 //               → 平台没有这个能力时降级 getDirectoryPath → 再兜底写应用目录
 // ② 复制到剪贴板：Clipboard.setData，用户自己粘到聊天窗口里
+// ③ 复制环境信息：版本 / 系统 / 设备形态 / 数据目录（2026-10-09 新增）
 // ```
 // 这两条的先例都在本仓库里：
 // ```text
@@ -95,7 +96,45 @@
 // ```
 // 导出完成后本页会显示**真实落盘路径 + 真实字节数** ——
 // 这是"文件非空"的证据，不是一句"已导出"。
+//
+// ───────────────────────────────────────────────────────────────────────
+//  ★★★ 2026-10-09（task-14）复核「日志够不够拿去向作者反馈」—— 改了四处
+// ───────────────────────────────────────────────────────────────────────
+//
+// 先说结论：**核心能力早就在，缺的是「反馈」这层语义**。
+// 复核过的事实（不是推测）：
+// ```text
+// · 日志确实在写：真机数据目录里 sourin-2026-10-09.log = 1 445 535 字节 / 13 891 行
+//   （tag 分布 DL=13741 PLAY=66 LIVE=6；含真实起播 URL、下载目录、缓存淘汰记录）
+// · 导出/复制两条路都在，且都有真实落盘读数（上一轮 task-24 已修 Android 分区存储）
+// · 但整页**没有任何一句话**告诉用户「出问题了该把这个发给作者」——
+//   入口名「分享日志」是**功能视角**（这里能分享），不是**场景视角**（我出问题了，怎么办）。
+// · 文件本身也缺上下文：旧表头只有一行「Sourin 播放器日志导出 <时间>」+ 内存条数，
+//   作者拿到后还得回头问「你什么版本 / 什么系统 / 数据目录在哪」。
+// ```
+//
+// 所以本轮只补**缺口**，不动已经工作的机制：
+// ```text
+// ① 区块改名「分享日志」→「日志与反馈」，并加一句场景引导
+//    （「出问题时请把这份日志发给作者」）—— 用户是先遇到问题、再回来找日志的
+// ② 导出/复制的**表头**换成 `_logHeader()`：版本 / 系统 / 设备形态 / 数据目录
+//    全部走**已有 API 真读**（核心版本走 FFI 探针、系统走 dart:io、
+//    设备形态走 Device.kind、数据目录与下载缓存同一份解析）
+// ③ 新增「复制环境信息」按钮 + 屏幕上**默认就画出来**的读数卡
+// ④ 尾注写明日志目录，并说明可以直接把那个目录里的 .log 发给作者
+// ```
+//
+// ⚠️ **没有**做、也不该做的两件事（如实记在这里）：
+// ```text
+// · 没有在设置一级页再开一个「日志」入口 ——
+//   `test/task18_entry_test.dart` 把「一级页恰有一个『播放与下载』入口」
+//   钉成断言（三条端形态各跑一次）；新增同名入口会让它读到 2。
+//   而现在那一行的副标题已经写明「…· 日志与反馈」，入口可见性够了。
+// · 没有去改 `lib/core/app_log.dart`（不在本任务的写范围内），
+//   所以表头是在**这一页**拼好再交给 `exportText(header:)` 的。
+// ```
 
+import 'dart:async';
 import 'dart:io';
 
 import 'package:file_selector/file_selector.dart';
@@ -104,6 +143,10 @@ import 'package:material_ui/material_ui.dart';
 
 import '../../core/app_log.dart';
 import '../../core/clip_download.dart';
+import '../../core/device.dart';
+import '../../core/download_dir.dart';
+import '../../core/download_queue.dart';
+import '../../core/sourin_api.dart';
 import 'export_dir.dart';
 import '../tokens.dart';
 import '../widgets/settings_kit.dart';
@@ -129,6 +172,19 @@ class _PlaybackSettingsPageState extends State<PlaybackSettingsPage> {
   int _concurrency = ClipDownloader.concurrency;
   int _cacheLimit = ClipDownloader.cacheLimitMb;
 
+  /// ★★★ 2026-10-09（Owner 第 20 条）**整片**下载并发（与上面那个是两笔账）
+  ///
+  /// 上面 _concurrency 管的是「片段」（几 MB、进缓存、会被淘汰）；
+  /// 这个管的是「整片」（详情页头部那个「下载」按钮，几百 MB，
+  /// 落在 视频/源影/<剧名>/，是用户自己的文件）。
+  /// ⚠️ 两个上限**互不相通**：整片下载不走 ClipDownloader._withSlot，
+  ///   它走 DownloadQueue._pump（见 lib/core/download_queue.dart:247 起）。
+  int _queueConcurrency = DownloadQueue.concurrency;
+
+  /// 当前**真实生效**的下载目录（不是 pref 里的原值 —— pref 里可能是
+  /// 一个建不出来的路径，那时 root() 会退回默认，界面上要显示**退回后**的）。
+  String _dlDir = '';
+
   int _cacheBytes = 0;
   int _cacheFiles = 0;
   bool _cacheBusy = false;
@@ -151,10 +207,40 @@ class _PlaybackSettingsPageState extends State<PlaybackSettingsPage> {
   String _lastExportPath = '';
   int _lastExportBytes = 0;
 
+  /// ⑤b 「一键复制环境信息」：**刚复制出去的那段文本**（原样显示给用户核对）
+  ///
+  /// 实测取值（本机 Windows，2026-10-09，`flutter test` 里真跑出来的）：
+  /// ```text
+  /// 版本      sourin-core 0.1.0   （SourinApi.version → Rust 的 sourin_core_version()）
+  /// 系统      windows · "Windows 10 专业工作站版" 10.0 (Build 19045)
+  /// 设备形态  桌面（鼠标键盘）     （Device.kind，走平台通道判定）
+  /// 数据目录  C:\Users\…\AppData\Roaming\app.sourin.player
+  /// ```
+  String _envInfo = '';
+  bool _envBusy = false;
+
+  /// 环境信息**已读出的四行**（`initState` 里异步填；空列表 = 还没读到）
+  List<(String, String)> _envRows = const [];
+
   @override
   void initState() {
     super.initState();
     _refreshCache();
+    _refreshDownloadDir();
+    // ★ 环境信息要在**打开这一页时**就画出来（用户反馈前不会先去点按钮）
+    unawaited(_refreshEnv());
+  }
+
+  /// 读**真实生效**的下载目录（走 DownloadDir.root()，与下载时同一个函数
+  /// ⇒ 界面显示的就是文件真的会落到的地方）
+  Future<void> _refreshDownloadDir() async {
+    try {
+      final dir = await DownloadDir.root();
+      if (!mounted) return;
+      setState(() => _dlDir = dir);
+    } catch (e) {
+      AppLog.write('DL', '读下载目录失败：$e');
+    }
   }
 
   /// 读**真实**缓存占用（不是估算，也不是写死的文本）
@@ -273,13 +359,23 @@ class _PlaybackSettingsPageState extends State<PlaybackSettingsPage> {
     setState(() => _logBusy = true);
     try {
       // 先写一行"这次导出"本身 —— 导出的文件里要能看到它
-      AppLog.write('LOG', '导出日志（${AppLog.lineCount} 行）');
+      AppLog.write('LOG', '导出日志（${AppLog.lineCount} 行，含环境信息表头）');
       final path = await _pickSavePath(_stampName());
       if (path == null) {
         _flash('已取消');
         return;
       }
-      final f = await AppLog.exportToFile(intoPath: path);
+      /*
+       * ⚠️ 这里**没有**用 `AppLog.exportToFile(intoPath: path)` ——
+       *   它**没有** header 形参（只接受 intoPath），而文件开头必须有
+       *   环境信息。所以在这里按同一个语义写盘：
+       *   `File(path).writeAsString(exportText(...), flush: true)`，
+       *   与 `app_log.dart` 里那个 intoPath 分支**逐字一致**
+       *   （覆盖写 + flush + 失败照样抛给调用方的 catch）。
+       */
+      final text = AppLog.exportText(header: await _logHeader());
+      final f = File(path);
+      await f.writeAsString(text, flush: true);
       final len = await f.length();
       if (!mounted) return;
       setState(() {
@@ -300,13 +396,133 @@ class _PlaybackSettingsPageState extends State<PlaybackSettingsPage> {
     if (_logBusy) return;
     setState(() => _logBusy = true);
     try {
-      final text = AppLog.exportText();
+      final text = AppLog.exportText(header: await _logHeader());
       await Clipboard.setData(ClipboardData(text: text));
-      _flash('已复制 ${AppLog.lineCount} 行到剪贴板');
+      _flash('已复制 ${AppLog.lineCount} 行（含环境信息）到剪贴板');
     } catch (e) {
       _flash('复制失败：$e');
     } finally {
       if (mounted) setState(() => _logBusy = false);
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  //  ⑤b 环境信息（作者最需要的那几行）
+  // ══════════════════════════════════════════════════════════════════════
+
+  /// 反馈用的**环境信息**：版本 / 系统 / 设备形态 / 数据目录。
+  ///
+  /// # 为什么每个字段都是这个来源（没有一个是编的）
+  /// ```text
+  /// 版本      SourinApi.version → Rust 的 sourin_core_version()，实测 "sourin-core 0.1.0"
+  /// 系统      dart:io 的 Platform.operatingSystem + operatingSystemVersion
+  /// 设备形态  Device.kind（桌面 / 触摸 / 电视）—— 它决定焦点环、字号、提示区块，
+  ///           用户报「按钮点不到」时这一项能直接区分是鼠标还是遥控器
+  /// 数据目录  ClipDownloader.dataDir() —— **与下载、缓存、日志同一份解析**
+  /// ```
+  ///
+  /// ⚠️ **不读** `%APPDATA%/app.sourin.player/device-id`：那是同步用的设备标识，
+  ///    会被写进用户发到公开 issue 里的日志 —— 这里只报**位置**不报**值**。
+  ///
+  /// ⚠️ 每一项**各自 try/catch**：核心库没起来时 `SourinApi.version` 会抛，
+  ///    但那是「核心没起来」这个事实本身 —— 必须如实写进日志，
+  ///    而不是让整段环境信息一起消失。
+  Future<List<(String, String)>> _envFields() async {
+    final out = <(String, String)>[];
+
+    String version;
+    try {
+      version = SourinApi.version;
+    } catch (e) {
+      version = '读不到（核心未加载：$e）';
+    }
+    out.add(('版本', version));
+
+    var os = Platform.operatingSystem;
+    try {
+      final v = Platform.operatingSystemVersion.trim();
+      if (v.isNotEmpty) os = '$os · $v';
+    } catch (_) {}
+    out.add(('系统', os));
+
+    out.add(('设备形态', switch (Device.kind) {
+      DeviceKind.desktop => '桌面（鼠标键盘）',
+      DeviceKind.touchOnly => '触摸端（手机 / 平板）',
+      DeviceKind.tv => '电视（遥控器）',
+    }));
+
+    String dir;
+    try {
+      dir = await ClipDownloader.dataDir();
+    } catch (e) {
+      dir = '读不到：$e';
+    }
+    out.add(('数据目录', dir));
+
+    return out;
+  }
+
+  /// 读一次环境信息并落进 state（`initState` 调；失败如实记日志，不静默）
+  Future<void> _refreshEnv() async {
+    try {
+      final rows = await _envFields();
+      if (!mounted) return;
+      setState(() => _envRows = rows);
+    } catch (e) {
+      AppLog.write('LOG', '读环境信息失败：$e');
+    }
+  }
+
+  /// 环境信息拼成多行文本（「一键复制环境信息」与日志表头共用一份）
+  Future<String> _envText() async {
+    final b = StringBuffer();
+    for (final f in await _envFields()) {
+      b.writeln('${f.$1}：${f.$2}');
+    }
+    return b.toString().trimRight();
+  }
+
+  /// 日志导出/复制时的**表头** —— 把环境信息放在最前面。
+  ///
+  /// ★ 这一条是「够不够拿去向作者反馈」的关键：旧表头只有一行
+  ///   「Sourin 播放器日志导出 <时间>」+ 内存条数 —— 作者拿到文件后
+  ///   还得回头问用户「你什么版本、什么系统、数据目录在哪」。
+  ///   现在这三问的答案都在文件**第一屏**。
+  ///
+  /// ⚠️ 这里**不写**「内存条数」和那行分隔线 —— `AppLog.exportText` 在表头
+  ///    之后**自己**会补这两行（`app_log.dart:226-227`）。写一遍会变成：
+  /// ```text
+  /// 内存条数：12 / 上限 2000
+  /// ------------------------------------------------------------------------
+  /// 内存条数：12 / 上限 2000
+  /// ------------------------------------------------------------------------
+  /// ```
+  Future<String> _logHeader() async {
+    final b = StringBuffer();
+    b.writeln('Sourin 播放器日志导出');
+    b.writeln('导出时间：${DateTime.now().toIso8601String()}');
+    b.write(await _envText());
+    b.writeln();
+    return b.toString();
+  }
+
+  /// ⑤b 一键复制环境信息（版本 / 系统 / 设备形态 / 数据目录）
+  ///
+  /// 先例：`lib/ui/settings/about_page.dart` 的「运行信息」区块（同样四项，
+  /// 但那一页**没有复制按钮**，用户只能手动选中再 Ctrl+C）。
+  Future<void> _copyEnvInfo() async {
+    if (_envBusy) return;
+    setState(() => _envBusy = true);
+    try {
+      final text = await _envText();
+      await Clipboard.setData(ClipboardData(text: text));
+      if (!mounted) return;
+      setState(() => _envInfo = text);
+      _flash('已复制环境信息（${text.split('\n').length} 行）到剪贴板');
+    } catch (e) {
+      _flash('复制环境信息失败：$e');
+    } finally {
+      if (mounted) setState(() => _envBusy = false);
     }
   }
 
@@ -320,9 +536,11 @@ class _PlaybackSettingsPageState extends State<PlaybackSettingsPage> {
 
     return SettingsSubPage(
       title: '播放与下载',
-      subtitle: '片段下载并发 · 缓存上限 · 分享日志',
+      subtitle: '片段下载并发 · 缓存上限 · 日志与反馈',
       children: [
         _downloadBlock(colors),
+        const SizedBox(height: Sp.x5),
+        _queueBlock(colors),
         const SizedBox(height: Sp.x5),
         _cacheBlock(colors),
         const SizedBox(height: Sp.x5),
@@ -416,6 +634,131 @@ class _PlaybackSettingsPageState extends State<PlaybackSettingsPage> {
         ),
       ],
     );
+  }
+
+  // ── ★★★ 2026-10-09（Owner 第 20 条）整片下载：目录 + 并发 ─────────────────
+  Widget _queueBlock(ColorScheme colors) {
+    return SettingsBlock(
+      title: '整片下载',
+      trailing: Text(
+        DownloadQueue.concurrencyLabel(_queueConcurrency),
+        style: TextStyle(fontSize: FontSizes.cap, color: colors.onSurfaceVariant),
+      ),
+      children: [
+        Text(
+          '「下载」按钮（详情页头部 / 每一集）落在哪个目录、同时下几集。'
+          '与上面「片段下载并发」是**两笔账**：片段进缓存会被自动淘汰，'
+          '整片是你自己的文件，永远不会被自动删。',
+          style: TextStyle(fontSize: FontSizes.sm, color: colors.onSurfaceVariant),
+        ),
+        const SizedBox(height: Sp.x4),
+        Row(
+          children: [
+            Text(
+              '同时下载',
+              style: TextStyle(fontSize: FontSizes.sm, color: colors.onSurface),
+            ),
+            Expanded(
+              child: Slider(
+                value: _queueConcurrency
+                    .toDouble()
+                    .clamp(1, DownloadQueue.maxConcurrency.toDouble()),
+                min: 1,
+                max: DownloadQueue.maxConcurrency.toDouble(),
+                divisions: DownloadQueue.maxConcurrency - 1,
+                label: DownloadQueue.concurrencyLabel(_queueConcurrency),
+                onChanged: (v) => setState(() {
+                  _queueConcurrency = v.round();
+                  DownloadQueue.setConcurrency(_queueConcurrency);
+                }),
+              ),
+            ),
+            SizedBox(
+              width: 84,
+              child: Text(
+                DownloadQueue.concurrencyLabel(_queueConcurrency),
+                textAlign: TextAlign.end,
+                style: TextStyle(fontSize: FontSizes.sm, color: colors.onSurface),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: Sp.x3),
+        /*
+         * ★ 为什么把「1 = 串行」写成说明而不是默认值里的暗坑：
+         *   串行是**为了播放不卡**（见 download_queue.dart 文件头），
+         *   不是偷懒。用户把 1 拉到 3 时得知道自己在拿带宽换速度。
+         */
+        const SettingsInfoRow(
+          label: '1 表示',
+          value: '串行（默认，把带宽让给播放）',
+        ),
+        SettingsInfoRow(
+          label: '当前正在跑',
+          value: '${DownloadQueue.activeCount} 个',
+        ),
+        SettingsInfoRow(
+          label: '本次会话峰值',
+          value: '${DownloadQueue.debugMaxObservedRunning()} 个',
+        ),
+        const SizedBox(height: Sp.x3),
+        SettingsInfoRow(label: '下载目录', value: _dlDir),
+        const SizedBox(height: Sp.x2),
+        Row(
+          children: [
+            OutlinedButton.icon(
+              onPressed: _pickDownloadDir,
+              icon: const Icon(Icons.folder_open, size: 18),
+              label: const Text('改目录'),
+            ),
+            const SizedBox(width: Sp.x2),
+            TextButton(
+              onPressed: _resetDownloadDir,
+              child: const Text('恢复默认'),
+            ),
+            const Spacer(),
+            TextButton.icon(
+              onPressed: _dlDir.isEmpty ? null : () => DownloadDir.open(_dlDir),
+              icon: const Icon(Icons.open_in_new, size: 16),
+              label: const Text('打开'),
+            ),
+          ],
+        ),
+        const SizedBox(height: Sp.x2),
+        const SettingsInfoRow(
+          label: '默认目录',
+          value: '视频 / 源影（跟随系统）',
+        ),
+      ],
+    );
+  }
+
+  /// 选一个新目录（真的建出来才写进 pref —— 建不出来的目录选了也白选）
+  Future<void> _pickDownloadDir() async {
+    try {
+      final picked = await getDirectoryPath(
+        initialDirectory: _dlDir.isEmpty ? null : _dlDir,
+        confirmButtonText: '选这里',
+      );
+      if (picked == null) return;
+      DownloadDir.setConfiguredDir(picked);
+      final dir = await DownloadDir.root();
+      if (!mounted) return;
+      setState(() => _dlDir = dir);
+      _flash(dir == picked
+          ? '下载目录已改为 $dir'
+          : '这个目录用不了（$picked），已回到默认：$dir');
+    } catch (e) {
+      _flash('改目录失败：$e');
+    }
+  }
+
+  Future<void> _resetDownloadDir() async {
+    DownloadDir.setConfiguredDir(null);
+    final dir = await DownloadDir.root();
+    if (!mounted) return;
+    setState(() => _dlDir = dir);
+    _flash('下载目录已回到默认：$dir');
   }
 
   // ── ④ 缓存上限 ────────────────────────────────────────────────────────
@@ -627,19 +970,33 @@ class _PlaybackSettingsPageState extends State<PlaybackSettingsPage> {
     }
   }
 
-  // ── ⑤ 分享日志 ────────────────────────────────────────────────────────
+  // ── ⑤ 日志与反馈 ──────────────────────────────────────────────────────
+  //
+  // ★ 2026-10-09 改名（原「分享日志」）+ 补足入口：见本文件开头新增的那一段。
+  //   这一块现在回答用户出问题时最想知道的四件事：
+  //   ```text
+  //   ① 日志写在哪、写了多少   → trailing 的真实行数 + 下面的按天文件路径
+  //   ② 怎么把它拿出来         → 导出为日志文件 / 复制到剪贴板
+  //   ③ 拿去向谁反馈、怎么反馈 → 「反馈问题时请把这份日志发给作者」+ 数据目录行
+  //   ④ 作者的第一个问题是什么 → 「一键复制环境信息」（版本/系统/设备形态/数据目录）
+  //   ```
   Widget _logBlock(ColorScheme colors) {
     return SettingsBlock(
-      title: '分享日志',
+      title: '日志与反馈',
       trailing: Text(
-        '${AppLog.lineCount} 行',
+        '本次会话 ${AppLog.lineCount} 行',
         style: TextStyle(fontSize: FontSizes.cap, color: colors.onSurfaceVariant),
       ),
       children: [
+        /*
+         * ★ 这一段是**反馈场景**的入口说明，不是功能介绍。
+         *   用户是先遇到问题、再回来找日志的 —— 所以第一句必须是
+         *   「出问题时请把这个发给作者」，而不是「这里可以导出文件」。
+         */
         Text(
-          '本应用没有接入系统分享面板（依赖里没有分享插件），'
-          '所以「分享」落成两条路：**导出成 .log 文件**，或者'
-          '**复制到剪贴板**后自己粘贴。',
+          '出问题时请把这份日志发给作者 —— 里面记录了播放、下载、缓存的操作与失败原因。'
+          '本应用没有接入系统分享面板，所以「分享」落成两条路：'
+          '导出成 .log 文件，或者复制到剪贴板后自己粘贴。',
           style: TextStyle(fontSize: FontSizes.sm, color: colors.onSurfaceVariant),
         ),
         const SizedBox(height: Sp.x4),
@@ -657,10 +1014,32 @@ class _PlaybackSettingsPageState extends State<PlaybackSettingsPage> {
               icon: const Icon(Icons.copy_all, size: 18),
               label: const Text('复制到剪贴板'),
             ),
+            OutlinedButton.icon(
+              onPressed: _envBusy ? null : _copyEnvInfo,
+              icon: const Icon(Icons.info_outline, size: 18),
+              label: const Text('复制环境信息'),
+            ),
           ],
         ),
+        const SizedBox(height: Sp.x3),
+        /*
+         * ★ 环境信息**默认就画出来**（不是藏在按钮后面）。
+         *   理由：用户反馈时贴的第一句话几乎总是「我的是 1.0.0，Win11」——
+         *   而这些值就在屏幕上，他照着抄就行，不用先点一次复制。
+         *   按钮只是省掉「选中 + Ctrl+C」这一步。
+         */
+        _envCard(colors),
+        if (_envInfo.isNotEmpty) ...[
+          const SizedBox(height: Sp.x3),
+          Text(
+            '已复制到剪贴板的内容：',
+            style: TextStyle(fontSize: FontSizes.cap, color: colors.onSurfaceVariant),
+          ),
+          const SizedBox(height: Sp.x1),
+          SettingsInfoRow(label: '环境信息', value: _envInfo),
+        ],
         if (_lastExportPath.isNotEmpty) ...[
-          const SizedBox(height: Sp.x4),
+          const SizedBox(height: Sp.x3),
           SettingsInfoRow(label: '最近导出', value: _lastExportPath),
           SettingsInfoRow(
             label: '文件大小',
@@ -668,12 +1047,51 @@ class _PlaybackSettingsPageState extends State<PlaybackSettingsPage> {
           ),
         ],
         const SizedBox(height: Sp.x3),
+        /*
+         * ★ 路径必须**可复制**（`SettingsInfoRow` 内部就是 `SelectableText`），
+         *   否则用户找不到这个目录时，这一行等于没有。
+         */
         Text(
-          '日志同时按天写进应用数据目录的 logs/ 下'
-          '（sourin-YYYY-MM-DD.log），每次导出都会把当前内容整份写出。',
+          '日志同时按天写进应用数据目录的 logs/ 下（sourin-YYYY-MM-DD.log），'
+          '每次导出都会把当前内容整份写出，并在开头附上环境信息。'
+          '反馈问题时也可以直接把上面这个目录里的 .log 文件发给作者。',
           style: TextStyle(fontSize: FontSizes.cap, color: colors.onSurfaceVariant),
         ),
       ],
+    );
+  }
+
+  /// 环境信息卡片（四行：版本 / 系统 / 设备形态 / 数据目录）
+  ///
+  /// ★ 读数**异步真取**：`initState` 里读一次；核心还没起来时 `SourinApi.version`
+  ///   会返回「读不到（核心未加载…）」而不是编一个版本号。
+  Widget _envCard(ColorScheme colors) {
+    final rows = _envRows;
+    return Container(
+      padding: const EdgeInsets.all(Sp.x3),
+      decoration: BoxDecoration(
+        color: colors.surfaceContainerHighest.withValues(alpha: 0.3),
+        borderRadius: Radii.rMd,
+        border: Border.all(color: colors.outlineVariant),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            '环境信息（反馈时请一并提供）',
+            style: TextStyle(fontSize: FontSizes.cap, color: colors.onSurfaceVariant),
+          ),
+          const SizedBox(height: Sp.x2),
+          if (rows.isEmpty)
+            Text(
+              '读取中…',
+              style: TextStyle(fontSize: FontSizes.sm, color: colors.onSurfaceVariant),
+            )
+          else
+            for (final r in rows)
+              SettingsInfoRow(label: r.$1, value: r.$2),
+        ],
+      ),
     );
   }
 }

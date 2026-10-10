@@ -51,7 +51,9 @@ import 'package:media_kit_video/media_kit_video.dart';
 import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:material_ui/material_ui.dart';
 
+import '../../core/app_log.dart';
 import '../../core/models.dart';
+import '../../core/ui_prefs.dart';
 import '../tokens.dart';
 
 /// 直播内嵌播放器
@@ -184,6 +186,11 @@ class LiveEmbeddedPlayerState extends State<LiveEmbeddedPlayer> {
   /// ★ 2026-10-08（Owner 第 3 条）：流错误订阅（改前直播侧**完全没订**，断声静默）
   StreamSubscription<String>? _errorSub;
 
+  // ★ 2026-10-09：这里**刻意没有** `_volumeSub` ——
+  //   加过又撤了，理由见 `_create()` 里那段「刻意不订阅 volume」的注释。
+  //   一句话：`pause()` 的自动压 0 与「用户静音」共用同一个信号，
+  //   从音量反推静音意图必然误判 ⇒ 会造出「切走回来永久静音」。
+
   /// ★ task-74 ⑤ 注册值：**380ms** = 300ms 过渡窗 + 80ms 余量。
   ///
   /// 来源：Lead 注册 —— 300ms 是本任务要挪出的窗口上界（切到直播页后
@@ -303,6 +310,44 @@ class LiveEmbeddedPlayerState extends State<LiveEmbeddedPlayer> {
     final pending = _pendingStream;
     _pendingStream = null;
 
+    /*
+     * ★★★ 2026-10-09 修复（Owner 缺陷 ①的**真正修法**，逐字）：
+     * ```text
+     * > 切换到直播页,默认显示的是静音,但是实际还是有声音,
+     * > 再次点击 静音图标也没变化,但是却没有声音了,这是一处逻辑缺陷
+     * ```
+     * Owner 追加澄清（我第一版理解反了，这是关键）：
+     * ```text
+     * > 切换到直播页应该默认静音
+     * ```
+     *
+     * # 语义拆解（三条现象 ↔ 三处修复）
+     * ```text
+     * ① 「默认显示的是静音」= **产品意图，是对的** —— 直播页进来就该静音
+     *    （直播是"先看到画面再决定听不听"，突然出声会吓人）。
+     * ② 「但是实际还是有声音」= ★ **这才是 bug** ——
+     *    图标说静音，音量却没压 ⇒ UI 与真实状态不一致。
+     *    ⇒ 本处修复：**建播放器时就把 _muted 置真、并真的下发音量 0**。
+     * ③ 「再次点击也没变化，但是却没有声音了」= 状态机缺失 ——
+     *    旧 `toggleMute` 用「当前音量」反推，第一次点算出 0（没变化）
+     *    第二次点才算成 0（静音）⇒ 用户看到"点两次才静音、图标不变"。
+     *    ⇒ 见下面 `toggleMute` 的显式状态机（`_muted` + 快照）。
+     * ```
+     *
+     * # ⚠️ 为什么必须在**这里**下发（而不是只置标志）
+     * ```text
+     * mpv 起来时的默认音量是 100 ⇒ 不真下发 0 的话，画面一出来就出声，
+     * 那正是 Owner 报的「实际还是有声音」。
+     * `_muted = true` 单独置是**不够**的 —— 它只驱动图标。
+     * ```
+     *
+     * ⚠️ 顺序：必须在 `_playingSub` 等订阅**之前**置 `_muted`，
+     *   否则 volume 订阅回流的 0 会先撞上 `_muted == false`（无害，但会多一次 setState）。
+     */
+    _muted = true;
+    unawaited(p.setVolume(0));
+    AppLog.write('LIVE', '默认静音 ⇒ _muted=true 且音量下发 0');
+
     _playingSub = p.stream.playing.listen((v) {
       if (!mounted) return;
       setState(() => _ready = v);
@@ -311,6 +356,29 @@ class LiveEmbeddedPlayerState extends State<LiveEmbeddedPlayer> {
       if (!mounted) return;
       setState(() => _buffering = v);
     });
+    /*
+     * ★★★ 2026-10-09：**刻意不订阅 volume**（这是一个被否决的方案，如实记录）
+     *
+     * ```text
+     * 我第一版加过 `_volumeSub`（mpv 回流 0 ⇒ _muted = true），
+     * 目的是「让图标能响应真实音量」，但真机点一次就发现它**造出更坏的 bug**：
+     *
+     *   用户在看（未静音）⇒ 切走 ⇒ `pause()` 因为不可见而 setVolume(0)
+     *   ⇒ 音量流回流 0 ⇒ 订阅把 _muted 置真（**那不是用户静音**）
+     *   ⇒ 切回来 `resume()` 看到 _muted 为真 ⇒ **不还原音量**
+     *   ⇒ ★ 永久静音，且用户没点过静音按钮。
+     *
+     * ★ 根因：`pause()` 的压 0 与「用户静音」在**同一个信号（音量=0）**上，
+     *   从音量反推意图必然分不清这两者。
+     * ⇒ 正确做法：`_muted` 只由**显式动作**驱动（默认静音 / 点按钮 / 音量>0），
+     *   绝不从 mpv 回流的音量反推。
+     * ```
+     *
+     * 顺带说明「图标不变」这条不需要订阅来修：
+     * 改前图标是**写死的常量**（见 `_EmbedBar` 的注释），
+     * 且两处显式动作（`_create` 的默认静音、`toggleMute`）现在都会 `setState`
+     * ⇒ 重建自然发生，无需监听音量。
+     */
     /*
      * ★ 2026-10-08（Owner 第 3 条）：订阅流错误 —— 直播侧原来**完全没订**
      *
@@ -643,10 +711,21 @@ class LiveEmbeddedPlayerState extends State<LiveEmbeddedPlayer> {
   ///    用户可能自己调过音量，写死会把它顶掉。
   ///    mpv 的音量单位是 0..100 的 double。
   /// ⚠️ 只在**不可见**时压音量：可见时用户按暂停，音量必须原样保留。
+  /// ★★★ 2026-10-09：与「默认静音」的交互（Owner 缺陷 ① 的配套修复）
+  ///
+  /// ```text
+  /// 本方法在**不可见**时把音量压到 0、并在 [resume] 时还原 `_volumeBeforeHide`。
+  /// 而「默认静音」下用户**根本没取消过静音** ⇒ 还原它会把静音顶掉 ⇒
+  /// 切走再回来就**出声**了，正好违背 Owner 要的「默认静音」。
+  ///
+  /// ⇒ 静音态下**不参与**这套自动音量管理：
+  ///    · pause：已经是 0，不需要再压、也**不要**抓快照（0 不是有效音量）；
+  ///    · resume：静音态下**不还原** —— 保持 0（用户的静音意图优先）。
+  /// ```
   Future<void> pause() async {
     if (_disposed) return;
     final p = _player;
-    if (p != null && !_visibleNow) {
+    if (p != null && !_visibleNow && !_muted) {
       final cur = p.state.volume;
       if (cur > 0) _volumeBeforeHide = cur;
       await p.setVolume(0);
@@ -666,8 +745,9 @@ class LiveEmbeddedPlayerState extends State<LiveEmbeddedPlayer> {
        *   而 `play()` 之后紧接着的 setVolume 在 mpv 上是异步属性写，
        *   用户可能听到一个音量跳变。
        */
+      // ★ 静音态 ⇒ 不还原（见 pause() 的注释：用户的静音意图优先）
       final v = _volumeBeforeHide;
-      if (v != null && v > 0) {
+      if (!_muted && v != null && v > 0) {
         _volumeBeforeHide = null;
         await p.setVolume(v);
       }
@@ -693,10 +773,90 @@ class LiveEmbeddedPlayerState extends State<LiveEmbeddedPlayer> {
     await _player?.setVolume(v.clamp(0, 100));
   }
 
+  /*
+   * ★★★ 2026-10-09 修复（Owner 真机报的缺陷，逐字）：
+   * ```text
+   * > 切换到直播页,默认显示的是静音,但是实际还是有声音,
+   * > 再次点击 静音图标也没变化,但是却没有声音了,这是一处逻辑缺陷
+   * ```
+   *
+   * # 三条现象 ↔ 三个根因（都在本文件）
+   * ```text
+   * ① 「默认显示的是静音」
+   *      `_EmbedBar` 的图标是**写死的常量** `Icons.volume_off_outlined`
+   *      ⇒ 无论实际音量多少，永远画成"已静音"。UI 在说谎。
+   * ② 「再次点击图标也没变化」
+   *      本类的订阅里**没有 volume**（只订了 playing / buffering / error）
+   *      ⇒ 音量变化不触发重建 ⇒ 图标永远不动。
+   * ③ 「但是却没有声音了」
+   *      旧实现：setVolume((state.volume ?? 100) > 0 ? 0 : 100)
+   *      它用**当前音量**当判据，而不是「我是否处于静音态」。
+   *      而 `pause()`（不可见时）**会把音量压成 0**（:646-657）。
+   *      ⇒ 从直播页切走再回来：音量已是 0 ⇒ 旧实现算出 `100`…
+   *        但更常见的路径是「音量本来就是 0」⇒ 旧实现算出 100 ⇒ 出声；
+   *        再点一次算出 0 ⇒ 没声音，而图标**始终**是"静音"⇒ 用户看到的
+   *        「点两次结果不一样、图标却一直不变」正是这么来的。
+   * ```
+   *
+   * # 修法：把静音做成**显式状态**，与 VOD 侧同一套语义
+   * ```text
+   * · `_muted` 由**我们**维护（不再从 state.volume 反推）；
+   * · 订阅 volume ⇒ mpv 回流的真实音量能驱动图标重建；
+   * · 静音前把音量存进 `_volumeBeforeMute`，取消静音时还原**它**
+   *   （不是写死 100，也不是读当前音量 —— 后者静音时恒为 0）。
+   * ```
+   */
   Future<void> toggleMute() async {
     if (_disposed) return;
-    await _player?.setVolume((_player?.state.volume ?? 100) > 0 ? 0 : 100);
+    final p = _player;
+    if (p == null) return;
+    AppLog.write('LIVE', '静音按钮被点击：_muted=$_muted '
+        'volume=${p.state.volume}');
+    if (_muted) {
+      /*
+       * 取消静音：三级瀑布求恢复目标（**绝不下发 0**）
+       * ```text
+       * 1) 快照（本次静音前的真实音量，最准）
+       * 2) 偏好 dsh.playprefs.lastVolume（跨会话的「用户习惯音量」）
+       * 3) 出厂 100（理论上到不了，纯粹兜底）
+       * ```
+       * ★ 与 VOD 侧 `player_page.dart::_toggleMute` 的瀑布**同一套语义**
+       *   （那里是 `_volumeBeforeMute` → `_lastVolume*100` → 100）。
+       *
+       * ⚠️ 默认静音进来时快照是 null ⇒ 走第 2 级 ——
+       *   用户第一次点"取消静音"应该听到**他习惯的音量**，不是 100。
+       */
+      var restore = _volumeBeforeMute ?? 0;
+      if (restore <= 0) {
+        final v = double.tryParse(
+            UiPrefs.get('dsh.playprefs.lastVolume') ?? '');
+        restore = (v != null && v >= 0 && v <= 1) ? v * 100 : 100;
+      }
+      if (restore <= 0) restore = 100;
+      _volumeBeforeMute = null;
+      await p.setVolume(restore.clamp(1, 100));
+      if (mounted) setState(() => _muted = false);
+      AppLog.write('LIVE', '取消静音 ⇒ 音量还原到 ${restore.round()}');
+    } else {
+      // 静音：先抓快照再压 0（顺序不能反 —— 反了就抓不到原音量）
+      final cur = p.state.volume;
+      if (cur > 0) _volumeBeforeMute = cur;
+      await p.setVolume(0);
+      if (mounted) setState(() => _muted = true);
+      AppLog.write('LIVE', '已静音 ⇒ 音量压到 0（快照 $_volumeBeforeMute）');
+    }
   }
+
+  /// 是否处于静音态（驱动底栏图标）
+  ///
+  /// ★ 与 VOD 侧（`player_page.dart::_muted`）同一套语义：
+  ///   它是**显式状态**，不由 `state.volume == 0` 反推 ——
+  ///   因为 `pause()` 在不可见时也会把音量压成 0（那不是"用户静音"）。
+  bool get muted => _muted;
+  bool _muted = false;
+
+  /// 静音前的音量（null = 没静音过）
+  double? _volumeBeforeMute;
 
   /// 重新尝试当前流（用户点"重试"）
   Future<void> retry() => _openCurrent();
@@ -965,6 +1125,7 @@ class LiveEmbeddedPlayerState extends State<LiveEmbeddedPlayer> {
               bottom: 0,
               child: _EmbedBar(
                 playing: _ready,
+                muted: muted,
                 onTogglePlay: () async {
                   final p = _player;
                   if (p == null) return;
@@ -1140,12 +1301,20 @@ class _EmbedVideoOutputDead extends StatelessWidget {
 class _EmbedBar extends StatelessWidget {
   const _EmbedBar({
     required this.playing,
+    required this.muted,
     required this.onTogglePlay,
     required this.onMute,
     required this.accent,
   });
 
   final bool playing;
+
+  /// ★ 2026-10-09：是否静音（驱动图标）。
+  ///
+  /// 改前这里没有这个字段，图标是**写死的常量** `Icons.volume_off_outlined`
+  /// ⇒ 永远画成"已静音"，与真实音量无关（Owner 缺陷 ①）。
+  final bool muted;
+
   final Future<void> Function() onTogglePlay;
   final Future<void> Function() onMute;
   final Color accent;
@@ -1174,9 +1343,30 @@ class _EmbedBar extends StatelessWidget {
               onTap: () => unawaited(onTogglePlay()),
             ),
             const SizedBox(width: Sp.x2),
+            /*
+             * ★★★ 2026-10-09 修复（Owner 缺陷 ①：「默认显示的是静音，**但实际还是有声音**」）
+             *
+             * # ★ 我第一次理解错了（如实记录，防止后人重踩）
+             * ```text
+             * 我第一版以为「图标显示静音」是**假象**（UI 在说谎），于是把图标改成
+             * 由实际音量驱动 ⇒ 默认显示"未静音"。
+             * ★ 但 Owner 的本意正好相反：
+             *   「切换到直播页应该默认静音」——
+             *   图标显示静音是**对的**（产品意图），
+             *   真正错的是「实际还有声音」⇒ **声音没被静音**。
+             * ```
+             *
+             * # 正确的语义（三段，与下面的默认静音实现配套）
+             * ```text
+             * ① 切到直播页 ⇒ **默认静音**（`_muted = true`、音量真下发 0）；
+             * ② 图标显示「已静音」—— 与 ① 一致，不说谎；
+             * ③ 点一下 ⇒ 取消静音并**还原到偏好音量**；
+             *    再点一下 ⇒ 静音。★ 图标每次都跟着变（这是原来缺的）。
+             * ```
+             */
             _RoundBtn(
-              icon: Icons.volume_off_outlined,
-              tooltip: '静音',
+              icon: muted ? Icons.volume_off_outlined : Icons.volume_up_outlined,
+              tooltip: muted ? '取消静音' : '静音',
               onTap: () => unawaited(onMute()),
             ),
           ],

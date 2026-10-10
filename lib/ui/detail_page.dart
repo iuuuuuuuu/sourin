@@ -36,9 +36,11 @@
 // 详见 [_toggleFav] 里的长注释 —— 那里有完整的根因分析。
 
 import 'dart:async';
+import 'dart:io';
 
 import 'package:material_ui/material_ui.dart';
 
+import '../core/app_log.dart';
 import '../core/download_dir.dart';
 import '../core/download_queue.dart';
 import '../core/sourin_api.dart';
@@ -47,8 +49,14 @@ import 'widgets/overlay_motion.dart';
 // ★ task-58：`PlayRequestData` / `MediaSession` 现在住这里（中立契约文件）。
 //   ⚠️ 这条 `import` 是**本文件自己用**那些名字所必需的；
 //      下面的 `export` 只对 import 本文件的人生效（Dart 语义）。
+// ★ task-12 ⑤：只取一个常量（kLocalProvider）—— 本地命名空间必须**只有一处定义**，
+//   在本文件里再写一份字面量就是第二个契约（本仓反复踩过这个形态）。
+import 'cache_page.dart'
+    show CachedDelete, CachedWork, humanBytes, kLocalProvider;
 import 'media_session.dart';
+import '../core/network_status.dart';
 import 'tokens.dart';
+import 'widgets/app_loading.dart';
 import 'widgets/cover_image.dart';
 import 'widgets/detail_raw_meta.dart';
 import 'widgets/provider_name.dart';
@@ -396,6 +404,253 @@ double? episodeScrollTarget({
 /// ⇒ 用 `embedded` 开关达到同样目的，且**不破坏任何既有验证**。
 ///   （搬迁可以在功能验证通过后单独做 —— 那是纯机械改动。）
 /// ```
+/// ★ task-12 ⑤：标题**归一化** —— 只为「逐字相等」这一个判据服务
+///
+/// ```text
+/// ① 大小写折叠（toLowerCase）—— 中文不受影响，英文剧名/番号不受大小写差异干扰
+/// ② 全部 Unicode 空白剥离（含全角空格 U+3000、NBSP U+00A0、制表/换行）
+/// ```
+///
+/// ⚠️ **不做**任何「相似」处理（不改写繁简、不删标点、不截断）——
+///    那是把「对得上」变成「看起来像」，而本判据的全部价值恰恰在前者。
+String _normalizeTitle(String raw) =>
+    raw.replaceAll(RegExp(r'[\s\u00A0\u3000]+'), '').toLowerCase();
+
+/// 解 HTML 实体（★ 简介兜底用 —— 防"老插件文件没重转"）
+///
+/// # 为什么详情页还要再解一次
+///
+/// 实体的**正路**在数据源头就解掉了（Rust 的 `tvbox::strip_tags` /
+/// 转换器模板的 `stripTags` —— 本次一并修了）。但用户的插件目录里
+/// 还躺着**已经转换好的老 .js 文件**（28 个），它们不会因为宿主升级
+/// 而自动重转 ⇒ 那些源的简介仍然带 `&nbsp;`。
+/// ⇒ 显示前再解一次，把老文件也覆盖掉（新文件解过一遍，这里是幂等的：
+///    已经解开的文本里没有 `&` 开头的实体了）。
+///
+/// # ⚠️ 写法**刻意**与 assrt / bili 那两份保持一致
+///
+/// `lib/core/assrt/assrt_api.dart:276 htmlUnescape` 与
+/// `lib/core/bili/bili_api.dart:943 unescapeXml` 已经有同样的解码。
+/// 这里**不 import 它们**，因为：
+///   · 那两个是**源专属**文件（assrt 的 API / B 站的 API），
+///     详情页 import 它们是错的依赖方向（详情页不认识任何具体源）；
+///   · 它们俩自己也互相重复（谁都不是"公共 util"）。
+/// ⇒ 本函数与 bili 那份**逐条等价**（实体表相同、顺序相同），
+///   将来若要抽公共 util，这三处一起搬。
+///
+/// # ★★ 顺序：`&amp;` 必须**最后**（实测定的，不是推理定的）
+///
+/// 实测（`.probe/t9_order_test.mjs`，真跑）：
+/// ```text
+/// 输入 "&amp;nbsp;"
+///   · &amp; 最先解 ⇒ 得 "&nbsp;" ⇒ 再被 nbsp 规则换成空格 ⇒ " "        ← 错
+///   · &amp; 最后解 ⇒ 得 "&nbsp;" ⇒ 没有后续规则 ⇒ 字面量 "&nbsp;"      ← 对
+/// ```
+/// 语义上 `&amp;nbsp;` 表示"用户想显示 `&nbsp;` 这 6 个字符"，
+/// 所以解码后必须**停**在字面量上。把 `&amp;` 放最后，
+/// 其它规则跑完时它还是 `&amp;`，**不可能**触发第二轮替换 ——
+/// 这正是"只解一遍"的语义。
+///
+/// ⚠️ 只解**标准 HTML 实体**，不许顺手改别的字符
+///    （例如把 U+00A0 当 nbsp 处理 —— 那是另一件事，本函数不做）。
+String _decodeHtmlEntities(String s) {
+  // 没有 & 就一定是纯文本（省一次正则扫描）
+  if (!s.contains('&')) return s;
+  var out = s
+      .replaceAll('&nbsp;', ' ')
+      .replaceAll('&lt;', '<')
+      .replaceAll('&gt;', '>')
+      .replaceAll('&quot;', '"')
+      .replaceAll('&apos;', "'")
+      .replaceAll('&#39;', "'");
+  // &#xHHHH;（十六进制）
+  out = out.replaceAllMapped(RegExp(r'&#x([0-9a-fA-F]+);'), (m) {
+    final v = int.tryParse(m.group(1)!, radix: 16);
+    return v == null ? m.group(0)! : String.fromCharCode(v);
+  });
+  // &#DDDD;（十进制）
+  out = out.replaceAllMapped(RegExp(r'&#(\d+);'), (m) {
+    final v = int.tryParse(m.group(1)!);
+    return v == null ? m.group(0)! : String.fromCharCode(v);
+  });
+  // ★ `&amp;` 最后（见上）
+  return out.replaceAll('&amp;', '&');
+}
+
+/// ★ 仅供测试调用 —— 上面那个私有函数的转发入口
+///
+/// 为什么不直接把 _decodeHtmlEntities 改成公开：
+/// 它没有对外语义（只有详情页简介这一个调用点），公开会让"谁能调"变模糊。
+/// 这里只开一个测试专用门（与文件里其它 @visibleForTesting 一致）。
+@visibleForTesting
+String decodeHtmlEntitiesForTest(String s) => _decodeHtmlEntities(s);
+
+/// 本地页"认回来源"要读的那两张表（生产路径来自 FFI）
+typedef LocalOriginRecords = ({
+  List<Progress> progress,
+  List<Favorite> favorites,
+});
+
+/// ★ CR-12（**仅供测试**）：替换"读应用自己的记录"那两步
+///
+/// # 为什么需要这个口子（真实原因，不是"为了测试而测试"）
+/// ```text
+/// [_resolveLocalOrigin] 靠 [SourinApi.listAllProgress] / [SourinApi.listFavorites]
+/// 去认"本地这一集是从哪个站的哪一条下载下来的"。
+/// 而 `flutter test` 里 FFI **必然失败**
+///   （`Failed to load dynamic library 'sourin_core.dll'`，error 126）
+/// ⇒ 那两张表恒为空 ⇒ 恒"未命中" ⇒ **CR-12 这条缺陷根本造不出来**：
+///   造不出"带 cover 的命中记录"，就量不到"认回来源把刚铺好的封面与简介抹掉"。
+/// ```
+///
+/// # 为什么把口子开在这个文件，而不是 [SourinApi]
+/// ```text
+/// `sourin_api.dart` 里已有同形态的先例
+///（`debugSyncStatusFetcher` / `debugHomeFetcher` / `debugListFetcher`），
+/// 但改那个文件会牵动全仓所有调用点 —— 而这里只有**一个页面的一个调用点**要测。
+/// ⇒ 就在被测代码旁边开一条，生产路径一字未动（为 null 时就是原来那两句 FFI）。
+/// ```
+@visibleForTesting
+LocalOriginRecords Function()? debugLocalOriginRecords;
+
+/// 装上/卸掉这两张表的来源（传 `null` = 回到生产路径）
+@visibleForTesting
+void debugSetLocalOriginRecords(LocalOriginRecords Function()? f) {
+  debugLocalOriginRecords = f;
+}
+
+/// ★ task-12 ⑤：本地文件模式的「来源」文案
+///
+/// # 为什么不是空、也不是某个站点名
+/// Owner：「本地播放详情页 **来源** 也还是要用下载的」。
+/// 但本地播放的**前提**就是"没有旁文件"（`shell.dart:4773`：有旁文件走在线），
+/// 所以"下载时记录的来源"在多数情况下**根本不存在**。
+/// ⇒ 存在时用站点名（见 `_DetailPageState._resolveLocalOrigin`），
+///   不存在时**如实写「本地」** —— 不空着、也不冒充任何站点。
+const String kLocalSourceLabel = '本地';
+
+/// 本地文件模式下，「已下载」那一段的最大高度（超出**内部**滚）
+///
+/// ```text
+/// 4 行 × 行高 36 = 144
+/// + 一点余量让第 5 行"露一点"（同 kEpsViewportH 的可用性理由：
+///   底边正好卡在整行上时，用户看不出下面还有内容）
+/// ```
+const double kLocalEpsViewportH = 160;
+
+/// ★ task-12 ⑤：本地文件模式里「已下载的一集」（一集一行）
+///
+/// 与 [Episode] **刻意分开**：`Episode` 是**在线源**的剧集（有流地址、有源 code），
+/// 而本地这一集只有一个**文件**。混用同一个类型会让"点了要播哪个 URL"变得含糊。
+@immutable
+class LocalEpisodeRef {
+  const LocalEpisodeRef({
+    required this.fileName,
+    required this.episodeTitle,
+    required this.absolutePath,
+    this.bytes = 0,
+    this.watchRatio = 0,
+  });
+
+  /// 磁盘上的文件名（含扩展名）—— 也是这一行的稳定 key
+  final String fileName;
+
+  /// 展示名（默认 = 去掉扩展名的文件名）
+  final String episodeTitle;
+
+  /// 文件**绝对路径**（交给播放器的就是它）
+  final String absolutePath;
+
+  /// 这个文件占的字节数（来自扫盘读数）
+  ///
+  /// ★ task-17 ③：批量删除的确认正文要写「共 X MB」，而**不能在弹窗前**去 stat ——
+  ///    实测（探针）那样会让"点删除"到"弹窗出现"之间卡一段真实 IO，
+  ///    在 flutter_test 的假时钟下那次 IO 甚至永不完成（弹窗永远不出现）。
+  ///    而扫盘**本来就量过**这个数（CachedEpisode.bytes）⇒ 直接带过来。
+  final int bytes;
+
+  /// 这一集的**观看进度**（0..1；0 = 没看过 / 看过但不到 1%）
+  ///
+  /// ★ 为什么需要（Owner：「已缓存的 一集一行」，并要从一眼看出看过没看过）
+  /// ```text
+  /// 进度存在 `local` 命名空间（provider='local', contentId=文件绝对路径），
+  /// 而那是**本地页自己的主键**——所以这里能直接问库，不用去推测。
+  /// ★ 不读为它发请：进度表是**本地 SQLite**，不需要网络，且小快。
+  /// ```
+  final double watchRatio;
+
+  /// 看过一矩以上（Owner：「已看标记」）
+  bool get watched => watchRatio > 0.01;
+
+  @override
+  bool operator ==(Object other) =>
+      other is LocalEpisodeRef && other.absolutePath == absolutePath;
+
+  @override
+  int get hashCode => absolutePath.hashCode;
+}
+
+/// ★ task-17 ②：一条"本地文件是从哪个站来的"候选记录
+///
+/// 字段全部来自应用自己的 progress / favorites 表（**不联网**）——
+/// 见 `_DetailPageState._resolveLocalOrigin` 的排序规则说明。
+@immutable
+class LocalOriginHit {
+  const LocalOriginHit({
+    required this.provider,
+    required this.id,
+    required this.title,
+    required this.at,
+    this.cover,
+  });
+
+  final String provider;
+  final String id;
+  final String title;
+
+  /// 该记录的"有多近"（progress.updatedAt / favorite.updatedAt，毫秒）
+  ///
+  /// ⚠️ 两条来源的语义**不同**（一个是"看到哪"、一个是"收藏何时更新"），
+  ///    但排序只需要"谁更近"这个**序**，不需要它们的绝对含义一致。
+  final int at;
+
+  /// 站点给的封面 URL（可能为 null —— 老记录 / 该源没填）
+  final String? cover;
+}
+
+/// ★ task-17 ②：把候选按**确定性**规则排好（第一条 = 采用的那条）
+///
+/// 四级比较（每一级都要能解释，见调用点的长注释）：
+/// ```text
+/// ① 有 cover 的优先
+/// ② 有 id 的优先
+/// ③ at 更大（更近）的优先
+/// ④ provider 名字典序 —— 只为确定性
+/// ```
+///
+/// ★ 抽成**顶层纯函数**（不是 State 的私有方法）是为了能被单测直接钉住 ——
+///   排序规则是这一轮的核心判据，埋在 UI 类里就只能靠真机截图验。
+List<LocalOriginHit> rankLocalOriginHits(List<LocalOriginHit> hits) {
+  final out = List<LocalOriginHit>.of(hits);
+  out.sort((a, b) {
+    // ① 有封面优先
+    final ca = (a.cover?.isNotEmpty ?? false) ? 0 : 1;
+    final cb = (b.cover?.isNotEmpty ?? false) ? 0 : 1;
+    if (ca != cb) return ca.compareTo(cb);
+    // ② 有 id 优先
+    final ia = a.id.isNotEmpty ? 0 : 1;
+    final ib = b.id.isNotEmpty ? 0 : 1;
+    if (ia != ib) return ia.compareTo(ib);
+    // ③ 更近的优先（降序）
+    if (a.at != b.at) return b.at.compareTo(a.at);
+    // ④ 字典序（升序）—— 兜底，保证同一份数据两次运行结果相同
+    final pc = a.provider.compareTo(b.provider);
+    if (pc != 0) return pc;
+    return a.id.compareTo(b.id);
+  });
+  return out;
+}
+
 class DetailPage extends StatefulWidget {
   const DetailPage({
     super.key,
@@ -407,6 +662,17 @@ class DetailPage extends StatefulWidget {
     this.isTv = false,
     this.embedded = false,
     this.currentEpisodeId,
+    /*
+     * ★★★ task-12 ⑤：本地文件模式的参数（全部有默认值 ⇒ 在线路径一个字都不用改）
+     */
+    this.localFile,
+    this.localEpisodeCount = 0,
+    this.onPlayLocalEpisode,
+    this.localTitle,
+    this.localCover,
+    this.localEpisodes = const <LocalEpisodeRef>[],
+    this.onLocalEpisodesChanged,
+    this.localMeta,
   });
 
   final String provider;
@@ -471,6 +737,86 @@ class DetailPage extends StatefulWidget {
   /// ⚠️ `null` 的语义是"播放器**还没报告**"，**不是**"没有当前集" ⇒
   ///    此时必须**回退**到 ② / ③，不能当成"没有"。
   final String? currentEpisodeId;
+
+  /// ★★★ task-12 ⑤（2026-10-09）：**本地文件模式** —— 非 null ⇒ 本页不向核心要详情
+  ///
+  /// # 为什么必须「不去要」（而不是"要了失败再兜底"）
+  ///
+  /// 本地播放时 [provider] 恒为 local、[id] 恒为规范化后的**绝对路径**
+  /// （见 cache_page.dart 的 buildLocalPlayRequest 与 canonicalLocalPath）。
+  /// 而核心的注册表里**没有**叫 local 的 provider：
+  /// ```text
+  /// SourinApi.getDetail(local, <路径>)
+  ///   → Rust playback.rs registry.route(MediaId::new("local", <路径>))
+  ///   → 抛 SourinCoreException: 无法路由: local:c:/…
+  /// ```
+  /// ⇒ 那是**必然**失败的一次 IPC，而不是"可能失败"。
+  ///
+  /// ★ 判据是**这一个字段**，不是 provider == local：
+  ///   local 只是 cache_page.kLocalProvider 的当前取值（一个字符串），
+  ///   拿它当判据的话，将来改个名就会静默失效；而本字段是**类型化**的。
+  final String? localFile;
+
+  /// 是否本地文件模式（语义化判据，供调用方与测试读）
+  bool get isLocalFile => localFile != null;
+
+  /// 本地模式下**已下载的集数**（0 = 外层还没扫到 / 一集都没下）
+  ///
+  /// ⚠️ 只用于徽章那一行的「已下载 N 集」。它与在线页那个「N 集」**不是一回事**：
+  /// ```text
+  /// 在线「N 集」      这个源一共更新到第几集
+  /// 本地「已下载 N 集」 你在这台机器上真正下好了几集
+  /// ```
+  /// Owner：「其他都要跟在线播放页一致，**除了集数的展示**」—— 所以本地模式
+  /// **不**渲染前者，只渲染后者。
+  final int localEpisodeCount;
+
+  /// 本地模式下点「某一集」⇒ 交给外层切到那个**文件**
+  ///
+  /// ⚠️ 传的是 [LocalEpisodeRef]（里面是**绝对路径**），不是 Episode.id：
+  /// 本地会话的主键是 canonicalLocalPath(绝对路径)，而真正要交给播放器的
+  /// 是**原始绝对路径**（见 player_page.dart 的 _bootLocalFile）。
+  final void Function(LocalEpisodeRef ref)? onPlayLocalEpisode;
+
+  /// 本地模式下的**标题**（扫盘给的目录名 / 旁文件里的真标题）
+  ///
+  /// ⚠️ 本页本来**没有** title / cover 字段：在线路径的标题与封面来自拉回来的详情。
+  ///    而本地路径**拿不到**站点详情 ⇒ 只能用外层喂进来的这两个值。
+  ///    null ⇒ 退回 widget.id（那里是文件绝对路径，总比空白强）。
+  final String? localTitle;
+
+  /// 本地模式下的**封面**（只有旁文件里记过才有；扫盘那条路为 null）
+  ///
+  /// ⚠️ 它**不是**下载时记录的封面一定存在：本地播放的前提就是没有旁文件
+  ///    （shell.dart:4773）。真拿到了才会显示，否则走标题首字占位。
+  final String? localCover;
+
+  /// ★ task-12 ⑤：本地模式下**已下载的集**（一集一个文件）
+  ///
+  /// 数据源在外层（cache_page 扫盘出来的 CachedWork.episodes）——
+  /// 本页**不自己扫盘**：那是外层的职责，两边各扫一次必然出现两处结果不一致。
+  final List<LocalEpisodeRef> localEpisodes;
+
+  /// ★ task-17 ③：删除完成后通知外层**重新扫盘**（真刷新）
+  ///
+  /// ⚠️ 本页**不自己扫盘**（见 localEpisodes 的注释）—— 扫盘是外层的职责。
+  ///    删完不刷新的话，列表会一直挂着已经不存在的行（假刷新比不刷新更糟）。
+  final VoidCallback? onLocalEpisodesChanged;
+
+  /// ★★★ Owner 1009 ⑬：本地模式下**随下载缓存下来的作品信息**
+  ///
+  /// （简介 / 年份 / 地区 / 类型 / 角标 / 本地封面文件）
+  ///
+  /// # 为什么需要它（这一轮之前本地页为什么是"半成品"）
+  /// ```text
+  /// 本地页原本只填 title + cover ⇒ 页面上只有一行标题 + 一个徽章，
+  /// 跟在线播放页一比就是"少了大半截"，Owner 说的「半成品」正是这个。
+  /// 而这些字段**只有详情接口能给**，离线时核心也路由不到（provider='local'）
+  /// ⇒ 唯一出路就是下载那一刻把它们缓存下来（见 DownloadQueue._writeSidecarFor）。
+  /// ```
+  ///
+  /// ⚠️ null / 字段为空 ⇒ **降级显示**（少几行），绝不编造，也绝不报错。
+  final CachedWork? localMeta;
 
   @override
   State<DetailPage> createState() => _DetailPageState();
@@ -676,6 +1022,15 @@ class _DetailPageState extends State<DetailPage> {
   GlobalKey _epKeyFor(String id) =>
       _epKeys.putIfAbsent(id, () => GlobalKey());
 
+  /// ★ task-12 ⑤：本地行（「已下载」那段）的 key，按**绝对路径**索引
+  ///
+  /// ⚠️ 与 [_epKeys] 分开两张表：本地行的身份是**路径**，在线行的身份是 Episode.id。
+  /// ⚠️ 同样必须**稳定复用**（每帧新建 GlobalKey 会重挂整棵子树）。
+  final Map<String, GlobalKey> _localRowKeys = <String, GlobalKey>{};
+
+  GlobalKey _localRowKeyFor(String path) =>
+      _localRowKeys.putIfAbsent(path, () => GlobalKey());
+
   /// 把当前集滚进可视区（**只滚选集区**）
   ///
   /// # 触发时机（Owner 要求的三条路径，都要）
@@ -700,11 +1055,16 @@ class _DetailPageState extends State<DetailPage> {
   /// ⚠️ **已经完整可见时不动** —— 否则用户刚点的那一集会被莫名挪到中间，
   ///    看起来像"我点错了"。
   void _scrollEpisodesIntoView() {
-    final id = _activeEpisodeId;
+    /*
+     * ★ task-12 ⑤：本地模式的"当前集"身份是**绝对路径**（播放器报的文件名换来的），
+     *    在线模式是 Episode.id —— 两套 key 表各查各的（见 [_localRowKeyFor]）。
+     */
+    final local = widget.isLocalFile;
+    final id = local ? _activeLocalPath : _activeEpisodeId;
     if (id == null) return;
     if (!_epsCtrl.hasClients) return;
 
-    final itemCtx = _epKeys[id]?.currentContext;
+    final itemCtx = (local ? _localRowKeys[id] : _epKeys[id])?.currentContext;
     if (itemCtx == null) return;
     final itemBox = itemCtx.findRenderObject();
     if (itemBox is! RenderBox || !itemBox.hasSize) return;
@@ -757,6 +1117,25 @@ class _DetailPageState extends State<DetailPage> {
     _epKeys.removeWhere((k, _) => !_episodes.any((e) => e.id == k));
   }
 
+  /// ★ task-12 ⑤：本地模式解析出来的「来源」显示名
+  ///
+  /// 三档（见 _loadLocalOrigin）：站点显示名 / 「本地」/ null（还没解析完）。
+  /// ⚠️ null 与「本地」**语义不同**：前者是"还没算出来"，后者是"算过了，认不回来"。
+  String? _localOrigin;
+
+  /// ★ Owner ⑬：本地页此刻**能不能上网**（决定那几枚操作按钮画不画）
+  ///
+  /// ★ 初始 true（=「先按有网画」）：探测是异步的，首帧不能等它；
+  ///   联网用户因此零感知，断网用户顶多看到按钮"闪一下再消失"。
+  ///   反过来（初始 false）会让联网用户白等一下才能用按钮 —— 更糟。
+  bool _online = true;
+
+  /// ★ task-12 ⑤：本地模式认回来的那条**站点记录**（provider + nativeId）
+  ///
+  /// 用途：① 溯源（日志/排查）② 补真详情时用它去拉（见 _loadLocalOrigin 的第 ② 步）。
+  /// ⚠️ **不覆盖** widget.provider / widget.id —— 那一对是续播与自包含层的主键，
+  ///    必须留在 local 命名空间里。
+  ({String provider, String id})? _localOriginItem;
   bool _isFav = false;
   bool _following = false;
   Progress? _resume;
@@ -869,6 +1248,20 @@ class _DetailPageState extends State<DetailPage> {
   @override
   void initState() {
     super.initState();
+    /*
+     * ★★★ task-12 ⑤：本地模式**短路**掉"向核心要详情"那条路。
+     *
+     * ```text
+     * 本地播放的 provider 恒为 local、id 恒为绝对路径，
+     * 而核心注册表里**没有** local 这个 provider ⇒ getDetail 必然抛
+     * 「无法路由: local:…」（真机截图里那块红叹号）。
+     * ```
+     * ⚠️ 必须放在这里（其它初始化之前）—— 否则下面照旧发那次注定失败的请求。
+     */
+    if (widget.isLocalFile) {
+      unawaited(_initLocal());
+      return;
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) => _init());
     /*
      * ★ 站名与详情**并行**取（task-32）
@@ -925,6 +1318,457 @@ class _DetailPageState extends State<DetailPage> {
     // ★ 自己创建的控制器要自己释放（否则热重载/反复进页会泄漏）
     _epsCtrl.dispose();
     super.dispose();
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  //  ★★★ task-12 ⑤（2026-10-09）：**本地文件模式**的全部逻辑
+  // ══════════════════════════════════════════════════════════════════════
+  //
+  // Owner 原话（逐字）：
+  // > 本地播放详情页 **来源** 也还是要用下载的，**封面也要展示**，
+  // > 其他都要跟在线播放页一致，除了**集数的展示**，还有那些**操作按钮不显示**，
+  // > 其他都要一样的
+  //
+  // # ★★★ 动手前先核实过的一件事（任务描述里的根因**不成立**）
+  //
+  // ```text
+  // shell.dart:4773 的裁决是：**有**旁文件 ⇒ 走在线路径（provider/id 用站点的、localPath=null）
+  //                      **没有**旁文件 ⇒ 才走本地播放（provider=local、id=绝对路径）
+  // ⇒ 生产路径上「本地播放」与「下载时记录的 provider/封面」**互斥** ——
+  //   本地播放的前提恰恰就是"旁文件不存在"。
+  // ```
+  //
+  // 只读核实的证据（2026-10-09，已报 lead）：
+  // · %USERPROFILE% Videos 源影 无职转生 第三季 那个目录里**只有 1 个 mp4，没有 _sourin-cache.json**；
+  // · 应用自己的库 dsh-media.db 里 local:… 那两行（progress / history）的 cover 都是 **NULL**。
+  //
+  // ⇒ 所以"来源与封面"必须**另找出处**，三档（lead 裁决 (b) + 三条硬约束）：
+  // ```text
+  // ① 能按标题**唯一**认回站点条目  ⇒ 来源=站点名、封面与全部元信息都从该站点真详情来
+  // ② 认不回来（0 条 / 命中多条）   ⇒ 来源=「本地」、封面=标题首字占位（**不猜**）
+  // ③ 认回来但详情拉失败            ⇒ 来源仍是站点名（那是**记录**，不是猜的），元信息缺席
+  // ```
+  //
+  // ⚠️ 全程**不碰**在线路径的字段（_isFav / _following / _activeSource / _episodes）：
+  //    本地文件不属于任何站点，收藏/追更/换线路在它身上没有意义
+  //    （Owner 也明确说那几个按钮不要）。
+
+  /// 本地模式的"加载" —— **零 FFI 取详情、零网络**（见上面那段说明）
+  Future<void> _initLocal() async {
+    final file = widget.localFile;
+    if (file == null) return;
+    /*
+     * ① 首帧就用**缓存下来的作品信息**铺满（Owner ⑬）——
+     *    零网络、零 FFI ⇒ 断网时这一页也是完整的。
+     *    ⚠️ 本地页本来没有 title/cover 字段（在线路径的标题来自拉回来的详情），
+     *      而本地拿不到站点详情 ⇒ 只能用外层给的那几样。
+     */
+    final meta = widget.localMeta;
+    setState(() {
+      _detail = MediaDetail(
+        id: file,
+        title: widget.localTitle ?? widget.id,
+        cover: widget.localCover ?? meta?.localCoverPath ?? meta?.cover,
+        description: meta?.description,
+        year: meta?.year,
+        area: meta?.area,
+        kind: meta?.kind,
+        badges: meta?.badges ?? const <String>[],
+      );
+      _loading = false;
+      _error = null;
+    });
+
+    /*
+     * ★ 联网探测（Owner ⑬：「有网络那几个按钮也要显示,如没网络就不显示操作按钮」）
+     * ⚠️ unawaited ⇒ 绝不影响首帧；结果到了只改 `_online` 重建一次。
+     */
+    unawaited(_probeNetwork());
+
+    /*
+     * ② 来源 + （可能的）真详情 —— 见 [_resolveLocalOrigin]。
+     *    ⚠️ await 它：它在**首帧之后**才 setState，不影响首帧显示。
+     */
+    await _loadLocalOrigin();
+
+    /*
+     * ③ 续播条 —— 走 local 命名空间（键就是本页的 provider/id，
+     *    与播放器 _saveProgress 写的是**同一对**，见 cache_page 的说明）。
+     *    ⚠️ 独立 try/catch：读进度失败不该影响页面其它部分。
+     */
+    try {
+      final p = await SourinApi.getProgress(widget.provider, widget.id);
+      if (mounted) setState(() => _resume = p);
+    } catch (e) {
+      debugPrint('[DETAIL] 本地模式读续播进度失败（不影响其它区块）: $e');
+    }
+  }
+
+  /// 联网探测（结果只驱动 `_online`，**不阻塞首帧**）
+  ///
+  /// ⚠️ 失败一律降级成"有网"：按钮少显示一次，好过整页报错。
+  Future<void> _probeNetwork() async {
+    try {
+      await NetworkStatus.probe();
+      if (mounted) setState(() => _online = NetworkStatus.online.value);
+    } catch (e) {
+      AppLog.write('DETAIL', '联网探测失败（按有网处理）: $e');
+    }
+  }
+
+  /// 本地模式下「那几枚操作按钮」画不画（Owner ⑬：没网就不显示）
+  bool get _showLocalActions => !widget.isLocalFile || _online;
+
+  /// ★★★ OPS-9：**这一集磁盘上已经有可播文件** ⇒ 不画那枚「换源」
+  ///
+  /// # Owner 原话（逐字）
+  /// ```text
+  /// > 这个好像是概率性的,**缓存到本地就不要显示换源按钮了**
+  /// ```
+  ///
+  /// # ⚠️ 与 [_showLocalActions] 是**两件不同的事**（别合并、别互相顶替）
+  /// ```text
+  /// _showLocalActions  整条操作行画不画   （离线 ⇒ 四枚全不画）
+  /// _hasLocalPlayable  只摘掉「换源」     （有本地文件 ⇒ 其余三枚照旧）
+  /// ```
+  /// ⇒ 上一版把它们混成了一个开关，结果就是"要么四枚都在、要么四枚都不在"，
+  ///   而 Owner 要的是**在**的那三枚一个不少、只有换源消失。
+  ///
+  /// # 三条判据（按优先级；全部读**真实** widget / 队列状态）
+  ///
+  /// ```text
+  /// ① 播放器报了这一集（currentEpisodeId != null）
+  ///    ⇒ 这一集的文件名在 localEpisodes 里吗？
+  ///       ★ 判据与 [_activeLocalPath] **逐字同源**（本地会话的 episodeId
+  ///         就是磁盘文件名 —— 见 cache_page.buildLocalPlayRequest 的调用点），
+  ///       ⇒ 本页**不自己拼路径**、不自己 stat 磁盘。
+  ///
+  /// ② 播放器还没报（currentEpisodeId == null，语义是"还没报"而**不是**
+  ///    "没有当前集"—— 见 [_activeEpisodeId] 的长注释）
+  ///    ⇒ 进的就是本地页（本页在放一个本地文件），且本地页的选集只列
+  ///      **已下载**的那几集 ⇒ localEpisodeCount > 0 即成立。
+  ///
+  /// ③ 都还没定（在线页 / 本地页刚进来）
+  ///    ⇒ 队列里有没有**这一集**的活任务、且**已经落了片**？
+  /// ```
+  ///
+  /// # ③ 为什么必须要求 `done > 0`
+  /// ```text
+  /// 只有落了片才有"能播的东西"（.part 也算，播放器支持边下边播）；
+  /// done == 0 时清单都还没拿到 ⇒ 盘上一个字节都没有 ⇒ 换源照画。
+  /// ⚠️ 刻意**不**去扫磁盘上有没有 .part：仓库口径里 .part **不算**"已下好"
+  ///    （见 media_page 的 _localEpisodeRefs 只收 e.isComplete）。
+  /// ```
+  /// ⚠️ [DownloadQueue.tasks] 只在内存（无持久化）⇒ 重启后"已下好"这件事
+  ///    只由 ①② 覆盖；③ 管的是"这次会话里正在下的那一集"。
+  bool get _hasLocalPlayable {
+    final episodes = widget.localEpisodes;
+
+    // ① 播放器报了这一集 —— 复用既有判据（文件名比对），不拼路径
+    final reported = widget.currentEpisodeId;
+    if (reported != null) {
+      for (final e in episodes) {
+        if (e.fileName == reported) return true;
+      }
+      // ★ 报的这一集不在已下载列表里 ⇒ 落到 ③ 看队列（在线页切集的情形）
+    }
+
+    // ② 进的就是本地页，且本地页有已下载的集
+    if (widget.isLocalFile &&
+        (episodes.isNotEmpty || widget.localEpisodeCount > 0)) {
+      return true;
+    }
+
+    // ③ 这一集正在下载、且已经有可播片段
+    final ids = <String>{
+      if (reported != null) reported,
+      if (_pickedEpisodeId != null) _pickedEpisodeId!,
+      if (_selectedEpisodeId != null) _selectedEpisodeId!,
+    };
+    if (ids.isEmpty) return false;
+    for (final t in DownloadQueue.tasks.value) {
+      if (t.state != DownloadState.running) continue;
+      if (t.done <= 0 || t.total <= 0) continue;
+      if (t.provider != widget.provider) continue;
+      if (t.mediaId != widget.id) continue;
+      if (!ids.contains(t.episodeId)) continue;
+      return true;
+    }
+    return false;
+  }
+
+  /// 解析本地模式的「来源」，并把**真封面**用上（task-17 ②）
+  ///
+  /// 三档行为见上面那段长注释。**无论哪一档都必然给 _localOrigin 一个值** ——
+  /// 所以界面上「来源」永远不会空着。
+  ///
+  /// # ★★★ task-17：**不再调 getDetail**（这是有意的取舍，不是漏了）
+  /// ```text
+  /// 上一轮（task-12）这里会 `SourinApi.getDetail(hit.provider, hit.id)` 去补一份真详情，
+  /// 目的是拿到封面/简介/评分/演员/类型（Owner 当时说"其他都要跟在线播放页一致"）。
+  ///
+  /// 这一轮去掉了它，三条理由（lead 裁决，逐条落地）：
+  /// ① 本地播放的核心价值就是"断网也能看" —— 联网补详情会让它在断网时变慢/变空；
+  /// ② 简介/评分/演员/类型**不是这一轮的需求** ——
+  ///    Owner 这一轮点名要的是「原来的封面」与「原来源」，而这两样
+  ///    progress / favorites 表里**本来就有**（见下面的 cover 字段）；
+  /// ③ 真要补也该由**用户主动点**才发请求，而不是进页面就自动打一次网络。
+  /// ```
+  /// ⚠️ 取舍的**代价**（如实写在代码里，免得下一个人以为是 bug）：
+  ///    这里**不会**去补简介/评分/演员/类型 —— 本地页显示什么，取决于
+  ///    [_initLocal] 从本地 meta 里铺出来的字段；若 Owner 之后要在线详情，
+  ///    正确做法是加一个"查看在线详情"的**显式入口**，不是把网络请求加回这里。
+  Future<void> _loadLocalOrigin() async {
+    final hit = await _resolveLocalOrigin();
+    if (!mounted) return;
+
+    // 认不回来 ⇒ 如实写「本地」（记录里确实没有这一部）
+    if (hit == null) {
+      setState(() => _localOrigin = kLocalSourceLabel);
+      return;
+    }
+
+    /*
+     * ★★★ task-17 ②：**真来源** —— 走与在线页**同一个** providerDisplayName
+     *    （拿不到时它自己退回 id ⇒ 一定非空）。
+     */
+    final name = await providerDisplayName(hit.provider);
+    if (!mounted) return;
+    /*
+     * ★ task-17 ②：把"从哪一条记录认回来的"写进日志（可溯源）——
+     *    这也是 [_localOriginItem] 的**唯一读者**：它让"界面上显示的来源"
+     *    与"日志里记的来源"必然同源，排查时不会各说各话。
+     */
+    final origin = _localOriginItem;
+    AppLog.write(
+      'LOCAL',
+      '采用 ${hit.provider}:${hit.id} 作为来源「$name」'
+          '（已存为 ${origin?.provider}:${origin?.id}）',
+    );
+    setState(() {
+      _localOriginItem = (provider: hit.provider, id: hit.id);
+      _localOrigin = name;
+      /*
+       * ★★★ task-17 ②：**真封面** —— 只在本页**还没有**封面时才用记录里的。
+       *
+       * ⚠️ 只在非空时覆盖：`hit.cover == null` 表示"这条记录没封面"，
+       *    那时**保留**外层给的那张（可能来自旁文件），不能用一个 null 把它抹掉。
+       * ⚠️ 标题**不动**：外层给的标题就是本地目录名（用户看得见的那个），
+       *    而 hit.title 是站点标题 —— 两者归一化后相等，换过去只会让标题"跳一下"。
+       *
+       * ★★ CR-12：这里**原来**是只要 `hit.cover` 非空就 `MediaDetail(id:,
+       *    title:, cover:)` 整个换掉 —— 而 [MediaDetail] 剩下每一个字段都
+       *    取默认值，于是 [_initLocal] 刚铺好的 description / year / area /
+       *    kind / badges **一起消失**，本地封面路径也被换成记录里的网络图 URL。
+       *    最常见的触发路径恰恰是"先在线看过、再下载"（本地目录里 meta 齐全，
+       *    progress/favorites 也有带 cover 的一条）。Owner 的反馈就是这个：
+       *    本地播放详情页的封面和「来源」要保留。
+       *
+       *    现在改成：本地页**已经有**封面就一个字节都不动；确实没有封面时，
+       *    才把记录里的 cover 补上，并且**照抄**其余字段（不新造一个空壳）。
+       *    [MediaDetail] 没有 copyWith，所以只能显式转写。
+       */
+      final c = hit.cover;
+      final cur = _detail;
+      if (c != null && c.isNotEmpty && cur != null && (cur.cover ?? '').isEmpty) {
+        _detail = MediaDetail(
+          id: cur.id,
+          title: cur.title,
+          cover: c,
+          description: cur.description,
+          year: cur.year,
+          area: cur.area,
+          kind: cur.kind,
+          actors: cur.actors,
+          directors: cur.directors,
+          badges: cur.badges,
+          meta: cur.meta,
+          episodes: cur.episodes,
+          sources: cur.sources,
+        );
+      }
+    });
+  }
+
+  /// ★★★ task-17 ②：按**标题**把本地文件认回"它是从哪个站的哪一条下载来的"
+  ///
+  /// # 为什么能这么认（这是**应用自己的数据**，不是猜）
+  ///
+  /// progress 与 favorites 两张表里存的就是"从某个站看过/收藏过这部片"
+  /// 这件事的原始记录，字段是 (provider, native_id, title, cover, updated_at)。
+  /// 标题对得上 ⇒ 拿到的是一个**可核对的键** provider:native_id。
+  ///
+  /// # ★★★ task-17：策略从「不唯一就放弃」改成「排序选一个」
+  /// ```text
+  /// 上一轮（task-12）：命中多条 ⇒ 放弃 ⇒ 显示「本地」
+  /// 这一轮（task-17）：命中多条 ⇒ **排序选第一条** ⇒ 显示真站点名
+  /// ```
+  /// ⚠️ 这不是"上一轮做错了"，是**需求变了**：
+  ///   Owner 原话（task-17）：「点击进去的播放也要显示出来原来源，**而不是 local**」。
+  ///   上一轮的"宁可显示本地也不猜"在"要显示出来"这个要求下就成了功能缺失。
+  ///
+  /// # 排序规则（四级，逐级比较 —— 每一级都要能解释）
+  /// ```text
+  /// ① 有 cover 的优先    —— 封面是 Owner 这一轮点名要的两样之一（另一是来源）
+  /// ② 有 native_id 的优先 —— 没有 id 的记录连"是哪一条"都说不清（理论分支，仍显式处理）
+  /// ③ 记录更近的优先     —— progress.updatedAt / favorite.updatedAt 更大者更近；
+  ///                        "最近看过的那条"最可能就是用户心里那一条
+  /// ④ provider 名字典序  —— ★ 兜底，**只为确定性**：
+  ///                        否则同一份数据两次运行可能选到不同的源（不可复现的界面）
+  /// ```
+  ///
+  /// # ★ 匹配判据本身**没有变**：归一化后逐字相等（见 [_normalizeTitle]）
+  ///
+  /// 只读核实的证据（2026-10-09，真 SQL 查 dsh-media.db 的 progress 表）：
+  /// ```text
+  /// cycani:3862        无职转生 第三季 ～到了异世界就拿出真本事～  cover=有 updated_at=1791548661356
+  /// hongniuzy2:150722  无职转生 第三季 ～到了异世界就拿出真本事～  cover=有 updated_at=1790593398542
+  /// ffzy:98495         无职转生Ⅲ～到了异世界就拿出真本事         ← ★ 不命中（Ⅲ ≠ 第三季）
+  /// ```
+  /// ⇒ 前两条**逐字相同** ⇒ 都是候选 ⇒ 按③（更近）选 **cycani:3862**。
+  /// ⇒ 第三条**不该**命中 —— 这正说明"逐字相等"这个判据是有鉴别力的，
+  ///    换成模糊相似反而会把 ffzy 也拉进来（那是**另一部**剧的记录）。
+  ///
+  /// # 两个数据源都要查（与 [resolveFavFollowState] 同一条纪律）
+  /// ```text
+  /// progress  看过（含在线看了一半的）  ← 最可能命中：用户多半是先在线看过才下载的
+  /// favorites 收藏 / 追更过的          ← 补上"收藏了但还没看"的情况
+  /// ```
+  ///
+  /// ⚠️ 自身的 local 行**必须排除**：它的标题就是同一个目录名，
+  ///    不排除的话本机看过一次就会把自己算成"命中"，而那是**循环证据**（等于自证）。
+  ///
+  /// ★ 不联网：只用这两张表已有的字段。
+  ///   见 [_loadLocalOrigin] 里那段"为什么不调 getDetail"的说明。
+  Future<LocalOriginHit?> _resolveLocalOrigin() async {
+    final want = _normalizeTitle(widget.localTitle ?? widget.id);
+    if (want.isEmpty) {
+      AppLog.write(
+          'LOCAL', '来源匹配放弃：标题为空（${widget.provider}:${widget.id}）');
+      return null;
+    }
+
+    final List<Progress> progress;
+    final List<Favorite> favorites;
+    try {
+      // ★ CR-12：测试口子在**这里**接管（见 [debugLocalOriginRecords] 的说明）。
+      //   为 null 时下面两句一字未改 ⇒ 生产路径与改前完全一致。
+      final injected = debugLocalOriginRecords;
+      if (injected != null) {
+        final rec = injected();
+        progress = rec.progress;
+        favorites = rec.favorites;
+      } else {
+        final r = await Future.wait([
+          SourinApi.listAllProgress(),
+          SourinApi.listFavorites(),
+        ]);
+        progress = (r[0] as List).cast<Progress>();
+        favorites = (r[1] as List).cast<Favorite>();
+      }
+    } catch (e) {
+      AppLog.write('LOCAL', '来源匹配放弃：读应用自己的记录失败 $e');
+      return null;
+    }
+
+    /*
+     * 合并去重：键用 provider:nativeId（与全项目统一的主键格式一致）。
+     * ⚠️ 同一个 key 在两个源都出现时**取更近的那个时间**（见下面的 merge 分支）——
+     *    否则"在收藏里更新时间更近、在 progress 里更早"会按哪个算就成了偶然。
+     */
+    final byKey = <String, LocalOriginHit>{};
+    void consider({
+      required String provider,
+      required String nativeId,
+      required String title,
+      String? cover,
+      required int at,
+    }) {
+      if (provider.isEmpty || nativeId.isEmpty) return;
+      // ★ 排除循环证据：local 是本机自己的命名空间（见上面那条警告）
+      if (provider == kLocalProvider) return;
+      if (_normalizeTitle(title) != want) return;
+      final key = '$provider:$nativeId';
+      final prev = byKey[key];
+      if (prev == null) {
+        byKey[key] = LocalOriginHit(
+          provider: provider,
+          id: nativeId,
+          title: title,
+          cover: cover,
+          at: at,
+        );
+        return;
+      }
+      // 已有 ⇒ 合并：封面取非空的那个、时间取更近的那个
+      byKey[key] = LocalOriginHit(
+        provider: prev.provider,
+        id: prev.id,
+        title: prev.title,
+        cover: (prev.cover?.isNotEmpty ?? false) ? prev.cover : cover,
+        at: at > prev.at ? at : prev.at,
+      );
+    }
+
+    for (final p in progress) {
+      consider(
+        provider: p.provider,
+        nativeId: p.nativeId,
+        title: p.title,
+        cover: p.cover,
+        at: p.updatedAt,
+      );
+    }
+    for (final f in favorites) {
+      consider(
+        provider: f.provider,
+        nativeId: f.nativeId,
+        title: f.title,
+        cover: f.cover,
+        at: f.updatedAt,
+      );
+    }
+
+    if (byKey.isEmpty) {
+      AppLog.write('LOCAL', '来源匹配：未命中（标题「$want」）⇒ 来源显示「本地」');
+      return null;
+    }
+
+    final ranked = rankLocalOriginHits(byKey.values.toList());
+    final chosen = ranked.first;
+
+    if (ranked.length == 1) {
+      AppLog.write(
+        'LOCAL',
+        '来源匹配：唯一命中 ${chosen.provider}:${chosen.id}（标题「$want」）⇒ 采用',
+      );
+    } else {
+      /*
+       * ★ 多条 ⇒ **排序选第一条**（task-17 策略）并写清**为什么是它**：
+       *    日志要能回答"另外几条输在哪一级"，否则这个启发式仍然不可调试。
+       */
+      final why = <String>[];
+      for (final h in ranked.skip(1)) {
+        why.add('${h.provider}:${h.id}（${_explainLoser(chosen, h)}）');
+      }
+      AppLog.write(
+        'LOCAL',
+        '来源匹配：命中 ${ranked.length} 条 ⇒ **排序选第一条** ${chosen.provider}:${chosen.id}（cover=${chosen.cover != null ? "有" : "无"} 时间=${chosen.at}）'
+            '；其余：${why.join('、')}',
+      );
+    }
+    return chosen;
+  }
+
+  /// 解释"落选者输在哪一级" —— 让排序可复核（日志用）
+  static String _explainLoser(LocalOriginHit win, LocalOriginHit lose) {
+    if ((win.cover?.isNotEmpty ?? false) != (lose.cover?.isNotEmpty ?? false)) {
+      return '输在封面（winner ${win.cover != null ? "有" : "无"} / loser ${lose.cover != null ? "有" : "无"}）';
+    }
+    if (win.at != lose.at) {
+      return '输在时间（winner ${win.at} > loser ${lose.at}）';
+    }
+    return '输在站点名字典序（${win.provider} < ${lose.provider}）';
   }
 
   /// 取当前站点的显示名（task-32）
@@ -1428,6 +2272,22 @@ class _DetailPageState extends State<DetailPage> {
         index: idx < 0 ? 0 : idx,
         multiEpisode: _episodes.length > 1,
       ),
+      // ★★★ task-11 ④：把封面带上 —— 下载完成后写进剧集目录的旁文件，
+      //    「已缓存」页据此显示封面（详见 download_queue 的 _writeSidecarFor）。
+      cover: d.cover,
+      /*
+       * ★★★ Owner 第 1009 批 13：把作品元数据**一起缓存下来**
+       * ```text
+       * 本地播放页要"跟在线播放页一模一样"（简介/年份/地区/类型/角标），
+       * 而这些只有详情接口能给，离线时永远拿不到
+       * ⇒ 唯一能离线显示的时机就是**入队这一刻**（那时详情就在手里）。
+       * ⚠️ 全部可空：插件没给就留空，本地页降级显示，不崩也不编造。
+       */
+      description: d.description,
+      year: d.year,
+      area: d.area,
+      kind: d.kind,
+      badges: d.badges,
     );
     final added = DownloadQueue.enqueue(task);
     if (!quiet) {
@@ -1582,7 +2442,7 @@ class _DetailPageState extends State<DetailPage> {
     final content = Stack(
       children: [
         if (_loading)
-          const Center(child: CircularProgressIndicator())
+          const Center(child: AppLoading())
         else if (_error != null)
           _ErrorView(
             message: _error!,
@@ -1809,9 +2669,17 @@ class _DetailPageState extends State<DetailPage> {
     _Info info({_InfoPart part = _InfoPart.full}) => _Info(
           part: part,
           detail: d,
-          episodeCount: _episodes.length,
+          // ★ task-12 ⑤：本地模式下"集数"换成**已下载集数**（Owner：除了集数的展示）
+          episodeCount: widget.isLocalFile ? 0 : _episodes.length,
+          localCount: widget.isLocalFile ? widget.localEpisodeCount : 0,
           sourceCount: sourceCount,
-          providerName: _providerName,
+          // ★ task-12 ⑤：本地模式的"来源"是 _localOrigin（站点名 / 「本地」）；
+          //   在线模式仍是 _providerName —— 逐字不变。
+          providerName: widget.isLocalFile ? _localOrigin : _providerName,
+          localMode: widget.isLocalFile,
+          showActions: _showLocalActions,
+          // ★★★ OPS-9：这一集磁盘上有没有可播文件 ⇒ 只决定那枚「换源」画不画
+          hasLocalFile: _hasLocalPlayable,
           isFav: _isFav,
           following: _following,
           resume: _resume,
@@ -2247,7 +3115,10 @@ class _DetailPageState extends State<DetailPage> {
           // ② 标题读的是 name（后端发 title）→ 永远显示成 code（cychub / cdn）
           // ```
           // 现在换成 DetailSourcePicker：既递归渲染嵌套层，又读真标题与集数。
-          if (_hasMultiSource) ...[
+          // ★ task-12 ⑤：本地模式**不画「播放源」** ——
+          //   本地文件不属于任何站点，"站内换线路"这件事在它身上没有意义
+          //   （Owner 把"换源"归在"那些操作按钮不显示"里）。
+          if (!widget.isLocalFile && _hasMultiSource) ...[
             const _BlockTitle(text: '播放源'),
             DetailSourcePicker(
               sources: _sourceNodes,
@@ -2259,8 +3130,353 @@ class _DetailPageState extends State<DetailPage> {
     ];
   }
 
+  // ══════════════════════════════════════════════════════════════════════
+  //  ★★★ task-17 ③：本地播放页的**单集删除 + 批量删除**
+  // ══════════════════════════════════════════════════════════════════════
+  //
+  // Owner 原话（逐字）：
+  // > 本地播放页面,进去之后 可以选择批量删除,也可以单集删除,这里操作要优化
+  //
+  // # 为什么删除逻辑必须**先查有没有现成的**（lead 硬约束）
+  // ```text
+  // 本仓已经有两条删除路径，直接复用它们的**语义**，不新写第二套：
+  //   · DownloadQueue.remove(id)        —— 单任务：先停 → 删盘上产物 → 从队列移除
+  //   · DownloadQueue.deleteTaskFiles(t) —— 按 fileName 删 .mp4/.ts/.flv/.part 等候选
+  //   · DownloadQueue.removeWork(title)  —— 整剧：删整个目录
+  // ```
+  //
+  // # ★ 但**不能**直接调它们（这是有意的，不是偷懒）
+  // ```text
+  // 本页手里是 [LocalEpisodeRef]（一个**绝对路径** + 文件名），而那两个 API 的入参是
+  // `DownloadTask` / `title` —— 而本地播放的**前提**恰恰是"旁文件不存在"，
+  // 且用户可能是在**重启之后**从「已缓存」进来的 ⇒ 队列里**根本没有**这条任务
+  // ⇒ 拿不到 DownloadTask ⇒ 那两条 API 在这里是**不可用**的。
+  // ```
+  // ⇒ 所以这里按 `deleteTaskFiles` 的**同一条路径规则**（同名 + 各种后缀/半截）删，
+  //   并在删完后让外层**重新扫盘**（真刷新）。
+  //
+  // ⚠️ 队列里若**确实**还有这条任务（正在下载），先按 id 调 remove() 走正规路径 ——
+  //    这样"正在下的那一集"不会留下半截 .part 或让队列状态与磁盘不一致。
+
+  /// 选择模式（批量删除）—— Owner：「可以选择批量删除」
+  bool _localSelectMode = false;
+
+  /// 选择模式里被勾中的集（用**绝对路径**当身份，与 [_localRowKeys] 同一套键）
+  final Set<String> _localChecked = <String>{};
+
+  /// 单集删除（带二次确认）
+  ///
+  /// ⚠️ 确认正文写清**代价**（哪个文件、多大）—— 与 cache_page._confirmDelete 同一条纪律：
+  ///    真删、不可逆，用户点之前必须看到自己要失去什么。
+  Future<void> _confirmDeleteLocalEpisode(LocalEpisodeRef ref) async {
+    final ok = await showAppDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('删除这一集？'),
+        content: Text(
+          '${ref.episodeTitle}\n'
+          '文件会从磁盘上真正删除，此操作不可恢复。',
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    await _deleteLocalPaths(<LocalEpisodeRef>[ref]);
+  }
+
+  /// 批量删除（带二次确认，正文写清**几集 / 多少 MB**）
+  Future<void> _confirmDeleteLocalSelected() async {
+    final picked = widget.localEpisodes
+        .where((e) => _localChecked.contains(e.absolutePath))
+        .toList();
+    if (picked.isEmpty) return;
+
+    /*
+     * ★ 真读数：字节数来自**扫盘时量好的**读数（CachedEpisode.bytes），
+     *   不是在弹窗前再去 stat 一遍。
+     *
+     * # 为什么不在弹窗前 stat（探针实测的教训）
+     * ```text
+     * 探针点"删除"后弹窗**永远不出现** —— 因为 `File.exists()` 是**真实异步 IO**，
+     * 而 flutter_test 的假时钟不驱动真实 IO ⇒ 那个 await 永不完成 ⇒
+     * `showAppDialog` 根本走不到。
+     * ⇒ 真机上虽然会完成，但那段 IO 是**白等**的（数字扫盘时就已经有了）。
+     * ```
+     */
+    var bytes = 0;
+    for (final e in picked) {
+      bytes += e.bytes;
+    }
+
+    final ok = await showAppDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('删除选中的集？'),
+        content: Text(
+          '将删除 ${picked.length} 集 / 共 ${humanBytes(bytes)}。\n'
+          '文件会从磁盘上真正删除，此操作不可恢复。',
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    await _deleteLocalPaths(picked);
+  }
+
+  /// 真删（单集与批量共用这一条路径 —— 两处各写一遍迟早不一致）
+  ///
+  /// ★ 删盘上文件时**只认文件名**，绝对路径由 `CachedDelete` 现拼 —— 那是
+  ///   唯一带**路径穿越防护**的实现（lead 明令）。
+  ///   改前这里直接拿 `ref.absolutePath` 去删，而那个绝对路径来自磁盘扫描
+  ///   与本地命名空间，理论上可被构造出目录外的目标。
+  Future<void> _deleteLocalPaths(List<LocalEpisodeRef> refs) async {
+    final dir = _localWorkDir();
+    if (dir == null) {
+      _sayLocal('找不到这部作品的文件夹，已取消删除');
+      return;
+    }
+    var deleted = 0;
+    for (final ref in refs) {
+      final name = ref.fileName;
+      // ① 队列里还有这条任务 ⇒ 走正规删除路径（含"先停再删"）
+      final task =
+          DownloadQueue.tasks.value.where((t) => t.fileName == name).toList();
+      for (final t in task) {
+        await DownloadQueue.remove(t.id);
+      }
+      // ② 盘上产物（无论队列里有没有，都要确保文件真的没了）
+      if (await CachedDelete.deleteEpisodeFile(dir, name)) deleted++;
+    }
+    if (!mounted) return;
+    setState(() {
+      _localChecked.clear();
+      _localSelectMode = false;
+    });
+    /*
+     * ③ 真刷新 —— 回调给外层（media_page）重新扫盘。
+     * ⚠️ 不在这里自己扫：扫盘是外层的职责（本页**不自己扫盘**，见 localEpisodes 的注释）。
+     */
+    widget.onLocalEpisodesChanged?.call();
+    AppLog.write('LOCAL', '本地删除：${refs.length} 集，实际删掉 $deleted 个文件');
+    _sayLocal(deleted > 0
+        ? '已删除 $deleted 个文件'
+        : '没有删除任何文件（文件可能已经不在了）');
+  }
+
+  /// 本地会话所在的**作品目录**（拿不到 ⇒ 不许删）
+  ///
+  /// ★ 从任一集的文件名往上退一层 —— 这样就不必把整个 CachedWork 传进来
+  ///   （本页拿的是 LocalEpisodeRef，只有绝对路径）。
+  String? _localWorkDir() {
+    if (widget.localEpisodes.isEmpty) return null;
+    final p = Directory(widget.localEpisodes.first.absolutePath).parent.path;
+    return p.isEmpty ? null : p;
+  }
+
+  /// 一句话反馈（与 cache_page._say 同款）
+  void _sayLocal(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+      SnackBar(content: Text(msg), duration: const Duration(seconds: 3)),
+    );
+  }
+
+  /// ★★★ task-12 ⑤ + task-17 ③：本地模式的「已下载」那一段
+  ///
+  /// # 为什么它**不是**在线页那个选集网格
+  /// ```text
+  /// 在线选集：一个按钮 = 一集（点了切流）—— 数据源是"源声明的剧集列表"
+  /// 本地这段：一行 = 一个**文件**（点了切文件）—— 数据源是"磁盘上真正下好的文件"
+  /// ```
+  /// ⇒ 两件事：**形态不同**（一行 vs 网格）、**语义不同**（我下过的 vs 源有多少集）。
+  ///   所以标题写「已下载」，与在线页的「选集」**明显区分**（lead 明确要求）。
+  ///
+  /// # ★★★ task-17 ③：这一段现在多了**删除**能力
+  /// ```text
+  /// 普通态：每行右侧一枚垃圾桶（悬停变红）+ 标题行右侧「管理」入口
+  /// 选择态：每行左侧一个勾选框 + 标题行变成「已选 N 集 · [全选] [删除] [取消]」
+  /// ```
+  /// ⚠️ 删除入口**默认隐藏、悬停才显形**（与 cache_page 的 _HoverDeleteButton 同款观感）：
+  ///    否则每一行右边都挂一个垃圾桶，列表会显得很吵（Owner 说"这里操作要优化"）。
+  ///
+  /// ⚠️ 高度用 [kLocalEpsViewportH] + **内部**滚动：与在线选集视口同一条纪律
+  ///    （外层 Column 里没有可滚体，见 t61 的断言）。
+  List<Widget> _localEpisodesSection() {
+    final eps = widget.localEpisodes;
+    return [
+      // ── 标题行：普通态是「已下载」，选择态变成一整条操作栏 ──
+      if (_localSelectMode && eps.isNotEmpty)
+        _localSelectBar(eps)
+      else
+        Row(
+          children: [
+            const _BlockTitle(text: '已下载'),
+            const Spacer(),
+            if (eps.isNotEmpty)
+              TextButton(
+                onPressed: () => setState(() {
+                  _localSelectMode = true;
+                  _localChecked.clear();
+                }),
+                child: const Text('管理'),
+              ),
+          ],
+        ),
+      Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: AppMetrics.contentPadding,
+        ),
+        child: eps.isEmpty
+            ? _LocalEmptyHint(file: widget.localFile ?? '')
+            : SizedBox(
+                key: _epsViewportKey,
+                height: kLocalEpsViewportH,
+                child: Scrollbar(
+                  controller: _epsCtrl,
+                  child: SingleChildScrollView(
+                    clipBehavior: Clip.antiAlias,
+                    controller: _epsCtrl,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        for (final e in eps)
+                          _LocalEpisodeRow(
+                            key: _localRowKeyFor(e.absolutePath),
+                            ref: e,
+                            active: _activeLocalPath == e.absolutePath,
+                            /*
+                             * ★ task-17 ③：选择态下点击 = **勾选/取消**，不是播放。
+                             *   这是选择模式的通行语义（点行即选），
+                             *   否则用户得精准点到那个小方块上。
+                             */
+                            onTap: _localSelectMode
+                                ? () => setState(() {
+                                      if (!_localChecked
+                                          .remove(e.absolutePath)) {
+                                        _localChecked.add(e.absolutePath);
+                                      }
+                                    })
+                                : (widget.onPlayLocalEpisode == null
+                                    ? null
+                                    : () => widget.onPlayLocalEpisode!(e)),
+                            checked: _localSelectMode
+                                ? _localChecked.contains(e.absolutePath)
+                                : null,
+                            onDelete: _localSelectMode
+                                ? null
+                                : () => unawaited(
+                                      _confirmDeleteLocalEpisode(e),
+                                    ),
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+      ),
+      const SizedBox(height: Sp.x6),
+    ];
+  }
+
+  /// 选择态的操作栏（「已选 N 集 · [全选] [删除] [取消]」）
+  Widget _localSelectBar(List<LocalEpisodeRef> eps) {
+    final n = _localChecked.length;
+    return Padding(
+      padding: const EdgeInsets.symmetric(
+        horizontal: AppMetrics.contentPadding,
+      ),
+      child: Row(
+        children: [
+          Text(
+            '已选 $n 集',
+            style: TextStyle(
+              fontSize: FontSizes.base,
+              fontWeight: FontWeights.semibold,
+              color: Theme.of(context).colorScheme.onSurface,
+            ),
+          ),
+          const Spacer(),
+          TextButton(
+            onPressed: () => setState(() {
+              // ★ 全选/全不选：已经全选了就变成"全不选"（一个按钮两个方向）
+              if (_localChecked.length == eps.length) {
+                _localChecked.clear();
+              } else {
+                _localChecked
+                  ..clear()
+                  ..addAll(eps.map((e) => e.absolutePath));
+              }
+            }),
+            child: Text(_localChecked.length == eps.length ? '全不选' : '全选'),
+          ),
+          TextButton(
+            // ★ 一集都没勾 ⇒ 禁用（不给"点了没反应"的按钮）
+            onPressed: n == 0
+                ? null
+                : () => unawaited(_confirmDeleteLocalSelected()),
+            child: const Text('删除'),
+          ),
+          TextButton(
+            onPressed: () => setState(() {
+              _localSelectMode = false;
+              _localChecked.clear();
+            }),
+            child: const Text('取消'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// ★ task-12 ⑤：本地模式下「正在播的那一集」（判据 = **文件名**）
+  ///
+  /// 在线模式用 widget.currentEpisodeId（播放器报的剧集 id），而本地会话的
+  /// episodeId 恰好就是**文件名**（见 cache_page.buildLocalPlayRequest 的调用点：
+  /// episodeId: req.episode.fileName）⇒ 这里用文件名比对即可。
+  ///
+  /// ⚠️ 不用绝对路径比对是因为播放器报的是 id 而不是路径（MediaSession.onEpisodeChanged 的契约）。
+  String? get _activeLocalPath {
+    final id = widget.currentEpisodeId;
+    if (id == null) return null;
+    for (final e in widget.localEpisodes) {
+      if (e.fileName == id) return e.absolutePath;
+    }
+    return null;
+  }
+
   /// `_buildBody` 里**选集那一段**（含标题）—— 高度由调用方按剩余空间给
   List<Widget> _bodyEpisodes(double epsH) {
+    /*
+     * ★★★ task-12 ⑤（Owner 裁决 (B)）：本地模式**走另一条**。
+     *
+     * ```text
+     * 在线：选集   = "这个源一共更新到第几集"（含没下载、没看过的）
+     * 本地：已下载 = "我在这台机器上下好了哪几集"  ← 用户从这个页面进来的目的就是它
+     * ```
+     * ⚠️ 用"**整段换掉**"而不是在原来的 if 上加条件：
+     *    本地模式里 _episodes 恒为空（不问核心要剧集）⇒ 原来那两条分支
+     *    （选集网格 / 什么都没有）**都不适用**，加条件会得到一片空白。
+     * ⚠️ 标题写「已下载」而不是「选集」—— lead 明确要求与在线页**明显区分**。
+     */
+    if (widget.isLocalFile) return _localEpisodesSection();
     return [
           // ── 二级：剧集 ──
           if (_episodes.isNotEmpty || _epsLoading) ...[
@@ -2475,6 +3691,37 @@ List<String> _metaFallbackBadges(Map<String, dynamic> meta) {
 class _Cover extends StatelessWidget {
   const _Cover({required this.detail, required this.width});
 
+  /// 这个封面是**本地文件**还是**网络 URL**
+  ///
+  /// ⚠️ **不能**只看 `Uri.tryParse(...).hasScheme`（CR-11）：
+  ///   Windows 盘符路径 `C:\Users\…\_sourin-cover.jpg`
+  ///   会被 URI 解析器读成「scheme = `C`」⇒ `hasScheme == true` ⇒ 落进
+  ///   `Image.network` 分支；而主力平台 Windows 上
+  ///   `Image.network('C:\…')` 必然加载失败 ⇒ 本地封面永远退化成
+  ///   首字母占位符（断网时连磁盘上那张图都看不到）。
+  ///
+  /// ★ 正确判据（**先认磁盘路径，再谈 URI**）：
+  ///   ① `http://` / `https://` 开头 ⇒ 网络；
+  ///   ② 盘符 `C:\…` / `C:/…` ⇒ 本地；
+  ///   ③ UNC `\\server\share\…`（两个反斜杠开头）⇒ 本地；
+  ///   ④ POSIX 绝对路径 `/…` ⇒ 本地；
+  ///   ⑤ 其余才交给 `Uri.tryParse`：有 scheme（`file://`、`data:` 等）⇒ 非本地；
+  ///      无 scheme（`cover.jpg` 这类相对名）⇒ 本地。
+  static bool _isLocalCover(String? cover) {
+    if (cover == null || cover.isEmpty) return false;
+    if (cover.startsWith('http://') || cover.startsWith('https://')) return false;
+    // ★ CR-11：盘符（正则只认前缀，`C:\\` 与 `C:/` 两种写法都算）
+    if (_driveLetter.hasMatch(cover)) return true;
+    // UNC：两个反斜杠开头
+    if (cover.startsWith('\\\\')) return true;
+    // POSIX 绝对路径
+    if (cover.startsWith('/')) return true;
+    return Uri.tryParse(cover)?.hasScheme != true;
+  }
+
+  /// 盘符前缀，如 `C:\\` / `d:/`（只判前缀，不判整条路径）
+  static final RegExp _driveLetter = RegExp(r'^[a-zA-Z]:[\\/]');
+
   final MediaDetail detail;
   final double width;
 
@@ -2497,7 +3744,30 @@ class _Cover extends StatelessWidget {
                   alpha: AppColors.posterPlaceholderAlpha,
                 ),
               ),
-              if (detail.cover != null && detail.cover!.isNotEmpty)
+              /*
+               * ★ Owner ３：本地页的封面是**磁盘上那张图**（断网也能看见）
+               * ```dart
+               * Image.network(‘C:\...\_sourin-cover.jpg’)  → 网络协议，离线拿不到。
+               * ```
+               * ⇒ 本地路径走 `Image.file`。判据是「能被解析成本地路径」，
+               *   而不是 provider == local（那只是一个字符串常量）。
+               */
+              if (_isLocalCover(detail.cover))
+                Image.file(
+                  File(detail.cover!),
+                  fit: BoxFit.cover,
+                  cacheWidth: coverDecodeWidth(context, width),
+                  errorBuilder: (_, __, ___) => Center(
+                    child: Text(
+                      detail.title.isEmpty ? '?' : detail.title.characters.first,
+                      style: TextStyle(
+                        fontSize: FontSizes.display * 0.6,
+                        color: colors.onSurfaceVariant.withValues(alpha: 0.5),
+                      ),
+                    ),
+                  ),
+                )
+              else if (detail.cover != null && detail.cover!.isNotEmpty)
                 coverImage(
                   context,
                   url: detail.cover!,
@@ -2557,6 +3827,10 @@ class _Info extends StatelessWidget {
     this.part = _InfoPart.full,
     required this.detail,
     required this.episodeCount,
+    this.localCount = 0,
+    this.localMode = false,
+    this.showActions = true,
+    this.hasLocalFile = false,
     required this.sourceCount,
     required this.providerName,
     required this.isFav,
@@ -2577,6 +3851,46 @@ class _Info extends StatelessWidget {
   final _InfoPart part;
 
   final int episodeCount;
+
+  /// ★ task-12 ⑤：本地模式下的**已下载集数**（0 = 不画那一枚角标）
+  ///
+  /// ⚠️ 与 [episodeCount] 是**两件不同的事**（见 [DetailPage.localEpisodeCount]）：
+  /// 在线「N 集」= 源更新到第几集；本地「已下载 N 集」= 你真正下好了几集。
+  final int localCount;
+
+  /// ★ task-12 ⑤：是否本地文件模式
+  ///
+  /// 只影响两件事：① 画不画那枚「已下载 N 集」角标；② 操作行（收藏/追更/换源/下载）画不画。
+  final bool localMode;
+
+  /// ★ Owner ３：操作行画不画（无网时不显示那几枚按钮）
+  ///
+  /// ★ 在线页恒为 true（那几枚按钮本来就要打网络，——“能不能用”
+  ///   在那里由点了发不出来说）；只有本地页才会变 false。
+  final bool showActions;
+
+  /// ★★★ OPS-9：**这一集在磁盘上已经有可播文件** ⇒ 不画「换源」
+  ///
+  /// # Owner 原话（逐字）
+  /// ```text
+  /// > 这个好像是概率性的,**缓存到本地就不要显示换源按钮了**
+  /// ```
+  /// 换源要干的事是「换一条线路，去**网上**把这一集拉下来播」。
+  /// 而这一集磁盘上已经有了（[DetailPage.localEpisodes] 里就躺着它）⇒
+  /// 换源**无处可落**：点了也只是把播放源换成一个同样要联网的地址。
+  ///
+  /// ⚠️ 与 [showActions] 是**两件不同的事**，别合并：
+  /// ```text
+  /// showActions   = 整条操作行画不画（离线时整行不画）
+  /// hasLocalFile  = 只把那**一枚**「换源」摘掉（收藏/追更/下载照旧）
+  /// ```
+  /// ⇒ 所以**不能**改 [showActions] 来达到这个效果：那会把另外三枚一起藏掉。
+  ///
+  /// ★ 判据本身**复用仓库既有**的「这一集本地文件在不在」口径
+  /// （[DetailPage.currentEpisodeId] + [DetailPage.localEpisodes] 的
+  ///  `e.fileName == currentEpisodeId` —— 与 `_DetailPageState._activeLocalPath`
+  ///  逐字同源），**不**在 UI 层自己拼磁盘路径。
+  final bool hasLocalFile;
 
   /// 线路总数（顶层 + 嵌套，展平后）—— 用于「N 个播放源」角标
   final int sourceCount;
@@ -2728,6 +4042,7 @@ class _Info extends StatelessWidget {
         // ── 徽章 ──
         if (badges.isNotEmpty ||
             episodeCount > 0 ||
+            localCount > 0 ||
             sourceCount > 1 ||
             providerName != null)
           Wrap(
@@ -2736,6 +4051,7 @@ class _Info extends StatelessWidget {
             children: [
               for (final b in badges) _Chip(text: b, brand: true),
               if (episodeCount > 0) _Chip(text: '$episodeCount 集'),
+              if (localCount > 0) _Chip(text: '已下载 $localCount 集', brand: true),
               if (sourceCount > 1) _Chip(text: '$sourceCount 个播放源'),
               /*
                * ★★ 当前站点名（task-32，用户要求）
@@ -2765,6 +4081,7 @@ class _Info extends StatelessWidget {
     );
   }
 
+
   /// ★ 其余「简介 + 操作 + 续播」—— 窄档里**通栏**
   ///
   /// ⚠️ 与 [_head] 之间**没有**额外间距 —— 简介自己带 `Sp.x4` 的顶部间距
@@ -2779,7 +4096,9 @@ class _Info extends StatelessWidget {
         if (detail.description != null && detail.description!.isNotEmpty) ...[
           const SizedBox(height: Sp.x4),
           Text(
-            detail.description!,
+            // ★ task-9 ②：兜底解 HTML 实体（老插件文件没重转的路径，
+            //   见 [_decodeHtmlEntities] 的长注释）。幂等 —— 已解过的文本再解不变。
+            _decodeHtmlEntities(detail.description!),
             maxLines: 2,
             overflow: TextOverflow.ellipsis,
             style: TextStyle(
@@ -2790,6 +4109,22 @@ class _Info extends StatelessWidget {
           ),
         ],
 
+        /*
+         * ★★★ task-12 ⑤：**本地模式下整条操作行不画**
+         *
+         * Owner 原话（逐字）：
+         * > 其他都要跟在线播放页一致，除了**集数的展示**，还有那些**操作按钮不显示**
+         *
+         * 那四枚按钮在本地文件上**每一枚都不成立**：
+         * ```text
+         * 收藏 / 追更  需要 provider:id —— 本地那一对是 (local, 绝对路径)，
+         *              写进去只会往收藏表里塞一条永远打不开的假条目
+         * 换源         需要站内线路列表 —— 本地文件没有线路
+         * 下载         文件已经在盘上了，再下一遍是纯浪费
+         * ```
+         * ⚠️ 所以这里**不是"藏起来"**，而是它们本就无处可落。
+         */
+        if (showActions) ...[
         // ── 操作 ──
         const SizedBox(height: Sp.x4),
         Wrap(
@@ -2875,11 +4210,24 @@ class _Info extends StatelessWidget {
              * 原版的位置是**头部操作行**（与播放/收藏/追更并排），
              * 我们原先放在选集区下方，有剧集时要滚下去才看得到 —— 已挪回这里。
              */
-            OutlinedButton.icon(
-              onPressed: onSwitchSource,
-              icon: const Icon(Icons.swap_horiz, size: 16),
-              label: const Text('换源'),
-            ),
+            /*
+             * ★★★ OPS-9：**这一集磁盘上已经有可播文件 ⇒ 这一枚不画**
+             *
+             * Owner 原话（逐字）：
+             * > 这个好像是概率性的,**缓存到本地就不要显示换源按钮了**
+             *
+             * ⚠️ 只摘**这一枚** —— 收藏 / 追更 / 下载三枚照旧画。
+             *    判据见 [_DetailPageState._hasLocalPlayable]；
+             *    与"整条行画不画"的 [showActions] 是**两件事**，
+             *    别把它并进上面那个 `if (showActions)`（那样三枚会一起消失）。
+             */
+            if (!hasLocalFile) ...[
+              OutlinedButton.icon(
+                onPressed: onSwitchSource,
+                icon: const Icon(Icons.swap_horiz, size: 16),
+                label: const Text('换源'),
+              ),
+            ],
 
             /*
              * ══════════════════════════════════════════════════════════
@@ -2910,6 +4258,7 @@ class _Info extends StatelessWidget {
             ),
           ],
         ),
+        ],
 
         // ── 续播提示 ──
         if (resume != null && resume!.position > 5) ...[
@@ -3149,6 +4498,235 @@ class _DownloadButton extends StatelessWidget {
   }
 }
 
+
+/// ★ task-12 ⑤ + task-17 ③：本地模式的一行「已下载的一集」
+///
+/// 形态参照 download_panel 的「一集一行」（Owner 上一轮要的形态），
+/// 但**不复用**那个私有组件：那是下载队列的行（带暂停/删除/进度），
+/// 而这里只需要"哪一集 + 在播哪个"。
+///
+/// # ★ task-17 ③ 加的两个能力
+/// ```text
+/// checked  != null  ⇒ 选择态：左侧画勾选框（点行即选，见调用点）
+/// onDelete != null  ⇒ 普通态：右侧一枚垃圾桶，**悬停才显形**
+/// ```
+/// ⚠️ 垃圾桶默认透明、悬停变红（与 cache_page 的 _HoverDeleteButton 同款观感）——
+///    常显的话每一行右边都挂一个红图标，列表会很吵。
+class _LocalEpisodeRow extends StatelessWidget {
+  const _LocalEpisodeRow({
+    super.key,
+    required this.ref,
+    required this.active,
+    required this.onTap,
+    this.checked,
+    this.onDelete,
+  });
+
+  final LocalEpisodeRef ref;
+
+  /// 正在播的那一集（高亮）
+  final bool active;
+
+  /// null = 外层没给回调 ⇒ 不可点（不画水波纹，也不给手型光标）
+  final VoidCallback? onTap;
+
+  /// ★ task-17 ③：null = 非选择态（不画勾选框）；true/false = 选择态下的勾选状态
+  final bool? checked;
+
+  /// ★ task-17 ③：null = 不提供单集删除（选择态里就是 null —— 那时删的是"选中的"）
+  final VoidCallback? onDelete;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final row = Padding(
+      padding: const EdgeInsets.symmetric(vertical: Sp.x1, horizontal: Sp.x2),
+      child: Row(
+        children: [
+          // ── 勾选框（仅选择态）──
+          if (checked != null) ...[
+            Icon(
+              checked!
+                  ? Icons.check_box_rounded
+                  : Icons.check_box_outline_blank_rounded,
+              size: 18,
+              color: checked! ? colors.primary : colors.onSurfaceVariant,
+            ),
+            const SizedBox(width: Sp.x2),
+          ],
+          Icon(
+            active ? Icons.play_circle_fill : Icons.movie_outlined,
+            size: 18,
+            color: active ? colors.primary : colors.onSurfaceVariant,
+          ),
+          const SizedBox(width: Sp.x2),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  ref.episodeTitle,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: FontSizes.sm,
+                    fontWeight: active ? FontWeight.w600 : FontWeight.w400,
+                    color: active ? colors.primary : colors.onSurface,
+                  ),
+                ),
+                // ★ Owner ３：大小 · 看过多少（那些“在线播放页有的信息”之一）
+                const SizedBox(height: 2),
+                Row(
+                  children: [
+                    Text(
+                      humanBytes(ref.bytes),
+                      style: TextStyle(
+                        fontSize: FontSizes.cap,
+                        color: colors.onSurfaceVariant,
+                      ),
+                    ),
+                    if (ref.watched) ...[
+                      const SizedBox(width: Sp.x2),
+                      // 已看标记：看过（不是当前在播）
+                      Icon(Icons.check_circle, size: 13, color: colors.primary),
+                      const SizedBox(width: 3),
+                      Text(
+                        ref.watchRatio >= 0.995 ? '已看完' : '已看 ${(ref.watchRatio * 100).round()}%',
+                        style: TextStyle(
+                          fontSize: FontSizes.cap,
+                          color: colors.primary,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+                // 看过一截但没看完 → 一条极薄的底度进度条
+                if (ref.watched && ref.watchRatio < 0.995) ...[
+                  const SizedBox(height: 4),
+                  ClipRRect(
+                    borderRadius: Radii.rSm,
+                    child: LinearProgressIndicator(
+                      value: ref.watchRatio,
+                      minHeight: 3,
+                      backgroundColor: colors.surfaceContainerHighest,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          // ── 单集删除（仅普通态且外层给了回调）──
+          if (onDelete != null) _LocalRowDeleteButton(onTap: onDelete!),
+        ],
+      ),
+    );
+    if (onTap == null) return row;
+    /*
+     * ★★★ 探针抓到的真缺陷（2026-10-09，zz_t12_local_detail_probe_test）：
+     * ```text
+     * No Material widget found.
+     * _InkResponseStateWidget widgets require a Material widget ancestor …
+     *   InkWell ← _LocalEpisodeRow ← Column ← …
+     * ```
+     * # 为什么本页会没有 Material 祖先
+     * ```text
+     * 合并页里详情区是 embedded ⇒ 本页**不画** Scaffold（task-58 的硬要求），
+     * 底色只有一个 ColoredBox ⇒ 树里没有 Material。
+     * 生产路径上 MediaPage 自己那层 Scaffold 恰好提供了它 ——
+     * 所以真机上不炸；但那是**别人的**祖先，本组件不该依赖它。
+     * ```
+     * ⇒ 自己铺一层**透明** Material（只让墨水效果有地方画，不引入底色）。
+     */
+    return Material(
+      type: MaterialType.transparency,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: Radii.rSm,
+        child: row,
+      ),
+    );
+  }
+}
+
+/// ★ task-17 ③：一行的「删除这一集」按钮（悬停才显形）
+///
+/// # 为什么默认透明而不是"默认灰"
+/// ```text
+/// Owner 这一轮说"这里操作要优化" —— 而每一行右边常驻一个垃圾桶正是"不优化"：
+/// 一个 10 集的列表会有 10 个图标抢注意力，而用户 99% 的时间是在**选着播**。
+/// ⇒ 常态透明（占位、不抢视线），鼠标进入该行才浮现。
+/// ```
+/// ⚠️ 用 MouseRegion 而不是 InkWell 的 hover：InkWell 的悬停高亮是**整行**的，
+///    而这里要的是"该行出现一个图标"（cache_page 的 _HoverDeleteButton 同款做法）。
+class _LocalRowDeleteButton extends StatefulWidget {
+  const _LocalRowDeleteButton({required this.onTap});
+
+  final VoidCallback onTap;
+
+  @override
+  State<_LocalRowDeleteButton> createState() => _LocalRowDeleteButtonState();
+}
+
+class _LocalRowDeleteButtonState extends State<_LocalRowDeleteButton> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: Tooltip(
+        message: '删除这一集',
+        child: IconButton(
+          // ★ 与 cache_page 的 28×28 同款：够点，但不抢版面
+          constraints: const BoxConstraints.tightFor(width: 28, height: 28),
+          padding: EdgeInsets.zero,
+          iconSize: 16,
+          onPressed: widget.onTap,
+          icon: Icon(
+            Icons.delete_outline_rounded,
+            color: _hover ? colors.error : Colors.transparent,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// ★ task-12 ⑤：本地模式下**一集都没下**时的中性说明
+///
+/// ⚠️ 刻意**不**复用`_ErrorView'`'：那会画出红叹号 + 「加载失败」，
+///    而"没下载"是**正常状态**，不是故障（真机上"加载失败 + 无法路由"那次的教训：
+///    把正常状态画成故障，用户会以为程序坏了）。
+class _LocalEmptyHint extends StatelessWidget {
+  const _LocalEmptyHint({required this.file});
+
+  final String file;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          '这台机器上还没有下好这一部',
+          style: TextStyle(fontSize: FontSizes.sm, color: colors.onSurfaceVariant),
+        ),
+        const SizedBox(height: Sp.x1),
+        Text(
+          file,
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+          style: TextStyle(fontSize: FontSizes.cap, color: colors.onSurfaceVariant),
+        ),
+      ],
+    );
+  }
+}
 
 /// 选集按钮
 class _EpisodeButton extends StatelessWidget {

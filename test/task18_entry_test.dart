@@ -44,7 +44,6 @@ import 'dart:ffi' show DynamicLibrary;
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 
 import 'package:sourin_spike/core/clip_download.dart';
@@ -55,6 +54,9 @@ import 'package:sourin_spike/core/ui_prefs.dart';
 import 'package:sourin_spike/ui/settings/playback_page.dart';
 import 'package:sourin_spike/ui/settings/touch_gestures_page.dart';
 import 'package:sourin_spike/ui/settings_page.dart';
+import 'package:sourin_spike/ui/widgets/settings_kit.dart';
+import 'package:sourin_spike/ui/app_scaffold.dart';
+import 'package:sourin_spike/ui/app_theme.dart';
 
 const String kTag = '[T18E]';
 void log(String s) => debugPrint('$kTag $s');
@@ -67,6 +69,32 @@ const String _dllRel = r'build\windows\x64\runner\Release\sourin_core.dll';
 
 /// ★ 环境前提：DLL 在不在。不在就**跳过**（不是失败）。
 final bool _dllReady = File(_dllRel).existsSync();
+
+/// ★ 核心库的**平台相关**裸名 —— 必须与 `lib/core/ffi.dart` 的 `_openLibrary()`
+///   （`ffi.dart:222-259`）逐分支一致。那边是 private，测试里拿不到，
+///   所以这里手工镜像一份；**改 ffi.dart 的加载分支必须同步改这里**。
+///
+/// ```text
+/// ffi.dart:225-226  Windows          → sourin_core.dll
+/// ffi.dart:227-229  Android | Linux  → libsourin_core.so
+/// ffi.dart:230-254  macOS | iOS      → 先试包内绝对路径，找不到退回 libsourin_core.dylib
+/// ffi.dart:255-257  其它平台          → UnsupportedError
+/// ```
+///
+/// ★★ 为什么要派生（2026-10-11，CI run 38066756145 的 macOS 唯一 3 红）：
+///   这里原来写死 `contains('sourin_core.dll')` ⇒ macOS 缺件态的降级文案是
+///   `Failed to load dynamic library 'libsourin_core.dylib': dlopen(...)` ⇒
+///   这条断言在 macOS **恒红**、在 Windows 恒绿 —— 同一份门禁在两个平台说不同的话。
+///   而「降级文案里必须带上是**哪个库**没加载」这个意图是**平台无关**的，
+///   所以派生期望库名，而不是删断言、也不是写死单平台名。
+String _expectedCoreLibName() {
+  if (Platform.isWindows) return 'sourin_core.dll';
+  if (Platform.isAndroid || Platform.isLinux) return 'libsourin_core.so';
+  if (Platform.isMacOS || Platform.isIOS) return 'libsourin_core.dylib';
+  throw UnsupportedError(
+      '不支持的平台: ${Platform.operatingSystem}'
+      '（与 lib/core/ffi.dart:255-257 对齐 —— 那边同样会抛）');
+}
 
 /// 把 DLL 按**绝对路径**载进本进程 ⇒ 之后 `ffi.dart` 的裸名 open 命中它
 void _preloadCoreDll() {
@@ -82,11 +110,11 @@ void _preloadCoreDll() {
 /// ★ 必须给 `Material` 祖先 —— `SettingsEntryRow` 的 `InkWell`、
 ///   二级页的 `OutlinedButton`/`Slider` 都要它。
 Widget _host(Widget child, {Size size = const Size(1280, 900)}) {
-  final theme = FTheme.neutral.light.desktop;
+  final theme = AppTheme.themeFor(Brightness.light);
   return MaterialApp(
     debugShowCheckedModeBanner: false,
-    theme: theme.toApproximateMaterialTheme(),
-    builder: (context, c) => FTheme(data: theme, child: c ?? const SizedBox()),
+    theme: theme,
+    builder: (context, c) => AppThemeHost(data: theme, child: c ?? const SizedBox()),
     home: Builder(
       builder: (context) {
         final mq = MediaQuery.of(context);
@@ -266,9 +294,42 @@ void main() {
   final dataDir = Directory('.probe/t18e_data');
 
   setUpAll(() async {
-    // ★ 环境前提不成立 ⇒ 直接返回（用例都带 `skip:`，不会真跑）
+    /*
+     * ★★★ T10（task-35）2026-10-10 改：DLL 不在 = **另一种被测环境**，不再跳过
+     *
+     * ```text
+     * 旧版：`if (!_dllReady) return;` + 每个用例 `skip: !_dllReady`
+     *       ⇒ CI 上（测试步骤跑在构建**之前**、core dll 还没产出）整个文件
+     *         只打印 `+0 ~5: All tests skipped.` 并且 **exit 0** —— 假绿：
+     *         门禁看起来在跑，其实一条断言都没执行过。
+     * 新版：`_dllReady` 只当**环境判别器**。缺件态照样把一级页/二级页真渲染、
+     *       真点击、真断言（缺件态有自己的可断言契约，见 A 组与 B/C 组）。
+     * ```
+     *
+     * ★ 为什么缺件态**先** `UiPrefs.debugResetForTest()` 再返回：
+     *   B/C 两个用例只读 `ClipDownloader` / `PlayerGestures` / `UiPrefs`
+     *   这些**纯 Dart 静态**，DLL 在不在都不影响它们真跑；而它们的确定性
+     *   依赖「偏好从空开始」这条前置。
+     */
     if (!_dllReady) {
-      log('★★ $_dllRel 不存在 ⇒ 跳过（先构建 Windows 版再跑本守卫）');
+      log('★★ T10 缺件态：$_dllRel 不存在 —— **不跳过**，改跑缺件态契约'
+          '（一级页/二级页真渲染 + 版本行降级文案 + B/C 纯静态门禁）');
+      UiPrefs.debugResetForTest();
+      /*
+       * ★★ 两态前置必须**对齐**（否则不是在测产品，是在测仪器）。
+       *
+       * `PlaybackSettingsPage._refreshEnv()`（`playback_page.dart:466-474`）
+       * 走 `_envFields()` ⇒ `ClipDownloader.dataDir()`（`clip_download.dart:531-554`）。
+       * 在位态下它命中 `_dataDirCache`（下面 `debugSetDataDir` 灌进去的）
+       * ⇒ 微任务内就返回；缺件态若不灌，它会去走
+       * `Platform.environment['APPDATA']` + `Directory.create()` —— **真磁盘 I/O**，
+       * 而 widget 测试跑在 fake async 区里，那个 future 永远不会完成
+       * ⇒ 「环境信息」卡片永远停在「读取中…」（实测踩到：
+       * `Expected: <1> Actual: <0>`，而在位态同一条是绿的）。
+       * ⇒ 缺件态也把数据目录指到隔离目录，两态只差
+       *   「核心加载了没有」这**一个**变量。
+       */
+      ClipDownloader.debugSetDataDir(dataDir.absolute.path);
       return;
     }
     _preloadCoreDll();
@@ -369,8 +430,83 @@ void main() {
               '（settings_sub_page.dart:423-431 的 OutlinedButton）');
       expect(_count(find.text('并发数')), 1,
           reason: '$tag| 二级页必须真的画出并发数滑杆那一行');
-      expect(_count(find.byType(Slider)), 1,
-          reason: '$tag| 并发滑杆必须恰有一个');
+      /*
+       * ★ 2026-10-09 改（Owner 第 20 条引入第二个滑杆之后）
+       *
+       * 原断言是 `expect(_count(find.byType(Slider)), 1)`，本意是
+       * 「**片段**并发滑杆恰有一个」（防止误画成两个同类滑杆）。
+       * 第 20 条给这一页**有意**加了第二个「整片下载并发」滑杆 ⇒
+       * 全局计数天然变 2，这条会红 —— 但**红的不是行为，是断言的粒度**。
+       *
+       * 所以改成按语义定位：先锚到「片段下载并发」块，再断言它里面
+       * 恰有一个 Slider，且这个 Slider 的档位就是 ClipDownloader 的档位。
+       * ⇒ 原意（不多不少一个片段并发滑杆）**完整保留**，且不再被
+       *   别的滑杆的增减误伤。
+       */
+      final clipSlider = find.descendant(
+        of: find.ancestor(
+          of: find.text('片段下载并发'),
+          matching: find.byType(SettingsBlock),
+        ),
+        matching: find.byType(Slider),
+      );
+      expect(_count(clipSlider), 1,
+          reason: '$tag| ★ 片段下载并发块里必须恰有一个滑杆'
+              '（页面整体现在有两个滑杆：片段 + 整片，见 Owner 第 20 条）');
+      final clipW = tester.widget<Slider>(clipSlider);
+      expect(clipW.max, 8,
+          reason: '$tag| ★ 这个滑杆必须真的是片段那个（档位 0..8）');
+
+      /*
+       * ★★★ T10（task-35）2026-10-10 新增：**缺件态**下这一页也必须有一条
+       *   真能红的契约 —— 否则 CI 上整个文件是空转（旧版 `+0 ~5 skipped`）。
+       *
+       * 缺件态下 `SourinApi.version` ⇒ `SourinCore.version` ⇒ `_ensureBound()`
+       * 抛 `Invalid argument(s): Failed to load dynamic library
+       * 'sourin_core.dll': The specified module could not be found.
+       * (error code: 126)`，被 `playback_page.dart:433-439` 的 catch 接住
+       * ⇒「版本」那一行的值必须以「读不到（核心未加载：」开头。
+       * 在位态下这一行必须是真版本号 ⇒ 反过来断言它**不**是降级文案。
+       * 两种环境下这条都会红（改降级文案 / 改 catch 分支 / 让 version 不再抛）。
+       *
+       * ★ 值在 `SelectableText` 里（`settings_kit.dart:693-700`），
+       *   不是 `Text` —— 用 `find.text` 找值会永远找不到（假红）。
+       *
+       * ★★ 为什么必须先 `_scrollTo`：这一页是高于 900px 的
+       *   `CustomScrollView`（`settings_sub_page.dart`），「环境信息」卡片在底部
+       *   ⇒ 不滚的话它根本没被建出来。第一次插进去时就是
+       *   这么假红的（实测 `Expected: <1> Actual: <0>`）—— 工具问题，
+       *   不是产品问题。先滚到它可见再读。
+       */
+      final verRow = find.ancestor(
+        of: find.text('版本'),
+        matching: find.byType(SettingsInfoRow),
+      );
+      await _scrollTo(tester, verRow);
+      expect(_count(verRow), 1,
+          reason: '$tag| ★ 二级页「环境信息」里必须有「版本」那一行');
+      final verText = tester
+          .widget<SelectableText>(find.descendant(
+            of: verRow,
+            matching: find.byType(SelectableText),
+          ))
+          .data!;
+      log('$tag| 版本行 = $verText');
+      if (!_dllReady) {
+        expect(verText, startsWith('读不到（核心未加载：'),
+            reason: '$tag| ★★ 缺件态：核心版本必须**如实降级**成'
+                '「读不到（核心未加载：…）」，不许编一个版本号出来');
+        // ★ 期望库名**派生**自平台分支（见 `_expectedCoreLibName` 的注释）：
+        //   Windows `sourin_core.dll` / macOS `libsourin_core.dylib` /
+        //   Android|Linux `libsourin_core.so` —— 写死单平台名 = 另一平台恒红。
+        final wantLib = _expectedCoreLibName();
+        expect(verText, contains(wantLib),
+            reason: '$tag| ★ 降级文案里必须带上是哪个库没加载'
+                '（本平台 ${Platform.operatingSystem} ⇒ 期望含「$wantLib」）');
+      } else {
+        expect(verText, isNot(startsWith('读不到')),
+            reason: '$tag| ★★ 在位态：核心已加载，版本行不该再是降级文案');
+      }
 
       // 返回一级页（闭环：入口可达 ⇒ 也能回来）
       await _tapAndSettle(tester, find.text('返回设置'), '$tag|back1');
@@ -435,7 +571,7 @@ void main() {
           reason: '$tag| 返回后必须回到一级页');
 
       await _teardownTree(tester, tag);
-    }, timeout: kTimeout, skip: !_dllReady);
+    }, timeout: kTimeout);
   }
 
   // ═══════════════════════════════════════════════════════════════════
@@ -456,8 +592,21 @@ void main() {
     expect(_count(find.text('播放与下载')), 1, reason: 'B| 二级页标题');
     expect(_count(find.text('返回设置')), 1, reason: 'B| 返回入口');
 
-    final sliderF = find.byType(Slider);
-    expect(_count(sliderF), 1, reason: 'B| 并发滑杆必须恰有一个');
+    /*
+     * ★ 2026-10-09 改（Owner 第 20 条）：定位方式与 A 组同一个理由 ——
+     *   这一页现在有**两个**滑杆（片段下载并发 / 整片下载并发），
+     *   所以按语义锚到「片段下载并发」块里那一个，而不是数全局个数。
+     *   本用例要验的是**片段**滑杆的档位与落盘，锚点必须精确到它。
+     */
+    final sliderF = find.descendant(
+      of: find.ancestor(
+        of: find.text('片段下载并发'),
+        matching: find.byType(SettingsBlock),
+      ),
+      matching: find.byType(Slider),
+    );
+    expect(_count(sliderF), 1,
+        reason: 'B| ★ 片段下载并发块里必须恰有一个滑杆');
     await _scrollTo(tester, sliderF);
 
     final sl = tester.widget<Slider>(sliderF);
@@ -503,7 +652,7 @@ void main() {
     expect(ClipDownloader.concurrency, 8, reason: 'B| 静态字段自己夹到 0..8');
 
     await _teardownTree(tester, 'B');
-  }, timeout: kTimeout, skip: !_dllReady);
+  }, timeout: kTimeout);
 
   // ═══════════════════════════════════════════════════════════════════
   //  C. 二级页「播放手势」：标题陷阱 + 档位齐 + 双击步长真的落盘
@@ -572,7 +721,7 @@ void main() {
         reason: 'C| ★ 关掉之后档位整段收起（证明这条 if 分支是真渲染的）');
 
     await _teardownTree(tester, 'C');
-  }, timeout: kTimeout, skip: !_dllReady);
+  }, timeout: kTimeout);
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -645,4 +794,129 @@ void main() {
 // [T18E] B| 真拖拽 -300px：8 -> 2（偏好 = 2）
 // [T18E] C| 点「30 秒」后 doubleTapSeconds=30  偏好=30
 // [T18E] C| 关掉双击开关后 doubleTapEnabled=false  「30 秒」= 0  偏好=0
+// ```
+
+// ═══════════════════════════════════════════════════════════════════════
+//  T10（task-35）两态门禁改造记录 —— 2026-10-10
+// ═══════════════════════════════════════════════════════════════════════
+//
+// # 改了什么（为什么必须改）
+// ```text
+// CI 的测试步骤跑在**构建之前** ⇒ `sourin_core.dll` 还不存在 ⇒ `_dllReady=false`
+// ⇒ 旧版本文件打印 `+0 ~5: All tests skipped.` 且 **exit 0** —— 门禁看着在跑，
+//   实际一条断言都没执行（假绿）。
+// 现在：`_dllReady` 只当**环境判别器**。两个环境都真渲染、真点击、真断言。
+// ```
+//
+// # 两态原始读数（同一台机器，只切 dll 在不在）
+// ```text
+// 在位态（dll 在）：      flutter test test/task18_entry_test.dart ⇒ 00:11 +5: All tests passed!  exit=0
+// 缺件态（改名 .hold）：  同命令                                ⇒ 00:12 +5: All tests passed!  exit=0
+// 缺件态版本行读数：
+//   [T18E] A.desktop|  版本行 = 读不到（核心未加载：Invalid argument(s): Failed to load dynamic library 'sourin_core.dll': The specified module could not be found.
+//   [T18E] A.touchOnly| 版本行 = （同上）
+//   [T18E] A.tv|        版本行 = （同上）
+// ```
+//
+// # 缺件态为什么能读到「版本」行（踩过的坑，别踩第二遍）
+// ```text
+// `PlaybackSettingsPage._refreshEnv()`（playback_page.dart:466-474）走
+// `_envFields()` ⇒ `ClipDownloader.dataDir()`（clip_download.dart:531-554）。
+// 在位态它命中 setUpAll 灌进去的 `_dataDirCache`，微任务内就返回；
+// 缺件态若**不**灌，它会去走 `Platform.environment['APPDATA']` +
+// `Directory.create()` —— 真磁盘 I/O，而 widget 测试跑在 fake async 区里，
+// 那个 future 永远不会完成 ⇒ 卡片永远停在「读取中…」⇒ 断言 `Expected: <1> Actual: <0>`
+// （实测踩到，且在位态同一条是绿的 ⇒ 两态前置必须对齐）。
+// 修法：缺件态也 `ClipDownloader.debugSetDataDir(dataDir.absolute.path)`。
+// 另一个坑：这一页高于 900px，「环境信息」卡片在底部 ⇒ 读之前必须先 `_scrollTo`。
+// ```
+//
+// # 阳性对照（改产品代码 ⇒ 必红 ⇒ 逐字节还原）
+// ```text
+// 口径：把 dll 改名 ⇒ 跑缺件态 ⇒ 改**一处**源码 ⇒ 跑 ⇒ 原字节写回 ⇒ 核 sha256[:16]
+// | # | 变异点 | 冻结 sha16 → 还原后 | 红在哪行 | Expected/Actual |
+// |---|---|---|---|---|
+// | PC1 | `playback_page.dart` 降级文案 `version = '读不到（…'` 前加 `X` | E203F5864E0474AE → 同 ✔ | :470 | a string starting with '读不到（核心未加载：' / 'X读不到（… |
+// | PC2 | `settings_page.dart:2657` 空态文案加 `X` | （另一文件，见 t53s 记录） | t53s:734 | 1 / 0 |
+// | PC3 | `settings_page.dart:2546` `kCoreVersionFallbackLabel` 加 `X` | （同上） | t53s:540 | '核心未加载 · 架构与设备信息' / '核心未X加载 · …' |
+// ⇒ PC1 三个端形态**同时**红（A.desktop / A.touchOnly / A.tv），exit=1。
+// ⇒ 还原后 `lib/ui/settings/playback_page.dart` = e203f5864e0474ae（与冻结值逐字节相同）。
+// ```
+//
+// # 本文件仍然**测不到**的（诚实标注，免得读者高估覆盖）
+// ```text
+// · 缺件态与在位态的差异**只有一处**：核心库加载与否。三端形态（DeviceKind）
+//   在缺件态下也只影响布局矩形，不影响入口是否存在（与在位态同一条限制）。
+// · 「版本」行只断言**前缀**（缺件态）与「不是降级文案」（在位态），
+//   不断言版本号具体值 —— 版本号由 Rust 侧决定，钉死它会变成"改版本就红"。
+// · 缺件态下 `SourinApi.start()` 从未被调用 ⇒ 任何依赖已启动核心的契约
+//   （provider 列表、插件、直播分组）在本文件里**缺件态一律没测到**。
+// · 首屏 `CircularProgressIndicator` 只在**在位态**为 1（缺件态 `loadAll()`
+//   很快失败 ⇒ 首帧可能已经是 0）⇒ 该断言未放进两态公共路径。
+// ```
+//
+// ═══════════════════════════════════════════════════════════════════════
+//  T16（task-42）平台耦合修复记录 —— 2026-10-11
+// ═══════════════════════════════════════════════════════════════════════
+//
+// # 根因（CI run 38066756145，macOS job 114255854635：2805 passed / 3 failed）
+// ```text
+// 3 条红**全部**在本文件，是同一个用例的三条设备形态腿
+// （A.desktop / A.touchOnly / A.tv），Windows job 同 run 全绿 ⇒ 纯平台耦合缺陷。
+//   :470  expect(verText, startsWith('读不到（核心未加载：'))   ⇒ macOS 通过
+//   :473  expect(verText, contains('sourin_core.dll'))       ⇒ macOS 恒红
+// macOS 缺件态实际读数（CI 日志逐字）：
+//   Failed to load dynamic library 'libsourin_core.dylib': dlopen(libsourin_core.dylib, 0x0001): tried: ...
+// `Failed to load dynamic library` 里抛出的库名**是平台相关的**
+// （lib/core/ffi.dart:226 裸名 sourin_core.dll / :254 裸名 libsourin_core.dylib），
+// 而断言把 Windows 名写死了 ⇒ 同一份门禁在两个平台说不同的话。
+// ```
+//
+// # 改法：期望库名从平台分支**派生**，而不是删断言 / 放宽成恒真
+// ```text
+// :90-97  String _expectedCoreLibName()  —— 它对齐的是 lib/core/ffi.dart:222-258
+//         `_openLibrary()` 的平台分支（不是本文件 :68 的 _dllRel）：
+//           Windows         → 'sourin_core.dll'
+//           Android | Linux → 'libsourin_core.so'
+//           macOS  | iOS    → 'libsourin_core.dylib'
+//           其它            → throw UnsupportedError（与 ffi.dart:255-257 同口径）
+// :502-505  final wantLib = _expectedCoreLibName();
+//           expect(verText, contains(wantLib), reason: '…必须带上是哪个库没加载…');
+// ⇒ 断言的**意图**（降级文案必须点名是哪个库没加载）在两平台都保留，且都是真断言。
+// ```
+//
+// # 改后本机两态（Windows；dll 在位 / 改名 .hold 缺件）
+// ```text
+// 在位态：flutter test test/task18_entry_test.dart   ⇒ 00:11 +5: All tests passed!  exit=0
+// 缺件态：同命令（dll 改名 .hold）                   ⇒ 00:11 +5: All tests passed!  exit=0
+// 缺件态版本行读数（Windows 平台派生结果）：
+//   [T18E] A.desktop|   版本行 = 读不到（核心未加载：Invalid argument(s): Failed to load dynamic library 'sourin_core.dll': The specified module could not be found.
+//   [T18E] A.touchOnly| 版本行 = （同上）
+//   [T18E] A.tv|        版本行 = （同上）
+// analyze：flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings ⇒ exit=0
+// ```
+//
+// # 阳性对照（两轮，各自**逐字节**还原；口径同上面 T10 的 PC 表）
+// ```text
+// | # | 变异点 | 冻结 sha16 → 变异 → 还原 | exit | 红在哪 | Expected / Actual |
+// |---|---|---|---|---|---|
+// | PC-A | 本文件 :91 期望库名 'sourin_core.dll' → 'libsourin_core.dylib'（模拟「在 Windows 上写死 macOS 名」） | 19C5E9B4B36865B3 → D211073ECBC6DBE9 → 19C5E9B4B36865B3 ✔ | 1 | :503 | contains 'libsourin_core.dylib' / Actual 里是 'sourin_core.dll' |
+// | PC-B | lib/core/ffi.dart:226 产品裸名 'sourin_core.dll' → '_t16_no_such_core.dll'（把降级文案里的库名抹掉） | E142E3354E518FC0 → 51D262F4A48D6E01 → E142E3354E518FC0 ✔ | 1 | :503 | contains 'sourin_core.dll' / Actual 里是 '_t16_no_such_core.dll' |
+// ⇒ 两轮都是**三条腿同时红**（A.desktop / A.touchOnly / A.tv），尾部 `00:12 +2 -3: Some tests failed.`
+//   （+2 = B、C 两条不依赖核心的用例；-3 = A 组三条腿）。
+// ⇒ PC-A 证明「期望库名写错平台」必红；PC-B 证明「产品不再说出库名」必红
+//   ⇒ 这条断言不是恒真，它真的在看着产品代码。
+// 原始输出：.probe/ops/_t16_pcA_t18.txt / _t16_pcB_t18.txt（各 148 行）
+// 报告：.probe/ops/macos-task18-fix.md
+// ```
+//
+// # 本文件仍然**测不到**的（诚实标注）
+// ```text
+// · 本机是 Windows ⇒ `_expectedCoreLibName()` 的 macOS / Android / Linux 分支
+//   在本机**从未被执行过**（只被 analyze 检查了语法）。它们正确的依据是
+//   「与 lib/core/ffi.dart:222-258 逐分支人工比对」，不是本机跑出来的证据；
+//   真正在 macOS 上执行它的证据只能来自 CI。
+// · macOS 缺件态的库名 `libsourin_core.dylib` 来自 CI 日志文本，本机无法复现。
+// · 本函数是**复制**不是**引用**：若 ffi.dart 将来改裸名（例如 macOS 只走包内
+//   绝对路径），它不会自动跟着变。兜底判据是 PC-B —— 产品一旦不再说出库名就红。
 // ```

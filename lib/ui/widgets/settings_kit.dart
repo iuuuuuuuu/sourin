@@ -260,7 +260,28 @@ class SettingsBlock extends StatelessWidget {
                 borderRadius: Radii.rLg,
                 border: Border.all(color: colors.outlineVariant),
               ),
-              child: inner,
+              /*
+               * ★★ 2026-10-10：内框自带 `Material`（**不**改变视觉）
+               *
+               * 区块里不少控件是 `ListTile` 家族（`SwitchListTile` /
+               * `CheckboxListTile` …），它们把底色与**涟漪画在最近的
+               * `Material` 祖先**上。改动前这个 `Container`（一个
+               * `DecoratedBox`）就是那个祖先之外更近的一层有底色的盒子
+               * ⇒ Flutter 直接在 debug 下断言：
+               * ```text
+               * ListTile background color or ink splashes may be invisible.
+               * ```
+               * 在 release 下不报，但**点开关时看不到任何涟漪反馈** ——
+               * 用户以为没点到。
+               *
+               * ⇒ 这里补一层 `Material`（透明，不画任何底色）作为
+               *    `ListTile` 的绘制面。外层 `Container` 的底色与边框
+               *    一像素不变，只是涟漪终于有地方画了。
+               */
+              child: Material(
+                type: MaterialType.transparency,
+                child: inner,
+              ),
             ),
         ],
       ),
@@ -435,6 +456,205 @@ class SettingsGesturePill extends StatelessWidget {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+//  空态
+// ═══════════════════════════════════════════════════════════════════════
+
+/// 空态引导（图标 + 标题 + 一句说明）
+///
+/// # 为什么要共用一个零件
+///
+/// 「搜索页没搜过」「搜索页搜了没找到」「插件列表空」「备份页空」
+/// 以前各写各的：图标尺寸 40/48/56 混用、说明文字有的有有的没有、
+/// 垂直留白从 24 到 96 不等 —— 同一件事在不同页面长得不一样，
+/// 用户会以为那是不同的功能，而不是同一件事的不同结果。
+///
+/// ⇒ 三层节奏（图标 → 标题 → 说明）由**这一处**定，
+///    调用方只给内容，视觉自然一致。
+class EmptyState extends StatelessWidget {
+  const EmptyState({
+    super.key,
+    required this.icon,
+    required this.title,
+    this.hint,
+    this.iconSize = 52,
+    this.padding = const EdgeInsets.symmetric(vertical: Sp.x16),
+  });
+
+  final IconData icon;
+  final String title;
+
+  /// 一句可选的引导文案（不说清楚"下一步做什么"的空态等于没有）
+  final String? hint;
+
+  final double iconSize;
+  final EdgeInsets padding;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    // ★ 图标衬在一个圆底上：空态大片留白里，孤零零一个线性图标
+    //   很容易被当成"图片没加载出来"。
+    return Padding(
+      padding: padding,
+      child: Column(
+        children: [
+          Container(
+            width: iconSize * 2,
+            height: iconSize * 2,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              // ★ 0.06 在深色底上几乎看不见（实测：无头截图里这一枚圆
+              //   的边缘密度低到几乎测不出，用户会以为"图标没加载出来"）。
+              //   0.10 是「看得清、又不抢标题」的值。
+              color: colors.onSurface.withValues(alpha: 0.10),
+              border: Border.all(
+                color: colors.onSurface.withValues(alpha: 0.08),
+              ),
+            ),
+            child: Icon(
+              icon,
+              size: iconSize,
+              color: colors.onSurfaceVariant,
+            ),
+          ),
+          const SizedBox(height: Sp.x5),
+          Text(
+            title,
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: FontSizes.base,
+              fontWeight: FontWeight.w600,
+              color: colors.onSurface,
+            ),
+          ),
+          if (hint != null) ...[
+            const SizedBox(height: Sp.x2),
+            ConstrainedBox(
+              // ★ 空态说明不该铺满超宽屏（桌面 1440+ 时一行拉到 1200px
+              //   读起来很费力）；限宽 + 居中让两行就收住。
+              constraints: const BoxConstraints(maxWidth: 420),
+              child: Text(
+                hint!,
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: FontSizes.sm,
+                  height: 1.5,
+                  color: colors.onSurfaceVariant,
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  对话框外壳
+// ═══════════════════════════════════════════════════════════════════════
+
+/// 设置区对话框的**统一外壳**
+///
+/// # 为什么要有这个零件（2026-10-10）
+///
+/// 插件编辑、插件导入、声明式源编辑、B 站导入……每个都是各自写的
+/// `AlertDialog`，但标题字号、标题与正文的间距、正文最大宽度、
+/// 底部按钮的排布各不相同：
+/// ```text
+/// 插件编辑    标题 20px，正文宽 560
+/// 插件导入    标题 20px，正文宽 560
+/// 其它         标题 18px，正文宽 480
+/// ```
+/// ⇒ 用户在设置区点开三个不同对话框，会以为进了三个不同的功能。
+///
+/// ⇒ 这里把「标题 / 副标题 / 正文宽 / 底部按钮」四件事定成一处，
+///    调用方只提供内容。
+///
+/// ⚠️ 用 `AlertDialog` 而不是 `Dialog`：后者要自己实现标题栏、
+///    分隔线与按钮区，而且 `MediaQuery` 边距得全手写 ——
+///    `AlertDialog` 已经在做这些，且是 Material 的标准形态
+///    （TV 方向键、Esc 关闭、无障碍语义都是它自带的）。
+class SettingsDialog extends StatelessWidget {
+  const SettingsDialog({
+    super.key,
+    required this.title,
+    required this.child,
+    this.subtitle,
+    this.actions = const [],
+    this.maxContentWidth = 560,
+  });
+
+  final String title;
+
+  /// 标题下的一行说明（一句话说清"这个对话框在干嘛"）
+  final String? subtitle;
+
+  /// 正文
+  final Widget child;
+
+  /// 底部按钮（从右往左排：确认 → 取消 → 其它）
+  final List<Widget> actions;
+
+  /// 正文的**最大**宽度（不是固定宽 —— 窄屏下要能收缩）
+  final double maxContentWidth;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return AlertDialog(
+      // ★ 与本页其它标题同号（`SettingsSubPage` 的 28px 大标题用 `xl`，
+      //   对话框比页面矮一档，用 `lg` = 20px）
+      title: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            title,
+            style: TextStyle(
+              fontSize: FontSizes.lg,
+              fontWeight: FontWeight.w600,
+              color: colors.onSurface,
+            ),
+          ),
+          if (subtitle != null) ...[
+            const SizedBox(height: Sp.x1),
+            Text(
+              subtitle!,
+              style: TextStyle(
+                fontSize: FontSizes.cap,
+                color: colors.onSurfaceVariant,
+              ),
+            ),
+          ],
+        ],
+      ),
+      /*
+       * ★ 内容宽：上限 maxContentWidth，窄屏由 `ConstrainedBox` 收缩
+       *
+       * ⚠️ 两个坑都踩过：
+       * ```text
+       * ① 不能写成固定 `SizedBox(width: 560)`：手机上可用宽可能只有
+       *    ~330，硬写 560 会溢出（旧代码就是这么写的）。
+       * ② 但也不能只给 `ConstrainedBox` ��上限**而不给下限**：
+       *    `AlertDialog` 给 content 的是**松约束**，`ConstrainedBox`
+       *    在松约束下不会自己撑开（它只限制上限）⇒ 正文宽度塌成 0。
+       *    ⇒ 还要 `width: double.infinity` 让它吃满可用宽（上限仍受约束）。
+       * ```
+       */
+      content: ConstrainedBox(
+        constraints: BoxConstraints(maxWidth: maxContentWidth),
+        child: SizedBox(width: double.infinity, child: child),
+      ),
+      // 按钮统一右对齐（Material 默认就是 end，但显式写出来，
+      // 免得将来有人改成 `OverflowBar` 时两处不一致）
+      actionsAlignment: MainAxisAlignment.end,
+      actions: actions,
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 //  信息行 / 入口行
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -511,73 +731,183 @@ class SettingsInfoRow extends StatelessWidget {
 ///    `Material` 才能画出涟漪。设置页外层是 `Scaffold`（自带 `Material`），
 ///    但二级页可能不是，所以这里**自带一层 `Material`** 保底
 ///    （`type: MaterialType.transparency` 不改变视觉）。
+///
+/// # ★★ 2026-10-10：左侧图标
+///
+/// 改前所有入口行长一个样：只有标题+副标题，十几行排下来
+/// 用户只能**逐行读**才知道哪行是哪行。
+/// ⇒ 加一枚**单色描边图标**：一眼扫过去按"形状"分组，不用读字。
+/// 图标用 `onSurfaceVariant`（不是 `primary`）—— 它只是定位点，
+/// 一屏十几枚彩色图标会抢掉标题的注意力。
 class SettingsEntryRow extends StatelessWidget {
   const SettingsEntryRow({
     super.key,
     required this.title,
     required this.subtitle,
     required this.onTap,
+    this.icon,
   });
 
   final String title;
   final String subtitle;
   final VoidCallback onTap;
 
+  /// 左侧图标（不给 = 不画，保持既有调用点零影响）
+  final IconData? icon;
+
+  /// 图标衬底圆片的尺寸（与 `icon` 成对出现）
+  static const double _iconPlate = 34;
+
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
     // ★ 内容带（t509）：左右那两层已去掉（理由同 `SettingsBlock`）。
     return Padding(
-      padding: const EdgeInsets.only(bottom: Sp.x3),
+      padding: const EdgeInsets.only(bottom: Sp.x2),
       child: Material(
         type: MaterialType.transparency,
         child: InkWell(
           onTap: onTap,
           borderRadius: Radii.rLg,
-          child: Container(
-            padding: const EdgeInsets.symmetric(
-              horizontal: Sp.x4,
-              vertical: Sp.x3,
-            ),
-            decoration: BoxDecoration(
-              color: colors.surfaceContainerHighest.withValues(alpha: 0.3),
-              borderRadius: Radii.rLg,
-              border: Border.all(color: colors.outlineVariant),
-            ),
-            child: Row(
-              children: [
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        title,
-                        style: TextStyle(
-                          fontSize: FontSizes.base,
-                          fontWeight: FontWeights.regular,
-                          color: colors.onSurface,
+          /*
+           * ★★★ 业主反馈 ⑧：焦点高亮**不能**画成整行填充
+           *
+           * # 缺陷现场（业主原话）
+           *
+           * > 设置页,点击这个js插件,返回之后,这里也还是选中状态
+           *
+           * 逐像素量业主截图（1444x805 浅色）：
+           *   页面底色            238,240,246   (= LightTokens.bgBase)
+           *   「JS 插件」那一行   220,222,226   ← 他说的「还是选中」
+           *   下面「Emby」那一行  240,242,247   ← 正常
+           *
+           * 行的填充 = surfaceContainerHighest(#F5F7FA) x 0.3 叠在底色上：
+           *   245,247,250 x 0.3 + 238,240,246 x 0.7 = 240,242,247  ✓ 正常行
+           * 再叠一层**纯黑 12%**（墨层画在填充**下面** —— 见 material.dart
+           * 的 _RenderInkFeatures.paint，它先画 ink 再 super.paint(child)）：
+           *   238,240,246 x 0.88 = 209.4,211.2,216.5
+           *   245,247,250 x 0.3 + 209.4,211.2,216.5 x 0.7 = 220.1,221.9,226.5
+           *   ^^^ 逐通道命中 220,222,226 ✓
+           *
+           * 那层「纯黑 12%」就是 **ThemeData.focusColor**
+           * （theme_data.dart:467  focusColor ??= 浅色 black 12%）。
+           * ⇒ 业主看到的**不是** selected 标志位（本组件根本没有 selected
+           *   参数，settings_page.dart 里也搜不到任何选中态字段），
+           *   而是 **InkWell 的焦点高亮填充**。
+           *
+           * # 为什么返回之后它还在
+           *
+           * 焦点落在这一行的 InkWell 上（遥控方向键 / 桌面 Tab 都会落到）。
+           * 二级页 pop 回来时焦点**回到原来那个 FocusNode**（Flutter 的
+           * focus 恢复语义）⇒ 高亮重新亮起；而指针没动过（鼠标还停在原行）
+           * ⇒ 用户看到的正是「点进去、返回，这行还是灰的」。
+           *
+           * # 为什么是「填充」而不是「焦点环」
+           *
+           * 本项目对「焦点可见」的既有约定是**描边环**，不是整块填色：
+           *   episode_strip.dart:1012  AnimatedContainer(foregroundDecoration:
+           *       Border.all(color: _focused ? primary : transparent,
+           *                  width: _kFocusRingWidth = 2))
+           *   poster_card.dart:184      ringed = focused || (_focused && needsFocusRing)
+           * 而整块填色与「悬停遮罩」在视觉上**无法区分** —— 这正是业主
+           * 把它读成「选中状态」的原因（一行灰底看着就像被选中了）。
+           *
+           * ⇒ 这里把 InkWell 的填充类 overlay 全部显式置 null（透明），
+           *   焦点态改用与上面两处**同一个零件**（primary 描边环）。
+           *   ⚠️ 环的显隐由 highlightMode 决定，见 _SettingsFocusRing。
+           *
+           * ⚠️ **只关 focusColor 这一个。** 另外三个是合法反馈，
+           *   不能顺手一起关 —— 那是超出缺陷范围的改动：
+           *
+           *   · hoverColor（theme_data.dart:468 浅色 black 4%）：
+           *     指针**真的停在行上**才亮，指针一走就灭，是「这里可以点」
+           *     的正常提示。而且它**不持久** ⇒ 与本次缺陷无关。
+           *     判据（不是推测）：业主量到的 220,222,226 是**纯焦点**色。
+           *     若 hover 也叠着，会是 214,216,221（两轮自检实测）。
+           *   · highlightColor / splashColor：按压反馈，松手即散，
+           *     返回后不会留下任何东西（实测 ⑥b = 220,222,226，纯焦点）。
+           *     关掉它们 = 这一行「点了没反应」，那是**新**缺陷。
+           *
+           * ⇒ focusColor 是这三者里唯一一个**会自己回来并一直挂着**的层
+           *   （焦点在 pop 之后被 Flutter 恢复到原来那个节点）。
+           */
+          focusColor: Colors.transparent,
+          /*
+           * ★ Builder 不是装饰：它把 context 挪到 InkWell 的 Focus **下面**。
+           *
+           * `InkWell` 内部是 `Focus(child: MouseRegion(child: ... child:
+           * widget.child))`（ink_well.dart:1386-1421）⇒ 在它的 child 子树里
+           * `Focus.of(ctx)` 拿到的**正是 InkWell 自己那个 FocusNode**，
+           * 也就是焦点高亮原来挂着的那个节点。
+           *
+           * ⚠️ 不能在本方法顶部（InkWell 外面）取 —— 那里 `Focus.of` 拿到的是
+           *   祖先的焦点作用域，永远不是这一行的。
+           */
+          child: Builder(
+            builder: (ctx) => _SettingsFocusRing(
+              node: Focus.of(ctx),
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: Sp.x4,
+                  vertical: Sp.x3,
+                ),
+                decoration: BoxDecoration(
+                  color: colors.surfaceContainerHighest.withValues(alpha: 0.3),
+                  borderRadius: Radii.rLg,
+                  border: Border.all(color: colors.outlineVariant),
+                ),
+                child: Row(
+                  children: [
+                    if (icon != null) ...[
+                      Container(
+                        width: _iconPlate,
+                        height: _iconPlate,
+                        decoration: BoxDecoration(
+                          color: colors.onSurface.withValues(alpha: 0.06),
+                          borderRadius: BorderRadius.circular(_iconPlate / 3),
                         ),
-                      ),
-                      const SizedBox(height: 2),
-                      Text(
-                        subtitle,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontSize: FontSizes.cap,
+                        child: Icon(
+                          icon,
+                          size: 18,
                           color: colors.onSurfaceVariant,
                         ),
                       ),
+                      const SizedBox(width: Sp.x3),
                     ],
-                  ),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            title,
+                            style: TextStyle(
+                              fontSize: FontSizes.base,
+                              fontWeight: FontWeights.regular,
+                              color: colors.onSurface,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            subtitle,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: FontSizes.cap,
+                              color: colors.onSurfaceVariant,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: Sp.x2),
+                    Icon(
+                      Icons.chevron_right,
+                      size: 20,
+                      color: colors.onSurfaceVariant,
+                    ),
+                  ],
                 ),
-                const SizedBox(width: Sp.x2),
-                Icon(
-                  Icons.chevron_right,
-                  size: 20,
-                  color: colors.onSurfaceVariant,
-                ),
-              ],
+              ),
             ),
           ),
         ),
@@ -586,9 +916,121 @@ class SettingsEntryRow extends StatelessWidget {
   }
 }
 
-/// 一级页上的**分组小标题**（"播放与观看" / "数据与外观"）
+/// 入口行的**焦点环** —— 焦点可见性的唯一来源（替代 InkWell 的填充类高亮）
 ///
-/// 5 个入口行平铺会显得散，分两组让用户扫起来有结构。
+/// # 为什么需要它（而不是直接用 InkWell 的 focusColor）
+///
+/// `ThemeData.focusColor` 在浅色下是**纯黑 12%**，InkWell 把它画成
+/// **整行填充** —— 而整行灰底与「悬停遮罩」在视觉上无法区分，
+/// 业主正是把它读成「选中状态」（反馈 ⑧）。详见 `SettingsEntryRow`
+/// 里那段注释（含逐像素推导）。
+///
+/// ⇒ 填充全部关掉，焦点态改成**描边环**，与本项目既有约定一致：
+/// ```text
+/// episode_strip.dart:1012  foregroundDecoration + Border.all(primary, 2)
+/// poster_card.dart:184     ringed = focused || (_focused && needsFocusRing)
+/// ```
+///
+/// # ⚠️ 为什么环不能无条件画（必须看 highlightMode）
+///
+/// 焦点**存在**与焦点**该被看见**是两件事。桌面鼠标用户点一下行，
+/// 焦点会留在那一行上（InkWell 的 Focus 节点），若此时画环，
+/// 用户会看到「我没用键盘，怎么有个蓝框」—— 那是新的视觉噪声。
+/// Flutter 已经把这件事算好了：`FocusManager.instance.highlightMode`
+/// 在「最近一次输入是键盘/遥控」时才是 `traditional`，鼠标/触摸之后
+/// 会切到 `touch`（见 `FocusHighlightStrategy.automatic` 的语义）。
+///
+/// ⚠️ 所以这里读的是 **highlightMode**，不是 `Device.needsFocusRing`：
+///   后者只说明「这台设备是 TV」，而 TV 上用户也可能插着鼠标。
+///   按输入方式判，比按设备判更准（`InkWell` 自己也是这么判的，
+///   见 `ink_well.dart:1142 _shouldShowFocus`）。
+///
+/// ⚠️ 必须 `addHighlightModeListener` 并在 dispose 里摘掉：
+///   highlightMode 变化**不会**重建这棵树（它不是 InheritedWidget），
+///   不监听就会出现「按了 Tab 环不出现 / 动了鼠标环不消失」。
+class _SettingsFocusRing extends StatefulWidget {
+  const _SettingsFocusRing({required this.node, required this.child});
+
+  /// 被观察的焦点节点（= 那个 InkWell 的 Focus）
+  final FocusNode node;
+
+  final Widget child;
+
+  @override
+  State<_SettingsFocusRing> createState() => _SettingsFocusRingState();
+}
+
+class _SettingsFocusRingState extends State<_SettingsFocusRing> {
+  /// 与 episode_strip.dart:128 的 `_kFocusRingWidth` 同一档
+  static const double _ringWidth = 2;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.node.addListener(_onFocusChanged);
+    FocusManager.instance.addHighlightModeListener(_onHighlightModeChanged);
+  }
+
+  @override
+  void didUpdateWidget(_SettingsFocusRing old) {
+    super.didUpdateWidget(old);
+    if (old.node != widget.node) {
+      old.node.removeListener(_onFocusChanged);
+      widget.node.addListener(_onFocusChanged);
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.node.removeListener(_onFocusChanged);
+    FocusManager.instance.removeHighlightModeListener(_onHighlightModeChanged);
+    super.dispose();
+  }
+
+  void _onFocusChanged() {
+    if (mounted) setState(() {});
+  }
+
+  void _onHighlightModeChanged(FocusHighlightMode mode) {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final show = widget.node.hasFocus &&
+        FocusManager.instance.highlightMode == FocusHighlightMode.traditional;
+    return Container(
+      // ⚠️ 环画在**前景**：行自己那层 outlineVariant 描边仍在背景层，
+      //   两层叠在一起时环必须在上，否则被行描边盖掉半圈。
+      foregroundDecoration: BoxDecoration(
+        borderRadius: Radii.rLg,
+        border: Border.all(
+          color: show ? colors.primary : Colors.transparent,
+          width: _ringWidth,
+        ),
+      ),
+      child: widget.child,
+    );
+  }
+}
+
+/// 一级页上的**分组小标题**（"内容源与插件" / "播放与观看" / "外观" …）
+///
+/// # 为什么要重做这个零件（2026-10-10）
+///
+/// 改前它是一行 12px 的灰字。问题不是小，是**认不出它是分组**：
+/// ```text
+/// ┌ 局域网遥控 ────────────────────┐   ← 20px 大标题（区块）
+/// ┌ JS 插件                   ›   ┐   ← 16px 标题（入口行）
+///   内容源与插件                     ← 12px 灰字
+/// ```
+/// 三种字号、三种角色排在一起，用户读到「JS 插件」根本不知道
+/// 自己在一个组里、上一个组叫什么。
+///
+/// ⇒ 现在：左侧一枚 3px 竖条 + 组名 + 一条延伸到右边的细分割线。
+///   竖条与「区块标题」那枚 4px 竖条是**同一个零件**（见 `SearchPage`），
+///   一页之内两处标题共用一个视觉信号 ⇒ 读起来是同一套系统。
 class SettingsGroupLabel extends StatelessWidget {
   const SettingsGroupLabel({super.key, required this.text});
 
@@ -599,15 +1041,36 @@ class SettingsGroupLabel extends StatelessWidget {
     final colors = Theme.of(context).colorScheme;
     // ★ 内容带（t509）：左右那两层已去掉（理由同 `SettingsBlock`）。
     return Padding(
-      padding: const EdgeInsets.only(top: Sp.x3, bottom: Sp.x2),
-      child: Text(
-        text,
-        style: TextStyle(
-          fontSize: FontSizes.cap,
-          fontWeight: FontWeight.w600,
-          letterSpacing: 0.6,
-          color: colors.onSurfaceVariant,
-        ),
+      // ★ top 给足：分组标签的职责就是把上一组"关"在外面，
+      //   Sp.x3(12) 太贴，读起来像上一块的第三行。
+      padding: const EdgeInsets.only(top: Sp.x5, bottom: Sp.x3),
+      child: Row(
+        children: [
+          Container(
+            width: 3,
+            height: 14,
+            decoration: BoxDecoration(
+              color: colors.primary,
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+          const SizedBox(width: Sp.x2),
+          Text(
+            text,
+            style: TextStyle(
+              fontSize: FontSizes.cap,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 0.8,
+              color: colors.onSurface.withValues(alpha: 0.85),
+            ),
+          ),
+          const SizedBox(width: Sp.x3),
+          // ★ 余下的空间画一条细线：把"到这一行为止是同一组"说成视觉事实，
+          //   而不是靠留白暗示。
+          Expanded(
+            child: Container(height: 1, color: colors.outlineVariant),
+          ),
+        ],
       ),
     );
   }

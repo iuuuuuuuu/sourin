@@ -52,11 +52,12 @@ import 'dart:io';
 // material_ui 已经把 rendering 的公开类型带出来了（analyzer 实测：
 // 单独 import 会报 unnecessary_import）。
 import 'package:flutter_test/flutter_test.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 
 import 'package:sourin_spike/core/ui_prefs.dart';
 import 'package:sourin_spike/ui/widgets/player_settings_sheet.dart';
+import 'package:sourin_spike/ui/app_scaffold.dart';
+import 'package:sourin_spike/ui/app_theme.dart';
 
 // ═══════════════════════════════════════════════════════════════════════
 //  注释剥离器（逐字照抄 player_capability_test.dart:61-110）
@@ -118,10 +119,10 @@ String _codeOf(String path) => _stripComments(File(path).readAsStringSync());
 
 /// 把控件套进真实的壳（与 player_capability_test.dart:120-127 同构）
 Widget _host(Widget child) {
-  final theme = FTheme.neutral.dark.desktop;
+  final theme = AppTheme.themeFor(Brightness.dark);
   return MaterialApp(
-    theme: theme.toApproximateMaterialTheme(),
-    builder: (_, c) => FTheme(data: theme, child: c ?? const SizedBox()),
+    theme: theme,
+    builder: (_, c) => AppThemeHost(data: theme, child: c ?? const SizedBox()),
     home: Scaffold(body: Stack(children: [child])),
   );
 }
@@ -265,6 +266,12 @@ Future<void> _tapChip(WidgetTester t, String label) async {
   await t.tap(f);
   await t.pumpAndSettle();
 }
+
+/// 从 `0.5, 0.75, 1.0` 这样的片段里解析出数值列表（判据用）
+List<double> _nums(String s) => RegExp(r'\d+\.\d+|\d+')
+    .allMatches(s)
+    .map((m) => double.parse(m.group(0)!))
+    .toList();
 
 void main() {
   late String sheetSrc;
@@ -466,16 +473,53 @@ void main() {
   // ═══════════════════════════════════════════════════════════════════
 
   group('6. 档位一致性', () {
-    test('★ 面板 7 档 = 控制条 PopupMenuItem 7 档（逐字）', () {
+    test('★ 倍速只有一份档位表，两个入口看到的是同一组值', () {
+      /*
+       * ★ 2026-10-10（Owner 第 12 条底栏瘦身）：控制条的倍速入口从
+       *   `PopupMenuItem(value: x, child: Text(...))` 那一摞改成了
+       *   `player_bottom_bar.dart` 里的 `kRates` + `rateOptions()`，
+       *   而面板侧原本就有一份 `_rateOptions`。
+       *   ⇒ 「两份档位表必须逐字相同」这个隐患还在（甚至更值得守），
+       *     但不能再按「控制条里有几个 PopupMenuItem」来判 ——
+       *     那测的是实现形状，不是「两个入口一致」这件事本身。
+       *
+       *   判据改成：控制条那份 `kRates` 与面板那份 `_rateOptions` **逐档相同**。
+       *   把任一份改掉（例如加一档 1.75），这条立刻红。
+       */
+      const expected = ['0.5', '0.75', '1.0', '1.25', '1.5', '2.0', '3.0'];
+
+      // ① 面板侧那份（形状未变）
       expect(
         sheetSrc.contains(
             'const _rateOptions = <double>[0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0];'),
         isTrue,
         reason: '★ 档位表必须与控制条逐字一致（两个入口看到的必须是同一组值）',
       );
-      for (final v in const ['0.5', '0.75', '1.0', '1.25', '1.5', '2.0', '3.0']) {
-        expect(pageSrc.contains('PopupMenuItem(value: $v, child: Text('),
-            isTrue, reason: '★ 控制条里没有这一档：$v');
+
+      // ② 控制条侧那份：逐档核对 `kRates`
+      final bar = File('lib/ui/player/player_bottom_bar.dart').readAsStringSync();
+      final kRates = RegExp(r'kRates\s*=\s*<double>\[([^\]]*)\]')
+          .firstMatch(bar)
+          ?.group(1);
+      expect(kRates, isNotNull, reason: '★ 控制条里必须还有一份 kRates 档位表');
+
+      // ⚠️ 必须**逐档相等**，不能只「contains 每一档」——
+      //   只查包含的话，给控制条多插一档 1.75 照样绿，而那正是这条要防的
+      //   「两个入口看到的不是同一组值」（实测踩过：红度实验里加了一档没红）。
+      final barRates = _nums(kRates!);
+      final sheetRates = _nums(RegExp(r'_rateOptions\s*=\s*<double>\[([^\]]*)\]')
+              .firstMatch(sheetSrc)
+              ?.group(1) ??
+          '');
+      expect(barRates, isNotEmpty, reason: '★ 控制条档位表解析不出数值');
+      expect(sheetRates, isNotEmpty, reason: '★ 面板档位表解析不出数值');
+      expect(barRates, sheetRates,
+          reason: '★★ 两个入口的倍速档位必须**逐档相同** —— '
+              '控制条 $barRates vs 面板 $sheetRates');
+      // 逐档点名（可读性：失败时直接告诉你是哪一档不见了）
+      for (final v in expected) {
+        expect(sheetRates, contains(double.parse(v)),
+            reason: '★ 面板里没有这一档：$v');
       }
     });
 

@@ -67,3 +67,20 @@ tags:
   # `--run-skipped --tags native-media` 跑。
   native-media:
     skip: "默认跳过：加载 libmpv 会让 flutter_tester 偶发 native 崩溃（见 dart_test.yaml 顶部）。手动跑：flutter test test/ --run-skipped --tags native-media --concurrency=1"
+  # ★ 依赖**隔离的 USERPROFILE** 才能跑的测试
+  #
+  # DownloadDir 的默认兜底根目录 = $USERPROFILE\Videos\源影。
+  # Platform.environment 在 flutter_test 里只读 ⇒ 隔离只能由**进程环境**提供
+  # （见该文件头）。CI 跑的是裸 `flutter test`，没有这个变量，
+  # 前提自检会红并把整个 job 带下去 ⇒ 默认跳过。
+  # 手动跑见该文件头。
+  needs-isolated-userprofile:
+    skip: "默认跳过：需要以隔离的 USERPROFILE 运行，否则会在用户真实 Videos\\源影 里建目录。手动跑见该测试文件头"
+
+  # ★ 依赖 SOURIN_SHOT_DIR 才能跑的**截图自查工具**
+  #
+  # 这些文件渲染真页面并把 PNG 落盘，像素好不好看靠人读图。
+  # 缺省目录是系统临时目录/sourin-shots —— 断言本该拦住的"写到仓库里"
+  # 已经发生了，所以默认跳过，让 agent 显式指定输出目录。
+  needs-shot-dir:
+    skip: "默认跳过：截图自查工具，需要 SOURIN_SHOT_DIR 指定输出目录。手动跑见该测试文件头"

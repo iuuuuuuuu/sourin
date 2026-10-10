@@ -125,3 +125,10 @@ key.properties
 *credential*
 *.session
 
+
+# 无头 UI 截图的落盘目录（测试产物，不入库；由 SOURIN_SHOT_DIR 指定）
+.shots-webdav/
+
+# flutter tooling scratch
+.flutter_tool_state
+/undefined/

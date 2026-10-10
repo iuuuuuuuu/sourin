@@ -81,7 +81,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:media_kit/media_kit.dart';
 
-import 'package:sourin_spike/ui/app_theme.dart';
+import 'package:sourin_spike/ui/theme_bridge.dart';
 import 'package:sourin_spike/ui/media_page.dart';
 import 'package:sourin_spike/ui/remote_bridge.dart';
 import 'package:sourin_spike/ui/tokens.dart';
@@ -103,7 +103,7 @@ Future<void> _pump(WidgetTester t, {required Size size}) async {
 
   await t.pumpWidget(
     MaterialApp(
-      theme: buildLightMaterialTheme(AppTheme.themeFor(Brightness.light)),
+      theme: buildAppTheme(Brightness.light),
       home: const MediaPage(
         provider: 'cycani',
         id: '3862',
@@ -229,6 +229,12 @@ void _prepareLibmpvFixture() {
 /// 的代码照常执行，所以必须紧跟 `return`）。
 bool _requireLibmpv() {
   if (_libmpv != null) return true;
+  if (Platform.environment['SOURIN_REQUIRE_LIBMPV'] == '1') {
+    fail(
+      'libmpv 夹具缺失：${File(_libmpvCandidates().first).absolute.path} 不存在'
+      '（被 SOURIN_REQUIRE_LIBMPV=1 要求为硬失败）',
+    );
+  }
   markTestSkipped('libmpv 夹具缺失 ⇒ 播放器建不起来，本条无从断言。'
       '手动跑：先 `flutter build windows`（或 macOS 上 `flutter build macos`）'
       '；候选路径 = ${_libmpvCandidates()}');
@@ -467,7 +473,7 @@ void main() {
       await _pump(t, size: const Size(1280, 800));
 
       final sc = t.widget<Scaffold>(find.byType(Scaffold).first);
-      final surface = buildLightMaterialTheme(AppTheme.themeFor(Brightness.light))
+      final surface = buildAppTheme(Brightness.light)
           .colorScheme
           .surface;
 

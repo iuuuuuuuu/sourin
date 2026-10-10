@@ -1,5 +1,8 @@
 // ══════════════════════════════════════════════════════════════════════
-//  底栏 5 个 tab 必须在**任何宽度**下都完整可见（2026-09-30）
+//  底栏 tab 必须在**任何宽度**下都完整可见（2026-09-30）
+//  ★ 2026-10-09 task-3：底栏从 5 项变成 6 项（新增「已缓存」）⇒
+//     本文件的 tab 数、逐字文案、以及「桌面 1280 仍 118/项、合计 590」
+//     这条**外观锚点**都必须同步。锚点已按新布局重算（见用例④）。
 // ══════════════════════════════════════════════════════════════════════
 //
 // # 这条测试要挡住的缺陷（Owner 手机实测）
@@ -36,12 +39,13 @@
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:forui/forui.dart';
 import 'package:liquid_glass_widgets/liquid_glass_widgets.dart';
 import 'package:material_ui/material_ui.dart';
 
 import 'package:sourin_spike/core/device.dart';
 import 'package:sourin_spike/shell.dart';
+import 'package:sourin_spike/ui/app_scaffold.dart';
+import 'package:sourin_spike/ui/app_theme.dart';
 import 'package:sourin_spike/ui/spatial_nav.dart' show BottomBarMarker;
 
 /// 与生产外壳一致的包装（照抄 `test/keepalive_test.dart:81-91`）
@@ -50,10 +54,10 @@ import 'package:sourin_spike/ui/spatial_nav.dart' show BottomBarMarker;
 ///    `Null check operator used on a null value`，整页被换成 ErrorWidget
 ///    —— 而断言只会以"找不到 XX"失败，真因只在 stderr。
 Widget _appWith({required Widget home}) {
-  final theme = FTheme.neutral.dark.desktop;
+  final theme = AppTheme.themeFor(Brightness.dark);
   return MaterialApp(
-    theme: theme.toApproximateMaterialTheme(),
-    builder: (context, child) => FTheme(
+    theme: theme,
+    builder: (context, child) => AppThemeHost(
       data: theme,
       child: child ?? const SizedBox(),
     ),
@@ -97,8 +101,11 @@ Future<void> _pumpShellAt(WidgetTester tester, Size logical,
   _claim(tester);
 }
 
-/// 底栏 5 个标签的**逐字**文案（`AppTab` 的 label，也是交付契约）
-const _tabLabels = <String>['发现', '直播', '追更', '搜索', '设置'];
+/// 底栏标签的**逐字**文案（`AppTab` 的 label，也是交付契约）
+///
+/// ★ task-3 ⑲：与 `lib/shell.dart` 的 `enum AppTab` **逐项同序**。
+///   加 tab 时这张表必须同步 —— 否则下面的「面板内」判据会漏掉新入口。
+const _tabLabels = <String>['发现', '直播', '追更', '搜索', '已缓存', '设置'];
 
 /// 底栏真正可见的那块玻璃面板
 ///
@@ -135,8 +142,8 @@ void _dump(WidgetTester tester, String tag) {
 }
 
 void main() {
-  group('★ 底栏 5 个 tab 在任何宽度下都要完整可见', () {
-    testWidgets('① 手机宽度 411.43：5 个入口全在面板内（Owner 缺陷现场）',
+  group('★ 底栏 6 个 tab 在任何宽度下都要完整可见', () {
+    testWidgets('① 手机宽度 411.43：6 个入口全在面板内（Owner 缺陷现场）',
         (tester) async {
       // 1080 / 2.625 = 411.43 逻辑宽、2400 / 2.625 = 914.29 逻辑高
       // —— Owner 手机（emulator-5556, 1080x2400 @420dpi）的真实 metrics
@@ -203,7 +210,7 @@ void main() {
       expect(pillRect.left, greaterThanOrEqualTo(panel.left - 0.5));
     });
 
-    testWidgets('④ 阴性对照：桌面 1280 宽仍是 118/项、合计 590（不许回归）',
+    testWidgets('④ 阴性对照：桌面 1280 宽仍是 118/项、合计 708（不许回归）',
         (tester) async {
       await _pumpShellAt(tester, const Size(1280, 800));
       _dump(tester, 'desktop-1280');
@@ -217,8 +224,11 @@ void main() {
           reason: '桌面宽屏下 tab 宽度必须还是 118（已验收过的外观）');
 
       final panel = tester.getRect(_panel().first);
-      expect(panel.width, closeTo(590.0, 0.01),
-          reason: '桌面宽屏下面板宽度必须还是 5×118 = 590');
+      // ★ task-3 ⑲：6×118 = 708 —— 118/项这个**舒适上限**没变（用例⑤ 的 TV
+      //   分支仍是 152，见下），变的只是**项数**；合计 590 → 708 是项数带来的
+      //   必然结果，不是几何回归。
+      expect(panel.width, closeTo(708.0, 0.01),
+          reason: '桌面宽屏下面板宽度必须还是 6×118 = 708');
     });
 
     testWidgets('⑤ 阳性对照：TV 960 宽仍是 152/项（Device.isTv 分支没被破坏）',

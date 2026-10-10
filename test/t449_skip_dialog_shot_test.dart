@@ -33,10 +33,11 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 
 import 'package:sourin_spike/ui/widgets/skip_marker_dialog.dart';
+import 'package:sourin_spike/ui/app_scaffold.dart';
+import 'package:sourin_spike/ui/app_theme.dart';
 
 /// 输出目录
 ///
@@ -46,10 +47,10 @@ import 'package:sourin_spike/ui/widgets/skip_marker_dialog.dart';
 const _outDir = 'build/probe-shots';
 
 Widget _host(Widget child) {
-  final theme = FTheme.neutral.light.desktop;
+  final theme = AppTheme.themeFor(Brightness.light);
   return MaterialApp(
-    theme: theme.toApproximateMaterialTheme(),
-    builder: (context, c) => FTheme(data: theme, child: c ?? const SizedBox()),
+    theme: theme,
+    builder: (context, c) => AppThemeHost(data: theme, child: c ?? const SizedBox()),
     home: child,
   );
 }
@@ -107,7 +108,8 @@ void main() {
 
     final dir = Directory(_outDir);
     if (!dir.existsSync()) dir.createSync(recursive: true);
-    final f = File('$_outDir\\449_dialog.png');
+    final f = File(<String>[_outDir, '449_dialog.png']
+        .join(Platform.pathSeparator));
     f.writeAsBytesSync(png);
     // ignore: avoid_print
     print('T449|saved ${f.path}  ${png.length} B');

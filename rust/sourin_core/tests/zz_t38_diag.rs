@@ -31,6 +31,9 @@ use sourin_core::plugins::JsPluginProvider;
 use sourin_core::provider::MediaProvider;
 
 /// 用户真实插件存储（只读取源）
+mod support;
+use support::real_creds_required_echo;
+
 const REAL_STORE: &str = r"C:\Users\iuuuuuuuu\AppData\Roaming\app.sourin.player\plugins\.data";
 
 fn probe_dir() -> std::path::PathBuf {
@@ -66,8 +69,13 @@ fn load_cycani(dir: std::path::PathBuf) -> JsPluginProvider {
         .with_data_dir(dir)
 }
 
+#[ignore = "走真实网络 + 真实第三方账号重登链路：站点随时可能改接口/弹验证码，结果不稳定（且需要开发机上的真实凭据）。手动跑：cargo test -- --ignored --nocapture"]
 #[tokio::test]
 async fn t38_diagnose_auto_login_chain() {
+    // ★ 需要开发机上的真实凭据；本机没有就跳过（见 tests/support/mod.rs）
+    if let Some(_why) = real_creds_required_echo("t38_diagnose_auto_login_chain") {
+        return;
+    }
     let dir = seed_probe_store("cycani");
     let p = load_cycani(dir.clone());
 
@@ -148,8 +156,13 @@ async fn t38_diagnose_auto_login_chain() {
     }
 }
 
+#[ignore = "走真实网络 + 真实第三方账号重登链路：站点随时可能改接口/弹验证码，结果不稳定（且需要开发机上的真实凭据）。手动跑：cargo test -- --ignored --nocapture"]
 #[tokio::test]
 async fn t38_session_state_verdict() {
+    // ★ 需要开发机上的真实凭据；本机没有就跳过（见 tests/support/mod.rs）
+    if let Some(_why) = real_creds_required_echo("t38_session_state_verdict") {
+        return;
+    }
     /*
      * ★ 这一个直接回答"用户看到的到底是哪个状态"。
      *

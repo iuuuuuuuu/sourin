@@ -38,10 +38,11 @@
 import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:sourin_spike/core/models.dart' as models;
 import 'package:sourin_spike/ui/browse_page.dart';
+import 'package:sourin_spike/ui/app_scaffold.dart';
+import 'package:sourin_spike/ui/app_theme.dart';
 
 // ══════════════════════════════════════════════════════════════════════════
 // 夹具
@@ -57,11 +58,11 @@ const double kHeaderMin = 48 + 20;
 const double kHeaderMax = kHeaderMin + 32;
 
 Widget host(Widget child) {
-  final theme = FTheme.neutral.light.desktop;
+  final theme = AppTheme.themeFor(Brightness.light);
   return MaterialApp(
     debugShowCheckedModeBanner: false,
-    theme: theme.toApproximateMaterialTheme(),
-    builder: (_, c) => FTheme(data: theme, child: c ?? const SizedBox()),
+    theme: theme,
+    builder: (_, c) => AppThemeHost(data: theme, child: c ?? const SizedBox()),
     home: MediaQuery(
       data: const MediaQueryData(size: kViewport),
       child: Directionality(
@@ -727,11 +728,11 @@ void main() {
 
     testWidgets('D1 吸顶状态下点返回按钮，仍然真的能 pop（不是只剩个画）',
         (t) async {
-      final theme = FTheme.neutral.light.desktop;
+      final theme = AppTheme.themeFor(Brightness.light);
       await t.pumpWidget(MaterialApp(
         debugShowCheckedModeBanner: false,
-        theme: theme.toApproximateMaterialTheme(),
-        builder: (_, c) => FTheme(data: theme, child: c ?? const SizedBox()),
+        theme: theme,
+        builder: (_, c) => AppThemeHost(data: theme, child: c ?? const SizedBox()),
         home: MediaQuery(
           data: const MediaQueryData(size: kViewport),
           child: Directionality(

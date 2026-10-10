@@ -104,7 +104,6 @@ import 'dart:ui' as ui;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/scheduler.dart';
-import 'package:forui/forui.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:window_manager/window_manager.dart';
@@ -115,6 +114,8 @@ import 'package:sourin_spike/core/ui_prefs.dart';
 import 'package:sourin_spike/ui/app_theme.dart';
 import 'package:sourin_spike/ui/player_page.dart';
 import 'package:sourin_spike/ui/widgets/danmaku_overlay.dart';
+import 'ui/app_scaffold.dart';
+import 'ui/app_theme.dart';
 
 // ======================================================================
 //  常量 / 全局
@@ -511,7 +512,7 @@ Future<void> main() async {
   }
 
   final theme = AppTheme.themeFor(Brightness.light);
-  final materialTheme = buildLightMaterialTheme(theme);
+  final materialTheme = AppTheme.themeFor(Brightness.light);
 
   runApp(RepaintBoundary(
     key: _rootKey,
@@ -526,9 +527,9 @@ Future<void> main() async {
        * （`Material.of`）⇒ **整页被换成 ErrorWidget 而不崩给你看**，
        * 断言只会以「找不到 XX」失败，真因只在 stderr。
        */
-      builder: (context, child) => FTheme(
-        data: theme,
-        child: FScaffold(
+      builder: (context, child) => AppThemeHost(
+        data: materialTheme,
+        child: AppScaffold(
           child: Material(
             type: MaterialType.transparency,
             child: child!,

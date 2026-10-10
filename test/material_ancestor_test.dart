@@ -45,8 +45,9 @@
 
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
+import 'package:sourin_spike/ui/app_scaffold.dart';
+import 'package:sourin_spike/ui/app_theme.dart';
 
 class _Button extends StatelessWidget {
   const _Button({required this.node, required this.onTap});
@@ -64,7 +65,7 @@ class _Button extends StatelessWidget {
 
 void main() {
   testWidgets('★ FScaffold 的 child 里必须有 Material 祖先（修法本身）', (t) async {
-    final theme = FTheme.neutral.dark.desktop;
+    final theme = AppTheme.themeFor(Brightness.dark);
     final node = FocusNode();
     addTearDown(node.dispose);
 
@@ -77,12 +78,12 @@ void main() {
     BuildContext? innerCtx;
 
     await t.pumpWidget(MaterialApp(
-      theme: theme.toApproximateMaterialTheme(),
-      builder: (context, child) => FTheme(
+      theme: theme,
+      builder: (context, child) => AppThemeHost(
         data: theme,
-        child: FToaster(child: child ?? const SizedBox()),
+        child: child ?? const SizedBox(),
       ),
-      home: FScaffold(
+      home: AppScaffold(
         // ★ 这一层就是修复本身（见 shell.dart 的 `Material(type: transparency)`）
         child: Material(
           type: MaterialType.transparency,
@@ -123,16 +124,16 @@ void main() {
      *    在测试里表现为 testWidgets 报错而不是可捕获的 throw，
      *    断言它会得到脆弱的用例。只断言**根因条件**（maybeOf 为 null）。
      */
-    final theme = FTheme.neutral.dark.desktop;
+    final theme = AppTheme.themeFor(Brightness.dark);
     BuildContext? innerCtx;
 
     await t.pumpWidget(MaterialApp(
-      theme: theme.toApproximateMaterialTheme(),
-      builder: (context, child) => FTheme(
+      theme: theme,
+      builder: (context, child) => AppThemeHost(
         data: theme,
-        child: FToaster(child: child ?? const SizedBox()),
+        child: child ?? const SizedBox(),
       ),
-      home: FScaffold(
+      home: AppScaffold(
         // ⚠️ 故意**不套** Material —— 复现 bug 的前置条件
         child: Builder(
           builder: (ctx) {

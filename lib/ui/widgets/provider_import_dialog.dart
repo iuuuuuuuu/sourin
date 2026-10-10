@@ -41,6 +41,7 @@ import 'package:material_ui/material_ui.dart';
 import '../../core/sourin_api.dart';
 import 'overlay_motion.dart';
 import '../tokens.dart';
+import 'settings_kit.dart';
 
 /// 接入方式
 enum ImportMode {
@@ -435,7 +436,7 @@ class _ProviderImportDialogState extends State<ProviderImportDialog> {
   Widget build(BuildContext context) {
     /*
      * ⚠️ 这里用 `Theme.of(context).colorScheme`（Material）而不是
-     *    `FTheme.of(context).colors`（forui）—— 两种角色名不同：
+     *    `AppPalette.of(context)`（forui）—— 两种角色名不同：
      *    ```text
      *    Material : onSurface / onSurfaceVariant / outlineVariant
      *    forui    : foreground / mutedForeground / border
@@ -445,18 +446,24 @@ class _ProviderImportDialogState extends State<ProviderImportDialog> {
      */
     final colors = Theme.of(context).colorScheme;
 
-    return AlertDialog(
-      title: Text(_titleText),
-      content: SizedBox(
-        width: 560,
-        child: SingleChildScrollView(
-          clipBehavior: Clip.antiAlias,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              // ── 接入方式切换（编辑态隐藏，原版 :2751）──
-              /*
+    return SettingsDialog(
+      title: _titleText,
+      // ★ 2026-10-10：统一外壳，顺手把「这个对话框在干嘛」说清楚
+      subtitle: _isEditing
+          ? '保存后立即生效'
+          : switch (_mode) {
+              ImportMode.declarative => '粘贴一段 JSON 配置，导入成一个内容源',
+              ImportMode.http => '填一个 HTTP 插件地址，它会跑在独立进程里',
+              ImportMode.tvbox => '粘贴 TVBox 配置，自动展开成多个内容源',
+            },
+      child: SingleChildScrollView(
+        clipBehavior: Clip.antiAlias,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // ── 接入方式切换（编辑态隐藏，原版 :2751）──
+            /*
                * ⚠️ 编辑态对 TVBox 源**不可达**（task-5）
                *
                * TVBox 源没有可回填的原始配置 —— `ProviderImportSeed.fromJson`
@@ -465,51 +472,50 @@ class _ProviderImportDialogState extends State<ProviderImportDialog> {
                * 所以下面这个 else 分支的文案里不需要 TVBox 分支；
                * 真要加编辑能力，得先让后端能吐出原始 sites 片段。
                */
-              if (!_isEditing) ...[
-                _modeTabs(colors),
-                const SizedBox(height: Sp.x3),
-              ] else
-                Padding(
-                  padding: const EdgeInsets.only(bottom: Sp.x3),
-                  child: Text(
-                    '正在编辑${_mode == ImportMode.http ? "HTTP 插件" : "声明式源"}，'
-                    '保存后立即生效',
-                    style: TextStyle(
-                      fontSize: FontSizes.cap,
-                      color: colors.onSurfaceVariant,
-                    ),
+            if (!_isEditing) ...[
+              _modeTabs(colors),
+              const SizedBox(height: Sp.x3),
+            ] else
+              Padding(
+                padding: const EdgeInsets.only(bottom: Sp.x3),
+                child: Text(
+                  '正在编辑${_mode == ImportMode.http ? "HTTP 插件" : "声明式源"}，'
+                  '保存后立即生效',
+                  style: TextStyle(
+                    fontSize: FontSizes.cap,
+                    color: colors.onSurfaceVariant,
                   ),
                 ),
+              ),
 
-              // ── 表单 ──
-              if (_mode == ImportMode.declarative)
-                ..._declarativeForm(colors)
-              else if (_mode == ImportMode.http)
-                ..._httpForm(colors)
+            // ── 表单 ──
+            if (_mode == ImportMode.declarative)
+              ..._declarativeForm(colors)
+            else if (_mode == ImportMode.http)
+              ..._httpForm(colors)
+            else
+              ..._tvboxForm(colors),
+
+            // ── TVBox 导入结果（导入成功后留在弹窗里给用户看明细）──
+            //
+            // 多仓是**另一种结局**：后端一个源都没产出，所以必须用
+            // 另一块面板（列出子仓供选择），不能显示"成功 0 个"了事。
+            if (_tvboxResult != null) ...[
+              const SizedBox(height: Sp.x3),
+              if (_tvboxResult!.multiRepo)
+                _tvboxMultiRepoPanel(colors, _tvboxResult!)
               else
-                ..._tvboxForm(colors),
-
-              // ── TVBox 导入结果（导入成功后留在弹窗里给用户看明细）──
-              //
-              // 多仓是**另一种结局**：后端一个源都没产出，所以必须用
-              // 另一块面板（列出子仓供选择），不能显示"成功 0 个"了事。
-              if (_tvboxResult != null) ...[
-                const SizedBox(height: Sp.x3),
-                if (_tvboxResult!.multiRepo)
-                  _tvboxMultiRepoPanel(colors, _tvboxResult!)
-                else
-                  _tvboxResultPanel(colors, _tvboxResult!),
-              ],
-
-              if (_error.isNotEmpty) ...[
-                const SizedBox(height: Sp.x3),
-                Text(
-                  _error,
-                  style: TextStyle(fontSize: FontSizes.sm, color: colors.error),
-                ),
-              ],
+                _tvboxResultPanel(colors, _tvboxResult!),
             ],
-          ),
+
+            if (_error.isNotEmpty) ...[
+              const SizedBox(height: Sp.x3),
+              Text(
+                _error,
+                style: TextStyle(fontSize: FontSizes.sm, color: colors.error),
+              ),
+            ],
+          ],
         ),
       ),
       actions: [

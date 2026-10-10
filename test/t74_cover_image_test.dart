@@ -368,7 +368,10 @@ void main() {
 
     test('D1 四个调用点都走 coverImage，且都不再直接 Image.network', () {
       for (final p in sites) {
-        final s = _src(p);
+        // ★ 同 D3：剥掉注释再看。判据问的是「这些页面**代码里**还有没有
+        //   直接 Image.network」，而 detail_page.dart 的注释里恰好写了那个
+        //   字面量（用来解释为什么本地封面不能用它）。
+        final s = _stripComments(_src(p));
         expect(s.contains('coverImage('), isTrue, reason: '$p 没有用 coverImage');
         expect(s.contains('Image.network('), isFalse,
             reason: '$p 还在直接 Image.network ⇒ cacheWidth 又丢了');
@@ -387,7 +390,12 @@ void main() {
       final hits = <String>[];
       for (final e in Directory('lib').listSync(recursive: true)) {
         if (e is! File || !e.path.endsWith('.dart')) continue;
-        if (e.readAsStringSync().contains('Image.network(')) {
+        // ★ 必须剥注释再找：2026-10-10 media agent 在 detail_page.dart 里
+        //   写了一段注释**解释为什么本地封面不能用** `Image.network(...)`，
+        //   而那个字面量就在注释里 ⇒ 判据把注释当成了调用点。
+        //   D4 早就用了 _stripComments，这里是同一类误判，只是漏了。
+        //   判据的本意是「**代码里**只有 helper 一处」，不是「文本里只有一处」。
+        if (_stripComments(e.readAsStringSync()).contains('Image.network(')) {
           hits.add(e.uri.pathSegments.last);
         }
       }

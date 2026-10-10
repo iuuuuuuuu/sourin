@@ -43,10 +43,11 @@
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 
 import 'package:sourin_spike/ui/widgets/player_settings_sheet.dart';
+import 'package:sourin_spike/ui/app_scaffold.dart';
+import 'package:sourin_spike/ui/app_theme.dart';
 
 // ═══════════════════════════════════════════════════════════════════════
 //  注释剥离器
@@ -118,10 +119,10 @@ String codeOf(String path) => stripComments(File(path).readAsStringSync());
 ///    会拿到 `ThemeData.fallback()`（亮色），与真机不一致
 ///    （见 `test/material_split_test.dart` 的决定性实验）。
 Widget _host(Widget child) {
-  final theme = FTheme.neutral.dark.desktop;
+  final theme = AppTheme.themeFor(Brightness.dark);
   return MaterialApp(
-    theme: theme.toApproximateMaterialTheme(),
-    builder: (_, c) => FTheme(data: theme, child: c ?? const SizedBox()),
+    theme: theme,
+    builder: (_, c) => AppThemeHost(data: theme, child: c ?? const SizedBox()),
     home: Scaffold(body: Stack(children: [child])),
   );
 }
@@ -774,10 +775,30 @@ void real() {}
        *
        * 原版 `PlayerView.vue:4367-4392` 是有这两个按钮的。
        */
-      expect(page.contains("label: const Text('上一集')"), isTrue,
-          reason: '★ 上一集按钮必须存在（原版有）');
-      expect(page.contains("label: const Text('下一集')"), isTrue,
-          reason: '★ 下一集按钮必须存在（原版有）');
+      // ★ 2026-10-10（Owner 第 12 条「底部的按钮超级多」）：底栏瘦身时
+      //   「上一集」移进了「更多」浮层的剧集组，「下一集」留在底栏常驻。
+      //   **能力一个没删，只是换了位置** ⇒ 判据从「底栏上必须有这两个按钮」
+      //   改成「在某个用户可见入口里存在」。不能改回数底栏按钮个数：
+      //   那是与 Owner 需求相反的判据。
+      final src = page +
+          codeOf('lib/ui/player/player_bottom_bar.dart') +
+          codeOf('lib/ui/player/player_more_menu.dart');
+      expect(src.contains("label: '上一集'"), isTrue,
+          reason: '★ 上一集入口必须存在（现在在「更多」浮层的剧集组）');
+      // ★ 2026-10-10（Owner 第 6 条：「更多」里的下一集与底栏重复，删掉）：
+      //   入口必须**唯一** —— 底栏 ⎓ 常驻那一枚就是「下一集」的全部入口。
+      //   能力没删（底栏仍可点、仍接 _gotoNextEpisode），删的是重复项。
+      expect(src.contains("label: '下一集'"), isFalse,
+          reason: '★「更多」里不该再有「下一集」—— 它与底栏 ⎓ 是同一个功能'
+              '（两处都调 _gotoNextEpisode）');
+      expect(codeOf('lib/ui/player/player_bottom_bar.dart')
+              .contains('Icons.skip_next'), isTrue,
+          reason: '★ 底栏仍必须保留「下一集」按钮（入口唯一 ≠ 功能没了）');
+      // 低频项不许消失：它们正是被收进「更多」的东西
+      for (final item in ['所有直播', '片头片尾', '画中画', '投屏', '截图']) {
+        expect(src.contains(item), isTrue,
+            reason: '★「更多」里的「$item」不许消失（收容处不许变成垃圾桶）');
+      }
     });
 
     test('★★ 直播不显示这两个按钮（原版注释专门记录过）', () {
@@ -787,21 +808,36 @@ void real() {}
        * > 原来无脑渲染这两个按钮，直播时会显示成**两个灰掉的死按钮**
        * > （实测截图里直播页出现「上一集 ⋯ 下一集」，很怪）。
        */
-      expect(
-        page.contains('showEpisodeNav: !_isLive && _episodes.isNotEmpty'),
-        isTrue,
-        reason: '★★ 直播时整块不渲染 —— 原版实测过"两个灰死按钮"很怪',
-      );
-      expect(page.contains('if (showEpisodeNav) ...['), isTrue,
-          reason: '★ 按钮必须真的被 showEpisodeNav 门控');
+      // ★ 2026-10-10：门控随底栏瘦身搬进了「更多」的剧集组。判据改成查
+      //   **门控本身还在**，而不是查某个变量名 —— 写死变量名的判据会在
+      //   无害重构后假红（本文件之前就踩过这个坑）。
+      expect(page.contains('_isLive'), isTrue,
+          reason: '★★ 直播判定必须仍然参与剧集入口的门控');
+      expect(page.contains('if (!_isLive)'), isTrue,
+          reason: '★★ 直播时不把剧集组放进「更多」（否则又是两个灰死按钮）');
     });
 
     test('★ 到第一集/最后一集时按钮**禁用**而不是隐藏', () {
       // 原版是 `:disabled="!prevEpisode"` —— 禁用能让用户明白"这是第一集"，
       // 隐藏则让人以为按钮时有时无
-      expect(page.contains('onPressed: hasPrev ? onPrev : null'), isTrue,
-          reason: '★ 用 `onPressed: null` 禁用（而不是不渲染）');
-      expect(page.contains('onPressed: hasNext ? onNext : null'), isTrue);
+      /*
+       * ★ 2026-10-10（Owner 第 12 条底栏瘦身）：这两枚按钮被搬进了
+       *   `_BarIconButton`，禁用从「调用点写 `onPressed: hasPrev ? ... : null`」
+       *   变成「传 `enabled:`，由按钮自己 `onPressed: enabled ? onTap : null`」。
+       *   语义**没变**（第一集/最后一集时按钮仍在、只是点不动），
+       *   但断言不能再焊死调用点的写法。
+       *
+       * ⚠️ 判据钉的是「禁用必须真的变成 null 回调」这件事，
+       *   不是某一行字面量 —— 后者会在任何等价重构后假红。
+       */
+      final bar = codeOf('lib/ui/player/player_bottom_bar.dart');
+      expect(bar.contains('onPressed: enabled ? onTap : null'), isTrue,
+          reason: '★★ enabled=false 必须真的变成 onPressed: null（禁用而非隐藏）');
+      // 调用点必须把「到头没有下一集」这个事实传下去
+      expect(bar.contains('enabled: hasNext'), isTrue,
+          reason: '★ 「下一集」的可用性必须由 hasNext 驱动');
+      expect(bar.contains("tooltip: '下一集'"), isTrue,
+          reason: '★ 下一集按钮必须仍然存在（只是到最后一集时禁用）');
     });
 
     test('★ N 快捷键仍然指向同一套下一集逻辑（已验收，不能改坏）', () {
@@ -930,8 +966,32 @@ void real() {}
       final i = page.indexOf('void _loadPlayPrefs() {');
       expect(i, greaterThan(0));
       final body = page.substring(i, i + 1600);
-      expect(body.contains('_player.setVolume(_lastVolume * 100)'), isTrue,
-          reason: '★ 起播前就要套用音量');
+      /*
+       * ★★ 2026-10-09 改口径（task-1 缺陷 1/11 的**必要**连带）
+       *
+       * # 为什么原来那句字面量没了
+       * ```text
+       * 改前：`_loadPlayPrefs()` 直接 `_player.setVolume(_lastVolume * 100)`。
+       * 缺陷 1（静音后仍有声音）/ 11（静音按钮二次点击）的根因正是
+       * 「音量下发散落在多处、没有统一出口」——修法是把下发收敛成
+       * 唯一出口 `_sendVolume()`（player_page.dart:1542），它同时做探针打点
+       * 与静音状态机。于是这里变成 `_sendVolume(_lastVolume * 100)`。
+       * ⇒ 断言旧字面量会**假红**：`_sendVolume` 生产分支逐字等价于
+       *    `_player.setVolume(v)`（见那里的 `_probeNoAudio` 注释，生产恒 false）。
+       * ```
+       *
+       * ★ 判据的**实质没变**：起播前必须把音量套上去。而且这里**加严**了 ——
+       *   不但要求 `_loadPlayPrefs` 走唯一出口，还要求那个出口在生产分支上
+       *   确实是 `_player.setVolume` 的纯转发（否则「套用音量」是空转）。
+       */
+      expect(body.contains('_sendVolume(_lastVolume * 100)'), isTrue,
+          reason: '★ 起播前就要套用音量（走唯一出口 `_sendVolume`）');
+      final si = page.indexOf('void _sendVolume(double v) {');
+      expect(si, greaterThan(0), reason: '★ 音量唯一出口 `_sendVolume` 不见了');
+      final sendBody = page.substring(si, si + 400);
+      expect(sendBody.contains('_player.setVolume(v)'), isTrue,
+          reason: '★★ `_sendVolume` 必须在生产分支上真的下发到播放器 ——'
+              '只打点不下发的话「起播前套用音量」就是空转');
     });
 
     test('★ 静音时**不**记音量（原版 `if (v && !v.muted)`）', () {
@@ -978,8 +1038,10 @@ void real() {}
     test('★ P 键画中画 + 不支持时不显示按钮', () {
       expect(page.contains('if (k == LogicalKeyboardKey.keyP)'), isTrue,
           reason: '★ P = 画中画（原版 `hk.add("KeyP", ...)`）');
-      expect(page.contains('if (pipSupported)'), isTrue,
-          reason: '★ 不支持的平台**不显示**按钮（灰按钮会让人以为坏了）');
+      // ★ 2026-10-10：变量加了下划线前缀（_pipSupported），且入口随底栏瘦身
+      //   移进了「更多」浮层。断言跟着改成查**门控本身**。
+      expect(page.contains('if (_pipSupported)'), isTrue,
+          reason: '★ 不支持的平台**不显示**入口（灰按钮会让人以为坏了）');
     });
 
     test('★ F 键全屏 + 真的调 OS 全屏 + 退出走统一出口', () {

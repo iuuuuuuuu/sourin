@@ -86,7 +86,6 @@ import 'dart:ui' as ui;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/scheduler.dart';
-import 'package:forui/forui.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:window_manager/window_manager.dart';
@@ -97,6 +96,8 @@ import 'package:sourin_spike/ui/app_theme.dart';
 import 'package:sourin_spike/ui/widgets/overlay_motion.dart';
 import 'package:sourin_spike/ui/widgets/skip_marker_dialog.dart';
 import 'package:sourin_spike/ui/widgets/skip_timeline.dart';
+import 'ui/app_scaffold.dart';
+import 'ui/app_theme.dart';
 
 /// 被预览的媒体（默认 640x480 **4:3** —— 故意不是 16:9）
 ///
@@ -651,7 +652,7 @@ class _ProbeApp extends StatelessWidget {
      *    先确认宿主的主题链与生产一致，再怀疑产品。
      */
     final theme = AppTheme.themeFor(Brightness.light);
-    final materialTheme = buildLightMaterialTheme(theme);
+    final materialTheme = AppTheme.themeFor(Brightness.light);
     return RepaintBoundary(
       key: _rootKey,
       child: MaterialApp(
@@ -661,9 +662,9 @@ class _ProbeApp extends StatelessWidget {
         // ⚠️ 缺 Material 层 ⇒ InkWell 抛
         //    `Null check operator used on a null value #0 Material.of`
         //    ⇒ **整页被换成 ErrorWidget 而不崩给你看**
-        builder: (context, c) => FTheme(
-          data: theme,
-          child: FScaffold(
+        builder: (context, c) => AppThemeHost(
+          data: materialTheme,
+          child: AppScaffold(
             child: Material(
               type: MaterialType.transparency,
               child: c ?? const SizedBox(),

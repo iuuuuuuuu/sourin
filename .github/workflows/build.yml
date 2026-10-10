@@ -63,6 +63,12 @@ env:
   # ★ 硬要求：Flutter 3.47 把 Material 拆成了独立的 material_ui 包，
   #   低于这个版本 pubspec 解析不过。详见 README「从源码构建 → 前置依赖」。
   FLUTTER_VERSION: "3.47.5"
+  # ★ 注入到二进制的版本号（`String.fromEnvironment('SOURIN_VERSION')`）。
+  #   非发版构建（push / PR）为空 ⇒ AppVersion 回退到 pubspec 的 1.0.0；
+  #   发版构建时由三个平台的 job 各自从 inputs.release_tag 覆盖成真正的 tag。
+  #   为什么必须注入：用户在「关于」里看到的版本必须是**这个包真实的版本**，
+  #   否则更新检查会一直说"有新版"（它自己就是最新版）。
+  SOURIN_VERSION: ""
 
 jobs:
   # ═════════════════════════════════════════════════════════════════════
@@ -72,6 +78,12 @@ jobs:
     name: Windows
     runs-on: windows-latest
     timeout-minutes: 60
+    env:
+      # ★ 发版时把全局的 SOURIN_VERSION 从空串覆盖成真正的 tag；
+      #   非发版构建保持全局的空串 ⇒ App 读不到 dart-define，
+      #   回退到 pubspec 的版本号（见 lib/core/app_update/app_version.dart）。
+      SOURIN_VERSION: ${{ inputs.release_tag }}
+
 
     steps:
       - name: 检出代码
@@ -140,7 +152,10 @@ jobs:
       - name: 构建 Windows 发布版
         # ★ -t 不能漏：入口是 shell.dart。lib/main.dart 是早期的 HEVC
         #   验收 spike（见那个文件头），编错了不会报错，只是行为完全不同。
-        run: flutter build windows --release --no-pub -t lib/shell.dart
+        # ★ --dart-define=SOURIN_VERSION 让 App 知道自己是谁（发版时为 tag）
+        run: >-
+          flutter build windows --release --no-pub -t lib/shell.dart
+          --dart-define=SOURIN_VERSION=${{ env.SOURIN_VERSION }}
 
       - name: 核验产物
         shell: pwsh
@@ -315,6 +330,12 @@ jobs:
     name: macOS
     runs-on: macos-latest
     timeout-minutes: 60
+    env:
+      # ★ 发版时把全局的 SOURIN_VERSION 从空串覆盖成真正的 tag；
+      #   非发版构建保持全局的空串 ⇒ App 读不到 dart-define，
+      #   回退到 pubspec 的版本号（见 lib/core/app_update/app_version.dart）。
+      SOURIN_VERSION: ${{ inputs.release_tag }}
+
 
     steps:
       - name: 检出代码
@@ -352,7 +373,10 @@ jobs:
         run: flutter test
 
       - name: 构建 macOS 发布版
-        run: flutter build macos --release --no-pub -t lib/shell.dart
+        # ★ --dart-define=SOURIN_VERSION 让 App 知道自己是谁（发版时为 tag）
+        run: >-
+          flutter build macos --release --no-pub -t lib/shell.dart
+          --dart-define=SOURIN_VERSION=${{ env.SOURIN_VERSION }}
 
       - name: 核验产物
         shell: bash
@@ -553,6 +577,12 @@ jobs:
     name: Android
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    env:
+      # ★ 发版时把全局的 SOURIN_VERSION 从空串覆盖成真正的 tag；
+      #   非发版构建保持全局的空串 ⇒ App 读不到 dart-define，
+      #   回退到 pubspec 的版本号（见 lib/core/app_update/app_version.dart）。
+      SOURIN_VERSION: ${{ inputs.release_tag }}
+
     if: github.event_name == 'workflow_dispatch' && inputs.build_android
 
     steps:
@@ -697,7 +727,11 @@ jobs:
         #   x86_64 那个 APK 里就会**不含 libsourin_core.so**，而下面「上传 APK」是
         #   `*.apk` 全量上传 ⇒ 用户会拿到一个**静默残废**的包（装上一调核心就 open 失败）。
         #   要加 x86_64，必须先在「拷进 jniLibs」里加上 x86_64 的交叉编译与拷贝。
-        run: flutter build apk --release --no-pub --split-per-abi --target-platform android-arm64,android-arm -t lib/shell.dart
+        # ★ --dart-define=SOURIN_VERSION 让 App 知道自己是谁（发版时为 tag）
+        run: >-
+          flutter build apk --release --no-pub --split-per-abi
+          --target-platform android-arm64,android-arm -t lib/shell.dart
+          --dart-define=SOURIN_VERSION=${{ env.SOURIN_VERSION }}
 
       - name: 核验 APK 的 Android TV 入口（手机入口 + TV 入口都要在）
         shell: bash

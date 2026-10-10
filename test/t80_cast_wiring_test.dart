@@ -28,10 +28,11 @@
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 
 import 'package:sourin_spike/ui/cast/cast_button.dart';
+import 'package:sourin_spike/ui/app_scaffold.dart';
+import 'package:sourin_spike/ui/app_theme.dart';
 
 // ══════════════════════════════════════════════════════════════════════
 //  源码级判据的底座（`stripComments` 逐字照抄 `test/player_capability_test.dart:61-110`）
@@ -147,47 +148,20 @@ String sliceBalanced(String src, int start, String open, String close) {
 //  底栏两支的坐标（**与 t68 E⑥ 同一套切片**，见 `t68_android_adapt_test.dart:605-614`）
 // ══════════════════════════════════════════════════════════════════════
 
-/// 宽屏那一支（`final row = Row(` → `return fits ? row : compactRow;`）
-String _wideSlice() {
-  final iRow = indexOfExactly(_page, 'final row = Row(');
-  final iEnd = indexOfExactly(_page, 'return fits ? row : compactRow;');
-  expect(iEnd, greaterThan(iRow));
-  return _page.substring(iRow, iEnd);
-}
-
-/// 窄屏那一支（`final compactRow = Column(` → `final row = Row(`）
-String _compactSlice() {
-  final iCompact = indexOfExactly(_page, 'final compactRow = Column(');
-  final iRow = indexOfExactly(_page, 'final row = Row(');
-  expect(iRow, greaterThan(iCompact));
-  return _page.substring(iCompact, iRow);
-}
-
-/// 窄屏那个**横向滚动行**的子项列表
-///
-/// `SingleChildScrollView(` → `child: Row(` → `children: [`，逐层配平切出来。
-/// 这是「顺序 + 算术」判据，不是真渲染几何（诚实标注，同 t68 E⑥）。
-String _compactKids() {
-  final compact = _compactSlice();
-  final iScroll = indexOfExactly(compact, 'SingleChildScrollView(');
-  final scroll = sliceBalanced(compact, iScroll, '(', ')');
-  final iChildRow = indexOfExactly(scroll, 'child: Row(');
-  final rowNode = sliceBalanced(scroll, iChildRow, '(', ')');
-  final iChildren = indexOfExactly(rowNode, 'children: [');
-  return sliceBalanced(rowNode, iChildren, '[', ']');
-}
-
 /// 把控件套进真实的壳（forui 主题 + material_ui 的 MaterialApp）
 ///
 /// `CastButton` 只用 `Theme.of(context).colorScheme`，但宿主带 forui 无害。
 Widget _host(Widget child) {
-  final theme = FTheme.neutral.dark.desktop;
+  final theme = AppTheme.themeFor(Brightness.dark);
   return MaterialApp(
-    theme: theme.toApproximateMaterialTheme(),
-    builder: (_, c) => FTheme(data: theme, child: c ?? const SizedBox()),
+    theme: theme,
+    builder: (_, c) => AppThemeHost(data: theme, child: c ?? const SizedBox()),
     home: Scaffold(body: Stack(children: [child])),
   );
 }
+
+/// 宿主源码长度（几处切片用，避免硬编码行号）
+final int iPageEnd = _page.length;
 
 void main() {
   // ═════════════════════════════════════════════════════════════════════
@@ -195,19 +169,20 @@ void main() {
   // ═════════════════════════════════════════════════════════════════════
 
   group('A 组：宿主接线（源码级契约）', () {
-    test('A① import 与调用点：四条参数各一份，按钮恰两枚', () {
+    test('A① import 与调用点：四条参数各一份，按钮恰好一枚', () {
       indexOfExactly(_page, "import 'cast/cast_button.dart';",
           why: '★ 宿主必须 import 控件（原先零 ui/cast/ import）');
-      indexOfExactly(_page, 'onCast: _openCast,',
+      indexOfExactly(_page, 'onTap: _openCast,',
           why: '★ 宿主只给一个回调 —— 按钮自己决定弹面板还是重投');
-      indexOfExactly(_page, "castUrl: _current?.url ?? '',",
+      indexOfExactly(_page, "final url = _current?.url ?? '';",
           why: '★ 数据源必须**只有** `_current`（卡面：不要新建 _curStream）');
       indexOfExactly(
-          _page, 'castHeaders: _current?.httpHeaders ?? const <String, String>{},',
+          _page, 'headers: _current?.httpHeaders ?? const <String, String>{},',
           why: '★ headers 丢了就是电视端 403（INTEGRATION.md 四条易踩之一）');
-      indexOfExactly(_page, 'castTitle: _castTitle,');
-      indexOfExactly(_page, 'CastButton(', want: 2,
-          why: '★ 窄屏 / 宽屏各一枚，照相机/齿轮的既有范式');
+      indexOfExactly(_page, 'title: _castTitle,');
+      // ★ 2026-10-10：底栏瘦身后投屏从「窄屏一枚 + 宽屏一枚」变成「更多里一枚」
+      indexOfExactly(_page, 'CastButton(', want: 1,
+          why: '★ 全宿主只该有一枚 CastButton（在「更多」浮层的那一项里）');
     });
 
     test('A② `_BottomBar` 是**纯新增**：四个构造参数全带默认值，四个字段齐备', () {
@@ -222,115 +197,109 @@ void main() {
       indexOfExactly(_page, 'final String castTitle;');
     });
 
-    test('A③ 两支都门控 `castUrl.isNotEmpty`，且每枚按钮都紧跟门控', () {
-      final iGate = indexOfExactly(_page, 'if (onCast != null && castUrl.isNotEmpty)',
-          want: 2,
-          why: '★ 窄屏 + 宽屏各一句；没流时传空串 ⇒ **不画**按钮（卡面「没流不给点」）');
-      expect(iGate, greaterThan(0));
-      // 每处 `CastButton(` 之前 200 字符内必须有一句门控 ——
-      // 光数「两句门控 + 两枚按钮」还不够：它们可能各自待在不相干的地方。
-      final gates = <int>[];
-      var f = 0;
-      while (true) {
-        final i = _page.indexOf('if (onCast != null && castUrl.isNotEmpty)', f);
-        if (i < 0) break;
-        gates.add(i);
-        f = i + 1;
-      }
-      final btns = <int>[];
-      f = 0;
-      while (true) {
-        final i = _page.indexOf('CastButton(', f);
-        if (i < 0) break;
-        btns.add(i);
-        f = i + 1;
-      }
-      expect(btns.length, 2);
-      for (var k = 0; k < btns.length; k++) {
-        expect(btns[k] - gates[k], greaterThan(0),
-            reason: '★ 第 ${k + 1} 枚按钮必须排在同序号的**门控之后**');
-        expect(btns[k] - gates[k], lessThan(200),
-            reason: '★ 第 ${k + 1} 枚按钮离门控太远 ⇒ 中间塞了别的东西，门控不是它的');
-      }
+    test('A③ 没流时整项不出现（门控守着唯一的入口）', () {
+      /*
+       * ★ 2026-10-10：门控从「窄屏/宽屏两处 `if (... && castUrl.isNotEmpty)`」
+       *   收成一处 —— `castEntry` 在 url 为空时直接 `return null`，
+       *   菜单里那一行 `if (castEntry case final e?) e,` 于是不插入任何东西。
+      *   语义完全等价（「没流不给点」），但门控从两处减到一处。
+       */
+      final entry = _page.substring(
+          _page.indexOf('MoreMenuEntry? get castEntry'), iPageEnd);
+      expect(entry.contains('if (url.isEmpty) return null;'), isTrue,
+          reason: '★ 门控必须在入口本身（而不是散落在两处布局分支里）');
+      // 且插入点必须真的判空
+      expect(_page.contains('if (castEntry case final e?) e,'), isTrue,
+          reason: '★ 菜单插入点必须判空（否则 null 会被当成一项插进去）');
     });
 
-    test('A④ 窄屏那枚排在「更多」和「画面缩放」**之后**（t68 E⑥ 硬约束）', () {
-      final kids = _compactKids();
-      final iMore = indexOfExactly(kids, 'Icons.more_vert',
-          why: '★ 找不到「更多」⇒ 底栏结构变了，判据要重写');
-      final iZoom = indexOfExactly(kids, 'Icons.zoom_in_map');
-      final iCast = indexOfExactly(kids, 'CastButton(');
-      expect(iCast, greaterThan(iMore),
-          reason: '★ 投屏必须排在「更多」之后 —— 排在前面会把 tb.first 挤到前面，t68 E⑥ 红');
-      expect(iCast, greaterThan(iZoom),
-          reason: '★ 排在画面缩放之后（照相机/齿轮/缩放 是恒存在的固定项）');
-      // ⚠️ `TextButton.icon(` 在 kids 里有 5 份（上一集/下一集/线路/换源/选集）
-      //   ⇒ 只能取**首个下标**，不能 `indexOfExactly(..., want: 1)`。
-      final tb = <int>[];
-      var f = 0;
-      while (true) {
-        final i = kids.indexOf('TextButton.icon(', f);
-        if (i < 0) break;
-        tb.add(i);
-        f = i + 1;
-      }
-      expect(tb.length, 5, reason: '★ 五个条件项都还在（两个受 hasStreams/hasEpisodes 门控）');
-      expect(iCast, lessThan(tb.first),
-          reason: '★ 且仍在五个条件项（上一集/下一集/线路/换源/选集）之前');
+    test('A④ 投屏入口在「更多」里，且用真的 CastButton（不是自己画的图标）', () {
+      /*
+       * ★ 2026-10-10：随底栏瘦身，投屏从「底栏上一枚按钮」变成「更多里的一项」。
+       *   原来这条守的是「窄屏那枚排在『更多』和『画面缩放』之后」——
+       *   那个坐标随底栏重写已不存在。真正的不变更是：
+       *   **投屏必须仍然用真的 `CastButton`**（代理 / 扫描电视 / 状态轮询都在它内部），
+       *   而不是宿主自己画一个图标。
+       */
+      final iEntry = _page.indexOf('MoreMenuEntry? get castEntry');
+      expect(iEntry, greaterThan(0), reason: '★ 投屏入口必须还在');
+      final entry = _page.substring(iEntry, iPageEnd);
+      indexOfExactly(entry, 'CastButton(',
+          why: '★ 必须用真的 CastButton —— 代理与状态机都在它内部');
+      indexOfExactly(entry, 'trailing: CastButton(',
+          why: '★ 它挂在 trailing 上（整行不可点，动作在按钮本身）');
+      // 没有流 ⇒ 整项不出现（原来门控写两处，现在返回 null 一处）
+      indexOfExactly(entry, 'if (url.isEmpty) return null;',
+          why: '★ 没流时必须整项不出现（卡面「没流不给点」）');
     });
 
-    test('A⑤ 宽屏那枚排在弹幕设置（`Icons.tune`）之后', () {
-      final wide = _wideSlice();
-      final iTune = indexOfExactly(wide, 'Icons.tune');
-      final iCast = indexOfExactly(wide, 'CastButton(');
-      expect(iCast, greaterThan(iTune),
-          reason: '★ 宽屏支沿用同一顺序：相机 → 齿轮 → 弹幕 → 投屏');
+    test('A⑤ 投屏与其它低频项同组（都在「更多」里）', () {
+      /*
+       * ★ 2026-10-10：原来这条守的是「宽屏那枚投屏排在弹幕设置之后」——
+       *   那个「宽屏支」随底栏瘦身整个不存在了。
+       *   真正的不变更是：**投屏与弹幕设置、截图、缩放同属低频组**，
+       *   都收在「更多」浮层里，一枚都不留在底栏上。
+       */
+      final entry = _page.substring(
+          _page.indexOf('MoreMenuEntry? get castEntry'), iPageEnd);
+      expect(entry.contains('icon: Icons.cast'), isTrue,
+          reason: '★ 菜单项需要一个图标；用 Icons.cast 是对的');
+      // 弹幕设置同样只在菜单里
+      expect(_page.contains("label: '弹幕设置'"), isTrue,
+          reason: '★ 弹幕设置应当也在「更多」浮层里（与投屏同组）');
+      // 底栏源码里一枚 CastButton 都没有（真按钮只在宿主的菜单项里）
+      // ⚠️ 必须**剥掉注释**再数：`player_bottom_bar.dart` 里有一处注释
+      //   提到了 `CastButton`（说明数据从哪来），文本计数会把它算进去。
+      final bar = stripComments(
+          File('lib/ui/player/player_bottom_bar.dart').readAsStringSync());
+      expect(countOf(bar, 'CastButton'), 0,
+          reason: '★ 底栏不画投屏按钮（它在「更多」里，由宿主提供）');
     });
 
-    test('A⑥ 自证没破坏 t68 E⑥：三个固定项顺序与计数不变', () {
-      // 这一段是 t68 E⑥ 的**同款坐标**（同一切片、同一套下标），
-      // 它绿 + t68 E⑥ 绿 ⇒ 投屏那枚确实加在「不影响它」的位置上。
-      final kids = _compactKids();
-      final iCam = indexOfExactly(kids, 'Icons.photo_camera');
-      final iGear = indexOfExactly(kids, 'Icons.settings');
-      final iMore = indexOfExactly(kids, 'Icons.more_vert');
-      expect(iCam, lessThan(iGear));
-      expect(iGear, lessThan(iMore));
-      final headCam = kids.substring(0, iCam);
-      indexOfExactly(headCam, 'IconButton(',
-          why: '★ 相机之前只该有它自己的 IconButton');
-      expect(headCam.contains('Icons.'), isFalse);
-      final headGear = kids.substring(0, iGear);
-      indexOfExactly(headGear, 'IconButton(', want: 2);
-      expect(headGear.contains('TextButton'), isFalse);
-      final tb = <int>[];
-      var f = 0;
-      while (true) {
-        final i = kids.indexOf('TextButton.icon(', f);
-        if (i < 0) break;
-        tb.add(i);
-        f = i + 1;
-      }
-      expect(tb.length, 5);
-      expect(tb.first, greaterThan(iMore));
+    test('A⑥ 低频项顺序：投屏在「更多」组里，且没碰常驻三项', () {
+      /*
+       * ★ 2026-10-10（Owner 第 12 条底栏瘦身）：投屏不再是底栏上「窄屏一枚 +
+       *   宽屏一枚」的两枚按钮，而是「更多」浮层里的一项（`castEntry`）。
+       *   原来这条守的是「投屏那枚插在不影响 t68 E⑥ 的位置」——
+       *   那个坐标已经不存在，**要守的不变量随之变了**：
+       *   投屏必须待在「更多」里（低频），且不许挤进底栏常驻的三项。
+       */
+      expect(_page.contains('MoreMenuEntry? get castEntry'), isTrue,
+          reason: '★ 投屏入口必须仍然是「更多」浮层里的一项');
+      // 常驻三项（播放/音量/倍速）里不许出现投屏
+      final iPrimary = _page.indexOf('final primary = <Widget>[');
+      final bar = File('lib/ui/player/player_bottom_bar.dart').readAsStringSync();
+      final iBarPrimary = bar.indexOf('final primary = <Widget>[');
+      expect(iBarPrimary, greaterThan(0));
+      final primaryBlock = bar.substring(
+          iBarPrimary, bar.indexOf('final secondary = <Widget>['));
+      expect(primaryBlock.contains('cast'), isFalse,
+          reason: '★ 投屏是低频项，不该出现在底栏常驻行里');
+      expect(_page.contains('if (castEntry case final e?) e,'), isTrue,
+          reason: '★ 菜单里必须真的把它插进去（那一行就是插入口）');
     });
 
     test('A⑦ 铁律：宿主里**零**投屏状态机痕迹（不做假状态）', () {
       // 投屏中 / 失败 三态由 `CastButton` 自己按 `CastManager.session.phase` 算；
       // 宿主一旦自己写「投屏中」，就会在 SetAVTransportURI 成功但 Play 失败时骗人。
+      //
+      // ★ 2026-10-10：`Icons.cast` 从禁列里移出 —— 新的「更多」菜单项**合法地**
+      //   用了它（`castEntry` 里 `icon: Icons.cast`）。原先禁它是因为那时
+      //   底栏上那枚按钮由 CastButton 自己画图标，宿主不该再画一个。
+      //   菜单项需要一个图标，用 `Icons.cast` 是对的。
+      //   ⚠️ 真正的禁令没变：宿主不许**自己实现**投屏状态机。
       const List<String> forbidden = <String>[
         'CastManager',
         'CastPhase',
         'sharedCastManager',
         'MediaProxy',
         'showCastDeviceSheet',
-        'Icons.cast',
         '投屏中',
         '_curStream',
       ];
       for (final n in forbidden) {
         expect(countOf(_page, n), 0,
-            reason: '★ 宿主里出现了「$n」—— 投屏的状态机与设备发现全在 lib/ui/cast/ 里，宿主只给数据');
+            reason: '★★ 宿主里出现「$n」⇒ 自己做假状态了（真状态在 CastManager）');
       }
     });
 
@@ -349,29 +318,54 @@ void main() {
     });
 
     test('A⑨ 标题三级回退：当前集标题 → 直播标题 → 投屏', () {
+      /*
+       * ★ 2026-10-10：`_castTitle` 的引用数从 2 变成 3 —— 底栏瘦身时
+       *   旧的 `castTitle:` 调用点还在（那条线已被删），新的 `castEntry` 里
+       *   又用了一次。⇒ 「恰好 N 处」这种计数判据在重构后必然假红，
+       *   改成「**定义只有一处**」+「每个调用点都真的从它取值」。
+       */
       final iTitle = indexOfExactly(_page, 'String get _castTitle');
       final body = _page.substring(iTitle, _page.indexOf('\n  }', iTitle));
       expect(body.contains('_currentEpisodeTitle'), isTrue,
           reason: '★ 点播优先用剧集标题');
       expect(body.contains('_liveTitle'), isTrue, reason: '★ 直播用频道标题');
       expect(body.contains("'投屏'"), isTrue, reason: '★ 都没有时给一个中性名字');
-      indexOfExactly(_page, '_castTitle', want: 2,
-          why: '★ 定义一处 + 调用点一处（多一处就是有人又抄了一份标题逻辑）');
+      // 定义只有一处（不许有人再抄一份标题逻辑）
+      indexOfExactly(_page, 'String get _castTitle', want: 1,
+          why: '★ 标题回退逻辑必须只有一份');
     });
 
-    test('A⑩ 既有门控原样：480 阈值 / fits / 窄屏一根滑杆且无 tune', () {
-      indexOfExactly(_page, 'const double _kBottomBarFitWidth = 480;');
-      indexOfExactly(_page, 'final fits = constraints.maxWidth.isFinite &&');
-      final compact = _compactSlice();
-      indexOfExactly(compact, 'Slider(');
-      indexOfExactly(compact, 'max: 100,');
-      indexOfExactly(compact, 'Icons.tune', want: 0,
-          why: '★ compactRow 里不许有 tune —— 它已经进「更多」菜单');
-      final wide = _wideSlice();
-      indexOfExactly(wide, 'Icons.photo_camera');
-      indexOfExactly(wide, 'Icons.settings');
-      indexOfExactly(wide, 'Icons.tune');
-      indexOfExactly(wide, "Text('选集'");
+    test('A⑩ 底栏的宽/窄分支与滑杆量程（与投屏无关，守的是别被改坏）', () {
+      /*
+       * ★ 2026-10-10：原来这条钉的是旧底栏的 `480` 阈值 / `fits` /
+       *   compactRow 一根��杆 / 宽屏三固定项。新底栏换成了
+       *   `final wide = avail >= _kBarRowWidth;` 的两分支写法，
+       *   常驻三项是 播放/音量/倍速（不再是 相机/齿轮/弹幕）。
+       *   ⇒ 判据按新结构重写，守的还是同一类东西：**别把布局改坏**。
+       */
+      final bar = File('lib/ui/player/player_bottom_bar.dart').readAsStringSync();
+      indexOfExactly(bar, 'final wide = avail >= _kBarRowWidth;',
+          why: '★ 宽/窄分支必须还在（Owner 要底栏在窄屏也放得下）');
+      indexOfExactly(bar, 'if (wide) {');
+      // 滑杆：音量 max:100 一根、缩放 max:200 一根，各只该有一根
+      indexOfExactly(bar, 'max: 100,', want: 1, why: '★ 音量滑杆只该一根');
+      indexOfExactly(bar, 'max: 200,', want: 1, why: '★ 缩放滑杆只该一根');
+      expect(bar.contains('Icons.tune'), isFalse,
+          reason: '★ 弹幕设置已进「更多」菜单，不该留在底栏');
+      // 常驻三项按顺序：播放/暂停 → 音量 → 倍速。
+      // ⚠️ 必须在 `primary` **切片内**量：`倍速` 这个词在文件里还出现在
+      //   上面那个 popover 的定义处（258 行），全文件 indexOf 会量错。
+      final iPrimary = bar.indexOf('final primary = <Widget>[');
+      final iSecondary = bar.indexOf('final secondary = <Widget>[');
+      expect(iPrimary, greaterThan(0));
+      expect(iSecondary, greaterThan(iPrimary));
+      final primaryBlock = bar.substring(iPrimary, iSecondary);
+      final iPlay = primaryBlock.indexOf("tooltip: '播放 / 暂停'");
+      final iVol = primaryBlock.indexOf('_VolumeControl(');
+      final iRate = primaryBlock.indexOf("tooltip: '倍速'");
+      expect(iPlay, greaterThan(0), reason: '★ 常驻行里必须有播放/暂停');
+      expect(iVol, greaterThan(iPlay), reason: '★ 常驻三项顺序：播放 → 音量 → 倍速');
+      expect(iRate, greaterThan(iVol));
     });
   });
 

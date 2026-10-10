@@ -15,7 +15,7 @@
 // 卡片底色       (76,74,77)   = #E6E0E9@0.3 over #0A0A0A  亮色 surfaceContainerHighest
 // ```
 //
-// 而 `FTheme.neutral.dark.desktop.toApproximateMaterialTheme()` 给的是
+// 而 `AppTheme.themeFor(Brightness.dark)` 给的是
 // 深色（onSurface = #FAFAFA，18.97:1）—— 单测已经证明转换本身没错。
 //
 // 所以只能是：**真实 app 里 `Theme.of(context)` 根本没拿到那个主题**。
@@ -53,11 +53,13 @@
 
 import 'package:flutter/material.dart' as fm;
 import 'package:flutter_test/flutter_test.dart';
-import 'package:forui/forui.dart';
+import 'package:sourin_spike/ui/app_scaffold.dart';
+import 'package:sourin_spike/ui/app_theme.dart';
+import 'package:flutter/widgets.dart' show Brightness;
 import 'package:material_ui/material_ui.dart' as mu;
 
 void main() {
-  final theme = FTheme.neutral.dark.desktop;
+  final theme = AppTheme.themeFor(Brightness.dark);
 
   testWidgets('① 复现：material_ui 的 MaterialApp 里，flutter/material 的 Theme.of 拿到亮色',
       (tester) async {
@@ -67,7 +69,7 @@ void main() {
 
     await tester.pumpWidget(
       mu.MaterialApp(
-        theme: theme.toApproximateMaterialTheme(),
+        theme: theme,
         home: fm.Builder(
           builder: (ctx) {
             // ★ 这一行就是 lib/ui/**.dart 里每一处 `Theme.of(context)` 的处境
@@ -102,7 +104,7 @@ void main() {
 
     await tester.pumpWidget(
       mu.MaterialApp(
-        theme: theme.toApproximateMaterialTheme(),
+        theme: theme,
         home: mu.Builder(
           builder: (ctx) {
             brightness = mu.Theme.of(ctx).colorScheme.brightness;
@@ -131,11 +133,11 @@ void main() {
 
     await tester.pumpWidget(
       mu.MaterialApp(
-        theme: theme.toApproximateMaterialTheme(),
+        theme: theme,
         // 与 shell.dart 的 builder 逐字一致
-        builder: (context, child) => FTheme(
+        builder: (context, child) => AppThemeHost(
           data: theme,
-          child: FToaster(child: child ?? const mu.SizedBox()),
+          child: child ?? const mu.SizedBox(),
         ),
         home: mu.Builder(
           builder: (ctx) {

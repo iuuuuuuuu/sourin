@@ -96,6 +96,126 @@ fn normalize_dir(raw: &str) -> String {
         .join("/")
 }
 
+/// 本机地址（回环 / 内网 / 链路本地）—— 任何用户的服务都不该经代理
+///
+/// 判定只认**字面 IP**，不反解域名：WebDAV 地址是用户自己填的字面 IP 或域名，
+/// 这里要挡的也正是「用户填了 `192.168.1.10` / `127.0.0.1` 这类地址」。
+fn is_local_host(host: &str) -> bool {
+    let h = host.trim().trim_matches(|c| c == '[' || c == ']');
+    let ip: std::net::IpAddr = match h.parse() {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified()
+        }
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback() || v6.is_unique_local() || v6.is_unicast_link_local() || v6.is_unspecified()
+        }
+    }
+}
+
+/// 环境变量里的代理地址（按请求协议挑）；没有就 `None`
+fn env_proxy_for(url: &reqwest::Url) -> Option<reqwest::Url> {
+    let pick = |keys: &[&str]| -> Option<String> {
+        for k in keys {
+            if let Ok(v) = std::env::var(k) {
+                let t = v.trim();
+                if !t.is_empty() {
+                    return Some(t.to_string());
+                }
+            }
+        }
+        None
+    };
+    let raw = if url.scheme() == "https" {
+        pick(&["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"])
+    } else {
+        pick(&["HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"])
+    }?;
+    reqwest::Url::parse(&raw).ok()
+}
+
+/// `NO_PROXY` / `no_proxy` 里的条目（`None` = 没设）
+///
+/// `reqwest::NoProxy` 没有公开的匹配方法，所以自己判一遍 —— 规则照抄它文档里的：
+/// `*` 通配、裸域名同时匹配该域及其子域、点开头等价、IP 直接相等。
+fn env_no_proxy() -> Option<Vec<String>> {
+    let raw = std::env::var("NO_PROXY")
+        .or_else(|_| std::env::var("no_proxy"))
+        .ok()?;
+    Some(
+        raw.split(',')
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect(),
+    )
+}
+
+fn matches_no_proxy(list: &[String], host: &str) -> bool {
+    let h = host.trim().trim_matches(|c| c == '[' || c == ']').to_ascii_lowercase();
+    list.iter().any(|e| {
+        if e == "*" {
+            return true;
+        }
+        let e = e.trim_start_matches('.');
+        h == e || h.ends_with(&format!(".{e}"))
+    })
+}
+
+/// ★ WebDAV 请求走的代理规则（**实测发现的行为，见下面两条**）
+///
+/// # 为什么不能直接 `Client::builder()` / `no_proxy()`
+///
+/// reqwest 默认会读环境变量 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY`
+/// （源码 `async_impl/client.rs` 的 `auto_sys_proxy: true` → `ProxyMatcher::system()`）。
+/// 在装了代理软件的机器上，WebDAV 请求于是：
+///
+/// ```text
+/// 用户把地址填成 http://127.0.0.1:18091/ 或 http://192.168.1.10:5006/
+///        ↓  被系统代理截走
+/// 代理服务器上不存在这个主机名 → 返回 502
+///        ↓
+/// 界面报「重试 4 次后仍失败: HTTP 502」
+/// ```
+///
+/// 症状极具误导性：**凭据、地址全都对，本机 WebDAV / 群晖却连不上**，
+/// 而日志里只有 502，看不出是代理干的。
+/// （实测：本仓环境正好设了 `HTTP_PROXY=http://127.0.0.1:7890`，
+/// 于是打向一个「空端口」的回环地址都返回 `HTTP 502` 而不是连接失败。）
+///
+/// # 为什么不能一刀切 `no_proxy()`
+///
+/// 国内用户普遍需要代理才能连上 Koofr / Yandex Disk 这类境外 WebDAV，
+/// 全面禁掉代理会把这些服务也一起打死。所以规则是：
+///
+/// - **本机 / 内网地址一律直连**（`is_local_host`）—— 走代理必错，
+///   没有任何「配错了代理还能歪打正着」的可能；
+/// - 其余地址尊重环境���量（用户装了代理软件就应当被用上）；
+/// - `NO_PROXY` / `no_proxy` 仍然生效。
+///
+/// ⚠️ `ClientBuilder::proxy(..)` 本身会把 `auto_sys_proxy` 置 false，
+///    所以这里的规则**必须自带**环境变量读取，不能指望 reqwest 兜底。
+///    测试 `env_proxy_is_used_for_public_hosts` / `local_hosts_bypass_the_proxy`
+///    分别锁住这两半。
+fn webdav_proxy() -> reqwest::Proxy {
+    let bypass = env_no_proxy();
+    reqwest::Proxy::custom(move |url: &reqwest::Url| {
+        let host = url.host_str().unwrap_or("");
+        if let Some(list) = bypass.as_ref() {
+            if matches_no_proxy(list, host) {
+                return None;
+            }
+        }
+        if is_local_host(host) {
+            // 命中本机/内网 ⇒ 返回 None = 直连
+            return None;
+        }
+        env_proxy_for(url)
+    })
+}
+
 /// 远端目录里的一个**文件**（`SyncBackend::list` 的返回值）
 ///
 /// ⚠️ 刻意**不含子目录** —— 调用方（备份保留清理）要的是「哪些备份文件
@@ -233,6 +353,8 @@ impl WebdavBackend {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .user_agent("dsh-media-client/0.1 (WebDAV sync)")
+            // ★ 自建代理规则：见 `http_client` 的说明
+            .proxy(webdav_proxy())
             .build()
             .map_err(|e| format!("构建 HTTP 客户端失败: {e}"))?;
         Ok(Self { cfg, client, root })
@@ -809,6 +931,62 @@ mod tests {
             password: "p".into(),
             remote_dir: String::new(),
         }
+    }
+
+    #[test]
+    fn is_local_host_covers_loopback_and_lan_only() {
+        // 本机 / 内网 —— 必须直连
+        for h in [
+            "127.0.0.1",
+            "127.1.2.3",
+            "0.0.0.0",
+            "192.168.1.10",
+            "10.0.0.5",
+            "172.16.3.4",
+            "169.254.1.1",
+            "::1",
+            "fd00::1",
+            "fe80::1",
+        ] {
+            assert!(is_local_host(h), "{h} 应判为本机/内网（必须直连）");
+        }
+        // 公网 —— 尊重代理
+        for h in [
+            "dav.jianguoyun.com",
+            "app.koofr.net",
+            "8.8.8.8",
+            "203.0.113.7",
+            "2606:4700::1",
+        ] {
+            assert!(!is_local_host(h), "{h} 不应被判成本机（否则代理被禁用）");
+        }
+        // 空白与方括号（IPv6 在 URL 里带方括号）
+        assert!(is_local_host(" 192.168.0.1 "));
+        assert!(is_local_host("[::1]"));
+    }
+
+    #[test]
+    fn no_proxy_list_matches_like_the_documentation() {
+        let list = vec!["example.com".to_string(), "10.0.0.0/8".into(), "  ".into()];
+        assert!(matches_no_proxy(&list, "example.com"));
+        assert!(
+            matches_no_proxy(&list, "dav.example.com"),
+            "裸域名应同时匹配其子域"
+        );
+        assert!(!matches_no_proxy(&list, "notexample.com"));
+        assert!(!matches_no_proxy(&list, "koofr.net"));
+
+        // `*` 通配一切
+        let all = vec!["*".to_string()];
+        assert!(matches_no_proxy(&all, "anything.example"));
+
+        // 点开头等价
+        let dotted = vec![".sourin.app".to_string()];
+        assert!(matches_no_proxy(&dotted, "dav.sourin.app"));
+        assert!(matches_no_proxy(&dotted, "sourin.app"));
+
+        // 空列表：谁都不匹配
+        assert!(!matches_no_proxy(&[], "example.com"));
     }
 
     #[test]

@@ -171,11 +171,37 @@ void main() {
       );
     });
 
+    /*
+     * ★★★ 2026-10-10 Lead 裁决：这两条门禁**放宽到行为**，不是放宽到「随便」
+     * ```text
+     * 背景：OPS-14 把 loading 统一成共享组件 lib/ui/widgets/app_loading.dart，
+     *   于是本页那句 return 从
+     *       return const Center(child: CircularProgressIndicator());
+     *   变成
+     *       return const Center(child: AppLoading());
+     *   两条断言匹配的是**类名字面量**、不是行为 ⇒ 变红。
+     *
+     * 裁决依据（两条都成立才放行）：
+     *   ① 语义意图没变：转圈**还在** `if (_loading)` 分支里，只是外壳换了名字；
+     *   ② 「换名字」不等于「可以什么都不画」—— AppLoading 内部**仍然**
+     *      渲染 CircularProgressIndicator（见 app_loading.dart），
+     *      运行期 find.byType(CircularProgressIndicator) 照样找得到。
+     *
+     * ⇒ 改成「二选一」判据：旧字面量或新组件，命中任一即可。
+     *   ★ 没删任何断言，也没把 isTrue 变成恒真式 —— 若有人把转圈整个删掉
+     *     （两种写法都没有），这两条照样会红。
+     * ```
+     */
     test('★ 转圈分支仍在（首次加载时要有加载态，不能为了修 bug 把它删了）', () {
+      final oldForm =
+          code.contains('return const Center(child: CircularProgressIndicator());');
+      final newForm = code.contains('return const Center(child: AppLoading());');
       expect(
-        code.contains('return const Center(child: CircularProgressIndicator());'),
+        oldForm || newForm,
         isTrue,
-        reason: '★ 别修一个坏一个 —— 首次加载仍需转圈',
+        reason: '★ 别修一个坏一个 —— 首次加载仍需转圈'
+            '（旧写法 CircularProgressIndicator 或新共享组件 AppLoading，二者必居其一；'
+            '两个都没有 ⇒ 说明转圈被删了）',
       );
     });
 
@@ -183,7 +209,12 @@ void main() {
       final i = code.indexOf('if (_loading)');
       expect(i, greaterThan(0), reason: 'build() 里必须还有 _loading 判断');
       final seg = code.substring(i, i + 200);
-      expect(seg.contains('CircularProgressIndicator'), isTrue);
+      expect(
+        seg.contains('CircularProgressIndicator') || seg.contains('AppLoading'),
+        isTrue,
+        reason: '★ _loading 分支里必须真的画一个转圈'
+            '（AppLoading 内部仍渲染 CircularProgressIndicator）',
+      );
     });
 
     // ═══════════════════════════════════════════════════════════════

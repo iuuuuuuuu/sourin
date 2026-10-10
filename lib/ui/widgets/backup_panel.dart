@@ -84,13 +84,63 @@
 //    并**把完整路径明确告诉用户**（不静默）
 // ```
 // 导入侧 `openFile` **两端都支持**，无需降级。
+//
+// ═══════════════════════════════════════════════════════════════════════
+//  ★ 2026-10-09：新增「执行日志」区（Owner：要看执行过程 + 要个容量上限）
+// ═══════════════════════════════════════════════════════════════════════
+//
+// Owner 原话：
+// > 备份这里再加一个执行日志吧,我能看到这个执行的过程,然后设置一个最大的容量,
+// > 或者每次只显示这次启动的执行日志就行了,这样子还好点
+//
+// # 日志基础设施是**复用**的，一个字都没重写
+//
+// `lib/core/app_log.dart` 里的 `AppLog` 早就在跑（下载 / 播放 / 直播 / 字幕各自都在往里写），
+// 本面板只是**接入**它：
+// ```text
+// AppLog.write(tag, message)   写一条（入口处已做 redact 脱敏）
+// AppLog.lines                 读全部（List<LogLine>，每行有 tag / 时间 / 文本）
+// ```
+//
+// # 容量上限：选「**本次启动** + 条数上限」，不选「按大小滚动删日志文件」
+//
+// ```text
+// ① 只显示本次启动  —— AppLog 的内存缓冲是**进程级静态表**
+//    （app_log.dart:74  static final List<LogLine> _lines），
+//    没有任何生产路径清过它 ⇒ 天然就是"本次启动以来"，一行代码都不用加。
+// ② 条数上限 300    —— 见 logCap 的取值理由（防极端刷屏）。
+// ```
+// ⇒ 两条一起满足 Owner 给的那对选项（他原话本来就是"二选一都行"）。
+//
+// ⚠️ 诚实标注一个**边界**：内存缓冲自己在 `AppLog.maxLines`(2000) 行处
+//    成环形 —— 若本次启动后**别的** tag（DL / PLAY …）写爆 2000 行，
+//    最早的 BACKUP 行会被挤出去。这是"只显示本次启动"这个策略的代价，
+//    但比"给备份单独造一个持久化日志文件"划算得多（那得动 app_log.dart
+//    或新开一个文件，而本次只允许改本文件）。
+//
+// # 日志里**写什么 / 不写什么**
+//
+// ```text
+// 写  ：每一步做了什么 / 成功还是失败 / 耗时 ms / 文件名 / 条数 / 插件个数
+// 不写：完整路径（桌面路径含用户名 —— 就是"路径里的敏感段"）、
+//       设备 id、token、订阅链接、cookie
+// ```
+// ★ 只写**文件名**不是偷懒：AppLog 会**落盘**（<dataDir>/logs/ 按天累积）
+//   而且能被导出成 .log 发出去。用户要的是"哪个文件"，不是"我的用户名"；
+//   完整路径界面上那条 _ok 已经告诉他了（那里显示给本人看，没问题）。
+//
+// # 刷新方式：**写完就重建**，不用轮询定时器
+//
+// 本面板是 BACKUP 这个 tag 的**唯一**写方 ⇒「写完立刻 setState」与
+// 「定时轮询」看到的是同一串东西，而前者没有常驻成本，也不会出现
+// "面板已经 dispose、定时器还在 setState"这种失败模式。
 
 import 'dart:io';
 
 import 'package:file_selector/file_selector.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 
+import '../../core/app_log.dart';
 import '../../core/models.dart';
 import '../../core/sourin_api.dart';
 import '../settings/export_dir.dart';
@@ -170,9 +220,82 @@ class _BackupPanelState extends State<BackupPanel> {
   /// 导出走降级路径时的额外提示（Android 无系统保存框）
   String _exportHint = '';
 
+  /// 执行日志最多显示多少行（★ 容量上限，见文件头「容量上限」）
+  ///
+  /// # 为什么是 300
+  /// ```text
+  /// 一次备份本来只产生 3~6 行（开始 / 几步 / 结束），300 行 = 数十次操作，
+  /// 正常永远碰不到；但它是**有界的** —— 万一有人对着按钮连点、
+  /// 或将来在循环里补日志，面板也不会被撑成一块几千行的滚动条。
+  ///
+  /// 为什么不给「能配置的上限」：那是设置项，不是日志区的职责 ——
+  /// Owner 要的是「能看过程 + 别无限长」，不是「让我调数字」。
+  /// 更不该写 `AppLog.maxLines`（2000）那种量级：那是**全局**缓冲的上限，
+  /// 而这里只显示 BACKUP 一个 tag，2000 行在面板里已经没法看了。
+  /// ```
+  ///
+  /// ⚠️ 取值与 `AppLog.maxLines` 的关系：300 < 2000 ⇒ 本上限**先**生效，
+  ///    用户看到的窗口永远比缓冲能装的小，不会出现「缓冲已丢、面板没丢」的错觉。
+  static const int logCap = 300;
+
+  /// 本面板写日志用的 tag（唯一写方，见文件头）
+  static const String _logTag = 'BACKUP';
+
+  /// 面板里要显示的日志行（**从 AppLog 里筛 BACKUP 这个 tag**）
+  ///
+  /// ⚠️ 存一份而不是每次 build 现算：`AppLog.lines` 每次调用都会
+  ///    重新 `List.unmodifiable` 复制整个缓冲（app_log.dart:97），
+  ///    而 build 在滚动/悬停时会被调用很多次 —— 现算就是白白复制。
+  List<LogLine> _logLines = const [];
+
+  /// 把 AppLog 里本面板相关的行同步到 [_logLines]（**只在写完日志后调**）
+  ///
+  /// ★ 只挑 `BACKUP` 这一个 tag：日志缓冲是**全局**的，里面混着
+  ///   DL / PLAY / LIVE / subtitle 的行 —— 全显示出来就淹没了备份过程。
+  ///   这也正是 Owner 要的「能看到**这个**的执行过程」。
+  void _syncLog() {
+    final mine = AppLog.lines.where((l) => l.tag == _logTag).toList();
+    // 只留**最后** logCap 行（AppLog 是按时间正序的，所以取尾部）
+    final start = mine.length > logCap ? mine.length - logCap : 0;
+    _logLines = mine.sublist(start);
+  }
+
+  /// 记一条执行日志，并**立刻刷新**面板（写完就重建，不用轮询）
+  ///
+  /// ⚠️ 必须 `mounted` 才 setState —— 备份是异步的，用户可能在导出
+  ///    途中就离开这个页面（下面那些 `if (!mounted) return` 守的是同一件事）。
+  ///
+  /// ⚠️ 日志**绝不能**让主流程失败：`AppLog.write` 自己已经是
+  ///    「绝不抛异常」的旁路设施（app_log.dart:148），这里也不 await 它。
+  void _log(String message) {
+    AppLog.write(_logTag, message);
+    if (!mounted) return;
+    setState(_syncLog);
+  }
+
+  /// 取路径里**最后一段**（文件名）—— 日志里只写它，不写完整路径
+  ///
+  /// 理由见文件头「日志里写什么 / 不写什么」：桌面路径含用户名，
+  /// 而日志会落盘、能被导出成 .log 发出去。
+  /// 写法与 `_confirmBox` 里那句同一套（按两个分隔符切开取尾）。
+  static String _fileName(String path) {
+    if (path.isEmpty) return '(空)';
+    return path.split(RegExp(r'[\\/]')).last;
+  }
+
   @override
   void initState() {
     super.initState();
+    /*
+     * ★ 先把已有的 BACKUP 日志捞进来（面板可能在本次启动**之后**才被打开，
+     *   那时日志里已经有几行了）。
+     *
+     * ⚠️ 这里**只同步、不写**：进页面就记一条"打开了面板"属于噪音，
+     *   而 Owner 要的是"备份的执行过程"。真正的第一行由用户点了
+     *   导出/选择文件才产生。
+     * ⚠️ 直接赋值不走 setState：initState 阶段本来就要建第一帧。
+     */
+    _syncLog();
     _loadPreview();
     // 预取默认文件名（只是为了让提示文案能显示它，失败不影响功能）
     _defaultName();
@@ -313,22 +436,39 @@ class _BackupPanelState extends State<BackupPanel> {
       _ok = '';
       _exportHint = '';
     });
+    /*
+     * ★ 每一步都记一条执行日志（Owner："我能看到这个执行的过程"）。
+     *
+     * ⚠️ 计时用 Stopwatch 而不是两个 DateTime.now() —— 中间有 await
+     *    （系统对话框可能停几十秒），DateTime.now() 会跟着系统时钟走，
+     *    而 Stopwatch 是单调时钟，测出来才是真的"花了多久"。
+     * ⚠️ 日志里只写**文件名**，不写完整路径（理由见文件头）。
+     */
+    final sw = Stopwatch()..start();
+    _log('导出：开始');
     try {
       final name = await _defaultName();
       final path = await _pickSavePath(name);
       if (!mounted) return;
       if (path == null) {
         // 用户取消对话框 —— 不是错误，静默收尾（原版 `if (!path) return`）
+        _log('导出：用户取消（${sw.elapsedMilliseconds} ms）');
         setState(() => _busy = '');
         return;
       }
+      _log('导出：已选定 ${_fileName(path)}，开始打包…');
+      final stepSw = Stopwatch()..start();
       final r = await SourinApi.backupExport(path);
       if (!mounted) return;
+      _log('导出：成功 ${_fileName(r.path)}（${_fmtBytes(r.bytes)}）—— '
+          '打包 ${stepSw.elapsedMilliseconds} ms / 全程 ${sw.elapsedMilliseconds} ms');
       setState(() {
         _ok = '已导出到 ${r.path}（${_fmtBytes(r.bytes)}）';
         _busy = '';
       });
     } catch (e) {
+      // 失败也必须进日志 —— 用户报问题时这是唯一的现场
+      _log('导出：失败（${sw.elapsedMilliseconds} ms）$e');
       if (!mounted) return;
       setState(() {
         _err = '$e';
@@ -356,11 +496,14 @@ class _BackupPanelState extends State<BackupPanel> {
       _ok = '';
       _summary = null;
     });
+    final sw = Stopwatch()..start();
+    _log('导入：选择文件…');
     try {
       final f = await openFile(acceptedTypeGroups: BackupPanel.zipGroups);
       if (!mounted) return;
       if (f == null) {
         // 用户取消对话框 —— 不是错误
+        _log('导入：用户取消（${sw.elapsedMilliseconds} ms）');
         setState(() => _busy = '');
         return;
       }
@@ -373,11 +516,20 @@ class _BackupPanelState extends State<BackupPanel> {
        */
       final info = await SourinApi.backupInspect(f.path);
       if (!mounted) return;
+      /*
+       * ★ 检视结果**整份**进日志：这是用户"看到包里有什么"的那一步，
+       *   出了问题（比如某个包读不了）时，日志里必须有它的设备/版本/条数。
+       * ⚠️ 只写文件名，不写完整路径（理由见文件头）。
+       */
+      _log('导入：已读取 ${_fileName(f.path)} —— 来自设备 ${info.deviceId}'
+          ' · 导出 ${_fmtTime(info.exportedAt)} · 格式 v${info.version}'
+          ' · 插件 ${info.plugins.length} 个（${sw.elapsedMilliseconds} ms）');
       setState(() {
         _picked = (path: f.path, info: info);
         _busy = '';
       });
     } catch (e) {
+      _log('导入：读取失败（${sw.elapsedMilliseconds} ms）$e');
       if (!mounted) return;
       setState(() {
         _err = '$e';
@@ -395,9 +547,27 @@ class _BackupPanelState extends State<BackupPanel> {
       _err = '';
       _ok = '';
     });
+    final sw = Stopwatch()..start();
+    _log('导入：开始合并 ${_fileName(p.path)}');
     try {
       final s = await SourinApi.backupImport(p.path);
       if (!mounted) return;
+      /*
+       * ★ 只记**汇总数字**，不逐条展开：
+       *   `pluginsWritten` / `pluginsRenamed` 里是插件文件名，属于用户数据；
+       *   而条数已经足够回答"这次到底导进来了什么"。
+       *   `skipped` 有内容时必须记 —— 那代表**有东西没进来**（原版语义），
+       *   是最容易被误读成"都导入了"的一种情况。
+       */
+      _log('导入：完成 ${_fileName(p.path)}（${sw.elapsedMilliseconds} ms）'
+          ' 收藏 +${s.favoritesAdded}/~${s.favoritesUpdated}'
+          ' 追更 +${s.followingAdded} 进度 ~${s.progressUpdated}'
+          ' 历史 +${s.historyAdded} 片头片尾 ~${s.skipUpdated}'
+          ' 内容源 +${s.providersImported}'
+          ' 插件写 ${s.pluginsWritten.length}/改名 ${s.pluginsRenamed.length}');
+      if (s.skipped.isNotEmpty) {
+        _log('导入：有 ${s.skipped.length} 项被跳过 —— 这些数据**没有**进来');
+      }
       setState(() {
         _summary = s;
         _picked = null;
@@ -407,6 +577,7 @@ class _BackupPanelState extends State<BackupPanel> {
       // 刷新本机预览（条数变了）
       await _loadPreview();
     } catch (e) {
+      _log('导入：失败（${sw.elapsedMilliseconds} ms）$e');
       if (!mounted) return;
       setState(() {
         _err = '$e';
@@ -527,6 +698,10 @@ class _BackupPanelState extends State<BackupPanel> {
           const SizedBox(height: Sp.x1),
           _msg(_exportHint, colors.onSurfaceVariant),
         ],
+
+        // ── 执行日志（★ 2026-10-09 新增，见文件头）──
+        const SizedBox(height: Sp.x4),
+        _logBox(colors),
       ],
     );
   }
@@ -872,6 +1047,87 @@ class _BackupPanelState extends State<BackupPanel> {
           ],
         ],
       ),
+    );
+  }
+
+  /// 「执行日志」区（★ 2026-10-09 新增）
+  ///
+  /// # 为什么做成**卡片**而不是嵌一个可滚动的小窗口
+  /// ```text
+  /// 本面板是嵌在二级页的 ListView 里的（backup_page.dart → SettingsSubPage）。
+  /// 再套一个 ListView 就是**嵌套滚动** —— 要么得给死高度、
+  /// 要么得 shrinkWrap，两种都会在 TV 字号放大（×1.25）后露馅。
+  /// 而行数本来就被 logCap 钉死在 300 ⇒ 直接铺成 Column，
+  /// 让**页面自己**的滚动条去滚，零嵌套、零死高度。
+  /// ```
+  ///
+  /// # 为什么行内不放"清空"按钮
+  /// ```text
+  /// AppLog 只有 `debugClear()`（@visibleForTesting）能清内存缓冲，
+  /// 那是**测试注入口**，生产代码调它就是误用 —— 而且清的是**全局**缓冲，
+  /// 会连带抹掉 DL / PLAY 那些别人写的日志。
+  /// ⇒ 这里不提供清空；日志随进程退出自然消失（这正是"本次启动"的语义）。
+  /// ```
+  Widget _logBox(ColorScheme colors) {
+    return _card(
+      colors: colors,
+      icon: Icons.receipt_long_outlined,
+      title: '执行日志',
+      subtitle: '本次启动以来的备份操作 · 最多显示最近 $logCap 行',
+      // 右上角用计数替掉按钮位（与另两张卡视觉一致，但不假装可点）
+      action: Text(
+        '${_logLines.length} 行',
+        style: TextStyle(
+            fontSize: FontSizes.cap, color: colors.onSurfaceVariant),
+      ),
+      children: [
+        if (_logLines.isEmpty)
+          /*
+           * ⚠️ 空态必须说清"**怎么才会有内容**" —— 只写"暂无日志"，
+           *    用户会以为是坏了（他不会猜到要先点一次导出）。
+           */
+          Text(
+            '还没有记录。点上面的「导出」或「选择文件」，'
+            '这里会逐步显示做了什么、成功还是失败、花了多久。',
+            style: TextStyle(
+                fontSize: FontSizes.cap,
+                height: 1.6,
+                color: colors.onSurfaceVariant),
+          )
+        else
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(Sp.x3),
+            decoration: BoxDecoration(
+              color: colors.surfaceContainerHighest.withValues(alpha: 0.6),
+              borderRadius: BorderRadius.circular(Radii.sm),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                /*
+                 * ★ 正序渲染（最早在上面、最新在最下面）—— 与终端/控制台
+                 *   的方向一致，读起来是"从头到尾发生了什么"。
+                 * ⚠️ 用 `LogLine.text`（带时间戳与 tag）而不是只有 message：
+                 *   时间是"执行过程"的一半信息，用户报问题时也要它。
+                 */
+                for (final l in _logLines)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 3),
+                    child: Text(
+                      l.text,
+                      style: TextStyle(
+                        fontSize: FontSizes.cap,
+                        fontFamily: 'monospace',
+                        height: 1.5,
+                        color: colors.onSurface,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+      ],
     );
   }
 

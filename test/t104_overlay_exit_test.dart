@@ -162,6 +162,35 @@ class _HostState extends State<_Host> {
 /// 取宿主 State（要外部切 visible）
 _HostState hostOf(WidgetTester t) => t.state<_HostState>(find.byType(_Host));
 
+// ===================================================================
+//  task-14: 两条静态门禁的**唯一**正则定义
+// ===================================================================
+//
+// # 为什么要提成常量 (铁律 170: 同一纪律只能有一份实现)
+//
+// 反面对照那条测试必须拿**生产扫描用的同一份正则**去验 --
+// 若在对照里另写一份字面量, 两边会各自演化, 对照就与生产脱钩了,
+// 照样能假绿. 所以两边都引用这里的顶层常量.
+//
+// # 改前的洞 (本件即为此而做)
+//
+// 原正则要求 showDialog 后面**紧跟** < => 只能抓
+// 「显式带类型参数」的 showDialog<T>(...), **抓不到**不带类型参数的
+// showDialog(...) (Dart 会推断 T) -- 而后者同样会漏掉动效 token.
+// 现在两条都改成 [<(] (同时匹配两种形态).
+
+/// 生产代码里不许出现的裸 showDialog (< 与 ( 两种形态都要抓)
+final kGateShowDialog = RegExp(r'\bshowDialog\s*[<(]');
+
+/// 统一入口 showAppDialog (调用点计数同样两种形态都要算)
+final kGateShowAppDialog = RegExp(r'\bshowAppDialog\s*[<(]');
+
+/// 改前的老正则 -- 只给反面对照用 (证明那时的裸 ( 形态确实抓不到)
+final kGateShowDialogOld = RegExp(r'\bshowDialog\s*<');
+
+/// 改前的老正则 (showAppDialog 版, 同上)
+final kGateShowAppDialogOld = RegExp(r'\bshowAppDialog\s*<');
+
 void main() {
   setUpAll(() {
     // ★ 与 player_panel_wiring_test.dart:277-282 同款：libmpv 只在**存在时**加载
@@ -587,7 +616,7 @@ void main() {
         final rel = e.path.replaceAll(r'\', '/');
         if (rel == 'lib/ui/widgets/overlay_motion.dart') continue; // 入口本体
         final c = stripComments(e.readAsStringSync());
-        final n = RegExp(r'\bshowDialog\s*<').allMatches(c).length;
+        final n = kGateShowDialog.allMatches(c).length;
         if (n > 0) offenders.add(rel + '（' + n.toString() + ' 处）');
       }
       expect(
@@ -614,7 +643,8 @@ void main() {
       };
       var total = 0;
       want.forEach((rel, n) {
-        final got = RegExp(r'\bshowAppDialog\s*<').allMatches(code(rel)).length;
+        // ★ task-14 ③：同时匹配 showAppDialog< 与 showAppDialog(（同类洞一起补）
+        final got = kGateShowAppDialog.allMatches(code(rel)).length;
         expect(
           got,
           n,
@@ -624,6 +654,83 @@ void main() {
         total += got;
       });
       expect(total, 15, reason: '★ 用户说的 18 处，实测生产调用点是 15 处（其余是注释与真机探针）');
+      /*
+       * ★ task-14 ③ 反面对照：showAppDialog(...)（不带类型参数）也必须被数到
+       *
+       * 改前的正则同样只认显式类型参数 —— 与 ④ 那条是**同一类洞**。
+       * 这里用样本钉死，避免它又退化。
+       */
+      const sampleAppTyped = 'Future<void> d(BuildContext c) async {'
+          '  await showAppDialog<int>(context: c, builder: (_) => x);'
+          '}';
+      const sampleAppBare = 'Future<void> e(BuildContext c) async {'
+          '  await showAppDialog(context: c, builder: (_) => x);'
+          '}';
+      expect(kGateShowAppDialog.allMatches(stripComments(sampleAppTyped)).length, 1);
+      expect(
+        kGateShowAppDialog.allMatches(stripComments(sampleAppBare)).length,
+        1,
+        reason: '★ 不带类型参数的 showAppDialog( 也必须被数到（同类洞）',
+      );
+      // 改前那个正则对裸形态抓不到 —— 洞的存在性证明
+      expect(kGateShowAppDialogOld.allMatches(stripComments(sampleAppBare)).length, 0);
+    });
+
+    /*
+     * ★★★ 反面对照：门禁必须**真的会抓**（本仓库铁律②阳性对照）
+     *
+     * # 为什么必须有这一条
+     *
+     * 上面那条「lib 里没有裸 showDialog」是**存在性断言** ——
+     * 它对「门禁正则写错了 / 从不检查」这种故障**恒为真**。
+     * 本仓库反复吃过这个亏（.probe/REPORT-core-8-14.md §6.5.1 记过同类假绿）。
+     *
+     * ⇒ 造三个临时源码样本，断言：
+     *     样本 A：showDialog<int>(…)  ← 带类型参数（**改前就能抓**）
+     *     样本 B：showDialog(…)       ← **不带**类型参数（**改前抓不到** ← 这就是那个洞）
+     *     样本 C：只在**注释**里出现  ← 必须**不**被抓（剥注释的对照）
+     *   把任一样本删掉，这条测试就会红 ⇒ 它**不可能**假绿。
+     */
+    test('★★ 反面对照：门禁必须同时抓到 showDialog< 与 showDialog(', () {
+      // ★ 与生产扫描**同一份**正则 —— 不许在这里另写一个（否则对照就脱钩了）
+
+      const sampleTyped = 'Future<void> a(BuildContext c) async {'
+          '  await showDialog<int>(context: c, builder: (_) => const SizedBox());'
+          '}';
+      const sampleBare = 'Future<void> b(BuildContext c) async {'
+          '  await showDialog(context: c, builder: (_) => const SizedBox());'
+          '}';
+      // 只在注释里 ⇒ 剥注释后应为 0
+      const sampleCommentOnly = '// 示例：await showDialog<int>(context: c, builder: (_) => x);'
+          'Future<void> c0() async {}';
+
+      expect(
+        kGateShowDialog.allMatches(stripComments(sampleTyped)).length,
+        1,
+        reason: '★ 带类型参数的 showDialog<T>( 必须被抓到',
+      );
+      expect(
+        kGateShowDialog.allMatches(stripComments(sampleBare)).length,
+        1,
+        reason: '★★ 不带类型参数的 showDialog( 也必须被抓到 —— 这正是改前的洞',
+      );
+      expect(
+        kGateShowDialog.allMatches(stripComments(sampleCommentOnly)).length,
+        0,
+        reason: '★ 注释里的示例**不许**被抓（必须剥注释后再匹配）',
+      );
+
+      // ★ 把「改前抓不到样本 B」也钉死 —— 这条就是洞的存在性证明
+      expect(
+        kGateShowDialogOld.allMatches(stripComments(sampleTyped)).length,
+        1,
+        reason: '改前正则对样本 A 有效（所以它抓到了 ui-dev 那一版）',
+      );
+      expect(
+        kGateShowDialogOld.allMatches(stripComments(sampleBare)).length,
+        0,
+        reason: '★ 改前正则对样本 B **完全抓不到** —— 这就是门禁的洞（本条即证明）',
+      );
     });
 
     test('★ 唯一入口自己把 animationStyle 接上了（漏传不报错 ⇒ 必须钉）', () {

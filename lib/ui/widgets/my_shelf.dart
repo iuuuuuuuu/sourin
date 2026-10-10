@@ -1339,19 +1339,64 @@ class MyShelfState extends State<MyShelf> {
                           widget.onOpenDetail?.call(c.provider, c.id);
                         },
                       ),
-                      // 历史的进度条（贴在封面底部）
+                      /*
+                       * 历史的进度条（贴在封面底部）
+                       *
+                       * ══════════════════════════════════════════════════
+                       * ★★★ 为什么要包一层「封面尺寸」的 ClipRRect
+                       * ══════════════════════════════════════════════════
+                       * # Owner 原话（三批第 16 条）
+                       * ```text
+                       * > 播放历史,图4 在整个封面为圆角的情况下,
+                       * > 进度条超出并且是直线,影响观感
+                       * ```
+                       *
+                       * # 旧写法错在哪（两个独立缺陷，都对得上这句话）
+                       * ```text
+                       * ① 「超出」：封面是 Stack 的**兄弟**（`PosterCard` 自己那个
+                       *    `ClipRRect(Radii.rMd)` 只裁它自己的子树），而进度条
+                       *    是**另一个** Positioned 兄弟 ⇒ 它两端在 x∈[0,16]、
+                       *    x∈[132,148] 落在封面圆角**之外**，直角露出来。
+                       * ② 「是直线」：`ClipRRect(circular(2))` 只包住那条 3px 高
+                       *    的进度条本身 —— 半径大于子高度时会被 Flutter 夹到
+                       *    h/2 = 1.5px，根本跟不上封面的 16px 曲线。
+                       * ③ 定位用**常量几何**（`posterWidth / posterAspect - 3`
+                       *    = 219）：封面高度其实是 `AspectRatio(posterAspect)`
+                       *    在当前父约束下算的，两边一旦不同源就会错位。
+                       * ```
+                       *
+                       * # 修法：把「封面那 222px 的盒子」整个裁圆
+                       * ```text
+                       * `Positioned(top: 0, height: 封面高)` + `ClipRRect(Radii.rMd)`
+                       * ⇒ 进度条成为这个圆角盒子的**后代**，两端被同一条 16px
+                       *   曲线裁掉，与封面底角**逐像素重合**。
+                       * `Align(bottomCenter)` 让它贴**盒子**底 ⇒ 不再依赖任何
+                       *   常量偏移（盒子高度就是封面高度）。
+                       *
+                       * ⚠️ ClipRRect 必须是**封面尺寸**，不能只包那条进度条：
+                       *    圆角半径大于子高度会被夹到 h/2 ⇒ 又变回「直线」。
+                       * ⚠️ 圆角值取 `Radii.rMd` —— 与 `PosterCard` 的封面
+                       *    （`poster_card.dart:243-244 ClipRRect(Radii.rMd)`）
+                       *    和它自己的 `InkWell(borderRadius: Radii.rMd)` 同源，
+                       *    不另取一个值。
+                       * ```
+                       */
                       if (c.pct != null && c.pct! > 0)
                         Positioned(
                           left: 0,
                           right: 0,
-                          top: AppMetrics.posterWidth / AppMetrics.posterAspect -
-                              3,
+                          top: 0,
+                          height:
+                              AppMetrics.posterWidth / AppMetrics.posterAspect,
                           child: ClipRRect(
-                            borderRadius: BorderRadius.circular(2),
-                            child: LinearProgressIndicator(
-                              value: c.pct! / 100.0,
-                              minHeight: 3,
-                              backgroundColor: Colors.black38,
+                            borderRadius: Radii.rMd,
+                            child: Align(
+                              alignment: Alignment.bottomCenter,
+                              child: LinearProgressIndicator(
+                                value: c.pct! / 100.0,
+                                minHeight: 3,
+                                backgroundColor: Colors.black38,
+                              ),
                             ),
                           ),
                         ),

@@ -143,7 +143,6 @@
 import 'dart:async';
 import 'dart:math' as math;
 
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
@@ -151,6 +150,7 @@ import 'package:media_kit_video/media_kit_video.dart';
 import '../../core/sourin_api.dart';
 import '../tokens.dart';
 import 'skip_timeline.dart';
+import '../../ui/app_palette.dart';
 
 /*
  * ═══════════════════════════════════════════════════════════════════════
@@ -1868,7 +1868,7 @@ class _SkipMarkerDialogState extends State<SkipMarkerDialog> {
 
   @override
   Widget build(BuildContext context) {
-    final colors = FTheme.of(context).colors;
+    final colors = AppPalette.of(context);
 
     /*
      * ══════════════════════════════════════════════════════════════════
@@ -2233,7 +2233,7 @@ class _SkipMarkerDialogState extends State<SkipMarkerDialog> {
     );
   }
 
-  Widget _header(FColors colors) {
+  Widget _header(AppPalette colors) {
     /*
      * ══════════════════════════════════════════════════════════════════
      * ★★★ 2026-10-02 重做（Owner：「布局和ui再优化优化」「有点丑,要美观」）
@@ -2360,7 +2360,7 @@ class _SkipMarkerDialogState extends State<SkipMarkerDialog> {
     );
   }
 
-  Widget _previewBox(FColors colors, double maxH) {
+  Widget _previewBox(AppPalette colors, double maxH) {
     return ClipRRect(
       borderRadius: BorderRadius.circular(Radii.sm),
       child: ConstrainedBox(
@@ -2548,7 +2548,7 @@ class _SkipMarkerDialogState extends State<SkipMarkerDialog> {
         ),
       );
 
-  Widget _rows(FColors colors) {
+  Widget _rows(AppPalette colors) {
     /*
      * ══════════════════════════════════════════════════════════════════
      * ★★★ 四行必须**一屏可见**（2026-09-24 用户截图：只看得到两行）
@@ -2695,7 +2695,7 @@ class _SkipMarkerDialogState extends State<SkipMarkerDialog> {
   /// ⚠️ 但它**确实**占了一行 36px。所以 `kMidRestH` 必须 +36，
   ///    否则预览会算高 36px 而把最后一行挤出视口
   ///    （那正是用户 2026-09-24 报的「只看到片头两行」）。
-  Widget _rangePreviewRow(FColors colors) {
+  Widget _rangePreviewRow(AppPalette colors) {
     /// 一个「整段」按钮 —— **播放 / 暂停 切换**
     ///
     /// ══════════════════════════════════════════════════════════════════
@@ -2834,7 +2834,7 @@ class _SkipMarkerDialogState extends State<SkipMarkerDialog> {
     );
   }
 
-  Widget _autoSkipRow(FColors colors) {
+  Widget _autoSkipRow(AppPalette colors) {
     return Row(
       children: [
         Switch(
@@ -2855,7 +2855,7 @@ class _SkipMarkerDialogState extends State<SkipMarkerDialog> {
     );
   }
 
-  Widget _footer(FColors colors) {
+  Widget _footer(AppPalette colors) {
     return Row(
       mainAxisAlignment: MainAxisAlignment.end,
       children: [
@@ -2943,7 +2943,7 @@ class _EdgeRow extends StatelessWidget {
   final String label;
   final int? value;
   final double total;
-  final FColors colors;
+  final AppPalette colors;
   final ValueChanged<int?> onChanged;
   final ValueChanged<int> onPreview;
 
@@ -3223,7 +3223,13 @@ class _EdgeRow extends StatelessWidget {
           color: colors.mutedForeground,
         );
 
-        final labelNeed = _textWidthOf(context, label, labelStyle) + accentCost;
+        final labelNeed = _textWidthOf(context, label, labelStyle) +
+            accentCost +
+            // ★ 2026-10-10：留 1px 余量。`_textWidthOf` 用 TextPainter 量，
+            //   而真正布局时 `RenderParagraph.getMaxIntrinsicWidth` 的取整
+            //   路径可能给出**大 1px** 的结果（实测手机宽度下 need=57 / avail=56）。
+            //   差这 1px 就会把四个汉字截成 `片…` —— 宁可左边多 1px 空隙。
+            1.0;
         final valueNeed = _textWidthOf(
           context,
           v == null ? '— — —' : _fmtSeconds(v),
@@ -3279,8 +3285,30 @@ class _EdgeRow extends StatelessWidget {
             hintW = budget - twoNeed;
           } else {
             // ③ 极窄：按需要的比例缩，二者都还能看见一部分
+            //
+            // ★ 2026-10-10：这里原来直接 `budget * labelNeed / twoNeed`，
+            //   标签会**差 1px 不够**（实测：手机宽度 411 下
+            //   `avail=56.0 need=57.0` ⇒ 渲染成 `片…`，四个汉字被截断）。
+            //   根因是纯浮点/取整：按比例分必然有一侧差零点几像素。
+            //   ⇒ 标签是**第一优先**（规则④），差那 1px 应该从读数那边扣。
             labelW = budget * labelNeed / twoNeed;
             valueW = budget - labelW;
+            /*
+             * ★ 2026-10-10：按比例分之后标签可能**只差零点几像素**。
+             *   那一点点从读数那边补过来（标签是第一优先，见规则④）。
+             *
+             * ⚠️ 上限必须**很小**：极窄窗口（实测 300 逻辑宽）下比例分本来
+             *   会让标签缩到 29px —— 那是**正确行为**（标签与读数按比例都保留
+             *   一部分，好过把整行撑爆）。第一版这里没设上限，导致任何宽度下
+             *   标签都拿到完整宽度 ⇒ `test/t486_..._test.dart` 的阳性对照
+             *   （「极窄下确实该被省略，尺子必须灵敏」）直接失效。
+             */
+            const kRoundingSlack = 1.0;
+            final deficit = math.min(labelNeed - labelW, kRoundingSlack);
+            if (deficit > 0 && valueW - deficit >= 1.0) {
+              labelW += deficit;
+              valueW -= deficit;
+            }
             hintW = 0.0;
           }
         }
@@ -3503,7 +3531,7 @@ class _StepBtn extends StatelessWidget {
   });
 
   final IconData icon;
-  final FColors colors;
+  final AppPalette colors;
   final VoidCallback onTap;
 
   /// 按钮的**命中区**边长（默认 32 —— 见 `_EdgeRow` 里为什么必须收紧）

@@ -355,15 +355,36 @@ void main() {
           reason: '★ 搜索是网络请求，必须告诉用户"在搜"');
     });
 
-    test('★ 打开面板时清掉上一次的关键词与结果（否则会绑到错的视频）', () {
+    test('★ 打开面板时清掉上一次的搜索结果，并把关键词预填成本集标题', () {
       final src = stripComments(
         File('lib/ui/player_page.dart').readAsStringSync(),
       );
       final i = src.indexOf('void _openBiliSheet()');
       expect(i, greaterThan(-1));
+      /*
+       * ★ 3000 字符窗口已实测覆盖到 searchKeyword（动手前打印过
+       *   body.length == 3000 且 body.contains('searchKeyword') == true）
+       *   ⇒ 不扩大窗口。**不许**换成整文件 src.contains(...)：那会丢掉
+       *   "这段代码确实在 _openBiliSheet 体内" 这层约束。
+       */
       final body = src.substring(i, (i + 3000).clamp(0, src.length));
-      expect(body.contains('searchResults: const <BiliSearchItem>[],'), isTrue);
-      expect(body.contains("searchKeyword: '',"), isTrue);
+      // ① 上一次的搜索结果仍然必须清掉 —— 这条语义没变
+      expect(body.contains('searchResults: const <BiliSearchItem>[],'), isTrue,
+          reason: '★ 留着上一集的结果 ⇒ 用户点一条就绑到错的视频上');
+      /*
+       * ② 2026-10-09 起（Owner：「获取弹幕 bilibili和弹弹都应该支持
+       *    自动填入名字」）关键词**不再是空串**，改成预填当前标题。
+       *
+       * ⚠️ 语义已经从「清空关键词」变成「预填关键词」——
+       *    断言必须跟着语义走，钉住的是**预填**这件事本身。
+       *    \`_biliSearch\` 里用户点搜索后的回写是 \`searchKeyword: kw,\`，
+       *    与这里不冲突。
+       */
+      expect(body.contains('searchKeyword: _liveTitle.trim(),'), isTrue,
+          reason: '★ 预填本集标题，用户不用每次手打一遍剧名');
+      // ③ ★★ 反向断言：不许改回空串（改回去 = 搜索框又空了）
+      expect(body.contains("searchKeyword: '',"), isFalse,
+          reason: '★★ 改回空串就是退回"每次都要手打剧名"的老毛病');
     });
   });
 

@@ -1912,6 +1912,8 @@ class PluginEntry {
     required this.id,
     required this.name,
     this.version = '',
+    this.author = '',
+    this.upstream = '',
     this.loaded = false,
     this.error,
     this.config = const [],
@@ -1921,6 +1923,29 @@ class PluginEntry {
   final String id;
   final String name;
   final String version;
+
+  /// ★ 插件声明的作者（`@author`）—— 卡片据此显示**来源标识**（task-5 / 缺陷 5）
+  ///
+  /// 实测本机 28 个插件的取值只有两种：
+  /// ```text
+  /// tvbox-convert  ×22   TVBox 转换器生成的
+  /// dsh            ×6    内置源模板（从原版继承的作者名）
+  /// ```
+  /// 仓库里新增的 emby 模板写的是 `sourin`。
+  ///
+  /// ⚠️ 空串 = 源码里**没写** `@author`（不是"第三方"）——
+  ///    界面据此不显示标识，而不是猜一个。
+  final String author;
+
+  /// ★ 插件声明的**上游接口地址**（task-5 / 缺陷 5）
+  ///
+  /// ★★ 关键事实：TVBox 转换插件**没有丢掉原链接** —— 转换器把原始接口
+  ///    逐字写进了生成的 `.js`（头部注释 ` * 上游接口（苹果CMS v10）：http://...`），
+  ///    只是界面从来没显示过。Rust 侧 [PluginEntry.upstream] 解析它。
+  ///
+  /// ⚠️ 空串 = 没有可用的上游地址（内置源 `cctv` 等就是这种）——
+  ///    界面据此不显示「上游」入口，而不是显示一个点不开的链接。
+  final String upstream;
 
   /// 是否成功加载（false 时 `error` 有原因）
   final bool loaded;
@@ -1935,6 +1960,9 @@ class PluginEntry {
         id: j['id'] as String? ?? '',
         name: j['name'] as String? ?? '',
         version: j['version'] as String? ?? '',
+        // ★ task-5：老版本 Rust 返回里没有这两个键 → `?? ''` 兜住
+        author: j['author'] as String? ?? '',
+        upstream: j['upstream'] as String? ?? '',
         loaded: j['loaded'] as bool? ?? false,
         error: j['error'] as String?,
         config: jlist<ConfigField>(j['config'], ConfigField.fromJson),
@@ -2355,19 +2383,61 @@ class SyncStatus {
       );
 }
 
-/// 同步的一步汇总
+/// 同步的一步汇总（`sync_now` / `sync_all` 每个平面一条）
+///
+/// # ★ 字段名必须与 Rust 的 `sync::SyncSummary` 一一对应
+///
+/// 权威定义在 `rust/sourin_core/src/sync/mod.rs`：
+/// ```text
+/// { plane, pulled, pushed, conflicts, note? }
+/// ```
+/// 之前这里写的是 `kind` / `count` / `message` —— 三个键在线上一个都不存在，
+/// 于是 [SourinApi.syncNow] 拿回来的每一条都是全空，
+/// 面板拼出来是「同步完成： /  / 」这种什么都没有的字符串
+/// （用户看到的是「同步成功了，但没说同步了什么」）。
 class SyncSummary {
-  const SyncSummary({this.kind = '', this.count = 0, this.message = ''});
+  const SyncSummary({
+    this.plane = '',
+    this.pulled = 0,
+    this.pushed = 0,
+    this.conflicts = 0,
+    this.note,
+  });
 
-  final String kind;
-  final int count;
-  final String message;
+  /// 平面名：`favorites` / `progress` / `providers`
+  final String plane;
+
+  /// 这一轮从云端**新拉进本地**的条数
+  final int pulled;
+
+  /// 这一轮**真正上传**的条数（不是文件里总共有多少条 —— 见 Rust 侧注释）
+  final int pushed;
+
+  /// 因云端更新而被本地让掉的条数
+  final int conflicts;
+
+  /// 后端给的补充说明（`sync_provider_configs` 才有）
+  final String? note;
+
+  /// 给人看的平面名。未知名字原样透传，不吞掉。
+  String get label => _planeLabels[plane] ?? plane;
+
+  /// 这一轮动过的总量（拉 + 推）；全 0 = 「无变化」
+  int get total => pulled + pushed;
 
   factory SyncSummary.fromJson(Map<String, dynamic> j) => SyncSummary(
-        kind: j['kind'] as String? ?? '',
-        count: (j['count'] as num?)?.toInt() ?? 0,
-        message: j['message'] as String? ?? '',
+        plane: j['plane'] as String? ?? '',
+        pulled: (j['pulled'] as num?)?.toInt() ?? 0,
+        pushed: (j['pushed'] as num?)?.toInt() ?? 0,
+        conflicts: (j['conflicts'] as num?)?.toInt() ?? 0,
+        note: j['note'] as String?,
       );
+
+  static const Map<String, String> _planeLabels = <String, String>{
+    'favorites': '收藏与追更',
+    'progress': '播放进度',
+    'providers': '内容源配置',
+  };
 }
 
 /// 云盘同步 + 自动备份的设置（`sync_settings_get` / `sync_settings_set`）
@@ -2600,6 +2670,14 @@ class RemoteState {
     this.outroEnd,
     this.autoSkip = true,
     this.skipEditing,
+    this.cover,
+    this.isLive = false,
+    this.liveChannelId = '',
+    this.liveChannels = const [],
+    this.speed = 1.0,
+    this.danmaku = false,
+    this.fullscreen = false,
+    this.qualities = const [],
   });
 
   final bool playing;
@@ -2640,6 +2718,30 @@ class RemoteState {
   /// 正在编辑哪个端点（手机端据此高亮）
   final String? skipEditing;
 
+  /// 当前片子的封面图（手机端「正在播放」卡片显示）
+  final String? cover;
+
+  /// **当前是直播**（而不是点播）—— 手机端据此把「选集」换成「频道列表」
+  final bool isLive;
+
+  /// 当前直播频道 id
+  final String liveChannelId;
+
+  /// 直播频道列表 `(id, 名称)`，供手机端选台
+  final List<(String, String)> liveChannels;
+
+  /// 当前播放倍速（1.0 = 正常）
+  final double speed;
+
+  /// 弹幕是否开着
+  final bool danmaku;
+
+  /// 客户端是否处于全屏
+  final bool fullscreen;
+
+  /// 可选的清晰度 / 线路候选（只给显示名，地址不下发 —— 常带一次性签名）
+  final List<String> qualities;
+
   /// 转成 `remote_report_state` 要的 Map
   ///
   /// ⚠️ **片头片尾字段必须全给**（哪怕是 null）——
@@ -2664,6 +2766,14 @@ class RemoteState {
         'outro_end': outroEnd,
         'auto_skip': autoSkip,
         'skip_editing': skipEditing,
+        'cover': cover,
+        'is_live': isLive,
+        'live_channel_id': liveChannelId,
+        'live_channels': liveChannels.map((e) => [e.$1, e.$2]).toList(),
+        'speed': speed,
+        'danmaku': danmaku,
+        'fullscreen': fullscreen,
+        'qualities': qualities,
       };
 
   /// 「没有播放器」时上报的状态

@@ -103,6 +103,86 @@ pub fn parse_meta(src: &str) -> PluginMeta {
     }
 }
 
+/// 从插件源码里提取**上游接口地址**（只服务界面显示，不参与插件运行）
+///
+/// # 为什么需要它（Owner 缺陷 5）
+///
+/// > 你既然已经支持了 tvbox，那么就应该把所有的 tvbox 插件都还原成原本的
+/// > 链接，而不是现在转换后的插件
+///
+/// ★ 事实是**链接从来没丢过** —— TVBox 转换器把原始接口逐字写进了生成的
+///   `.js` 文件里（模板见 `tvbox.rs`），只是**界面从来没显示过**。
+///   实测本机 28 个插件：22 个 `tvbox-convert` 的头部注释与正文
+///   `const API` **逐字节相同**，6 个 `dsh` 里 2 个有 `const API`。
+///
+/// # 为什么只认头部注释的「上游接口」
+///
+/// ```text
+/// 头部注释：` * 上游接口（苹果CMS v10）：http://tyyszy.com/api.php/provide/vod`
+///   ⇒ 转换器专门写给人看的**来源说明**，22 个转换插件全有 ⇒ 认
+///
+/// 正文常量：`const API = 'https://api.bilibili.com'`
+///   ⇒ 这是**接口地址**，不是来源 ⇒ ✗ 不认（2026-10-09 修掉的 bug）
+/// ```
+///
+/// ⚠️ 曾经也认正文那条，结果手写插件的「接口地址」被当成了「安装来源」，
+///    UI 据此把它判成「按链接安装的插件」⇒ 编辑框预填接口地址、
+///    保存时当成链接去重新安装 ⇒ **覆盖坏用户的本地插件**。细节见函数体里的注释。
+///
+/// ★ 手写插件返回空串是**正确**的：它的来源就是用户自己写的，没有"来源链接"。
+///   真正按链接安装的来源存在 `plugins/.meta/<id>.json` 的 `source_url` 里。
+///
+/// # ⚠️ 为什么不改 `parse_meta` 而是单开一个函数
+///
+/// `parse_meta` 的语义是「解析 `@key value` 形式的元信息」，它的结果进
+/// `PluginMeta` 并参与插件注册。`上游接口` **不是** `@key`，塞进
+/// `parse_meta` 会让「元信息解析」多一条隐式规则，将来改 tag 扫描逻辑时
+/// 容易连坐。这里只读源码、只返回字符串，**零副作用**。
+///
+/// ⚠️ 只认 `http://` / `https://` 开头 —— 否则像
+///    `const API = '/api.php/provide/vod'`（相对路径）这种会被当成链接显示，
+///    用户复制出来是个**不能用的东西**。
+pub fn upstream_of(src: &str) -> String {
+    // ① 头部注释（只看开头 2KB，与 `parse_meta` 同一个约定）
+    let head: String = src.chars().take(2048).collect();
+    if let Some(i) = head.find("上游接口") {
+        let rest = &head[i..];
+        // 全角「：」是转换器写的；半角「:」兼容手写插件
+        let start = match rest.find('：') {
+            Some(p) => Some(p + '：'.len_utf8()),
+            None => rest.find(':').map(|p| p + 1),
+        };
+        if let Some(p) = start {
+            // 取到行尾，并容忍「行尾就是注释结束符 */」的写法
+            let line = rest[p..].lines().next().unwrap_or("");
+            let url = line.trim().trim_end_matches("*/").trim();
+            if url.starts_with("http://") || url.starts_with("https://") {
+                return url.to_string();
+            }
+        }
+    }
+
+    /*
+     * ⚠️⚠️ 这里**故意**没有「正文 `const API` 回退」—— 那是 2026-10-09 修掉的 bug。
+     *
+     * 原来还有一条：找不到头部注释时，去正文找 `const API = 'https://…'` 当上游。
+     * 但那个常量是**接口地址**，不是**安装来源**，两者根本不是一回事：
+     * ```text
+     * bilibili.js 正文第 91 行  const API = 'https://api.bilibili.com'
+     *   ⇒ upstream = "https://api.bilibili.com"
+     *   ⇒ 编辑对话框判成「链接型」⇒ 预填这个地址、类型锁死
+     *   ⇒ 用户点保存会去拉 api.bilibili.com 当插件装 ⇒ **本地插件被覆盖坏**
+     * ```
+     * 手写插件（bilibili 就是）根本没有"安装来源"这个概念 ——
+     * 它的来源是用户自己写的。宁可为空，也不能编一个。
+     *
+     * ★ 真正的安装来源在 `plugins/.meta/<id>.json` 的 `source_url`
+     *   （见 `install_plugin` / `list_plugin_sources`），与这里无关。
+     */
+
+    String::new()
+}
+
 // ─────────────────────────── 熔断 ───────────────────────────
 
 /// 生成一个「按墙钟时间」判断的中断处理器
@@ -283,6 +363,32 @@ impl JsPluginProvider {
     /// （**踩过**：默认给了 `vod: true` 而 `live/search` 留在 false，
     /// 导致直播页与搜索完全看不到这个源 —— registry 是按
     /// `manifest().capabilities.live` 过滤的。）
+    /// resolve 的**第一个参数**该传什么（抽出来是为了可单测）
+    ///
+    /// # ★★★ 为什么要有这个函数（Owner 报的 bug）
+    ///
+    /// > 播放第二集,实际还是第一集,这是bug
+    ///
+    /// tvbox 转换插件的 detail() 里剧集 id **就是剧集地址**
+    /// （`154.js:369  id: e.url`），而它的 resolve(id) 只认第一个参数、
+    /// **完全忽略 req**（`154.js:392`，见 resolve 里的长注释）。
+    /// 宿主原来传 id.native（条目 id，如 "150758"）⇒ 插件去查详情、
+    /// 取 eps[0] ⇒ 无论点第几集都返回第一集。
+    ///
+    /// ⇒ **episode_id 明确是 http(s) URL 时，用它当第一个参数。**
+    ///
+    /// # ⚠️ 判据必须精确（不许无条件替换）
+    ///
+    /// 别的插件用 episode_id 表达**别的东西** —— 最典型的是 cycani，
+    /// 它拿它当 section_id（纯数字 51463）。一律替换会把次元城打坏。
+    /// ⇒ 只有 `starts_http` 为真才替换；否则**原样**返回条目 id
+    ///   （= 改动前行为，逐字相同）。
+    fn resolve_first_arg(&self, id: &MediaId, req: &PlayRequest) -> String {
+        match req.episode_id.as_deref() {
+            Some(ep) if crate::tvbox::starts_http(ep) => ep.to_string(),
+            _ => self.strip_prefix(&id.native),
+        }
+    }
     pub fn from_source(source: &str) -> std::result::Result<Self, String> {
         let meta = parse_meta(source);
         if meta.id.is_empty() {
@@ -2034,10 +2140,57 @@ impl MediaProvider for JsPluginProvider {
             *ep = self.strip_prefix(ep);
         }
 
+        /*
+         * ★★★ 第一个参数：tvbox 转换插件要的是**剧集地址**，不是条目 id
+         *
+         * # Owner 报的 bug
+         * > 播放第二集,实际还是第一集,这是bug
+         *
+         * # 根因（逐行核对过）
+         *
+         * tvbox 转换插件的 detail() 里，剧集的 id **就是剧集地址**
+         * （154.js:369  id: e.url,  // 直接存 URL），而它的 resolve(id)
+         * **只认第一个参数、完全忽略第二个 req**：
+         * ```text
+         * 154.js:392  async resolve(id) {
+         * 154.js:415    let url = String(id)
+         * 154.js:417    if (!/^https?:\/\//i.test(url)) {
+         * 154.js:419      const j = await getJson(...ids=${url})   // ← 拿它当**条目 id**
+         * 154.js:425      url = eps[0].url                          // ★★★ 永远第一集
+         * 154.js:426    }
+         * ```
+         * 宿主原来把 id.native（条目 id，如 "150758"）当第一个参数传下去，
+         * 于是插件每次都在第 419 行去查详情、在第 425 行取 eps[0]
+         * ⇒ **无论点第几集都返回第一集**，与 Owner 的描述完全吻合。
+         *
+         * # 为什么改成"看 episode_id 是不是 URL"而不是别的判据
+         *
+         * 宿主**不能**改用户数据目录里的插件文件（那是用户数据），
+         * 所以只能在这一层做适配。而 PlayRequest.episode_id 在
+         * tvbox 转换插件里**就是剧集地址**（上面那行 id: e.url），
+         * 所以：**它是 http(s) URL 时，就用它当第一个参数**。
+         *
+         * # ⚠️ 判据必须**精确**：只有明确是 http(s) URL 才替换
+         *
+         * 别的插件用 episode_id 表达**别的东西** ——
+         * 最典型的是 cycani：它拿 episode_id 当 section_id
+         * （见上面那段前缀坑，插件要的是纯数字 51463）。
+         * 若不加判断地一律替换，次元城那条路会被打坏。
+         * ⇒ 用 starts_http（与 tvbox.rs 同一份语义：大小写不敏感、
+         *   必须是完整 http:// / https:// 前缀），
+         *   不是 URL 就**原样**传条目 id（= 改前行为，逐字相同）。
+         *
+         * # 反向控制（必须逐字不变）
+         *
+         * episode_id 为 None / 空串 / "150758" / "cycani:51463"
+         * 时，走的都是 else 分支 ⇒ 第一个参数仍是 strip_prefix(id.native)
+         * ⇒ 与改动前**完全一致**，不影响从播放历史/追更直接续播的路径。
+         */
+        let first_arg = self.resolve_first_arg(id, req);
+
         let expr = format!(
             "plugin.resolve({}, {})",
-            serde_json::to_string(&self.strip_prefix(&id.native))
-                .unwrap_or_else(|_| "\"\"".into()),
+            serde_json::to_string(&first_arg).unwrap_or_else(|_| "\"\"".into()),
             serde_json::to_string(&req_js).unwrap_or_else(|_| "{}".into())
         );
         let json = self.call_js(&expr).await?;
@@ -2925,6 +3078,80 @@ mod tests {
     }
 
     // ═══════════════════════════════════════════════════════════════
+    //  task-5：上游接口地址提取（缺陷 5）
+    // ═══════════════════════════════════════════════════════════════
+
+    /// ★★ 转换器生成的插件：头部注释里的上游接口要能提出来
+    ///
+    /// 这是缺陷 5 的主路径 —— 本机 22 个 `tvbox-convert` 插件**全部**
+    /// 靠这条拿到链接（实测 22/22 命中）。
+    #[test]
+    fn upstream_from_head_comment() {
+        // 真实文件 `tyyszy.js` 的头部（逐字抄，只截了相关几行）
+        let src = "/**\n * 影视天涯 —— 由 TVBox 源自动转换\n *\n * @id tyyszy\n * @author tvbox-convert\n *\n * 上游接口（苹果CMS v10）：http://tyyszy.com/api.php/provide/vod\n *\n * ⚠️ 这是**自动生成**的插件。\n */\nconst API = \"http://tyyszy.com/api.php/provide/vod\";";
+        assert_eq!(upstream_of(src), "http://tyyszy.com/api.php/provide/vod");
+    }
+
+    /// ★★★ 手写插件**不能**拿正文 `const API` 当来源（2026-10-09 修掉的 bug）
+    ///
+    /// Owner 报的症状（截图）：源码装的 `bilibili` 插件，点「编辑」显示成了
+    /// 「链接安装」并预填 `https://api.bilibili.com` —— 那是**接口地址**。
+    ///
+    /// # 原实现与危害
+    /// ```text
+    /// 原来这条回退是"预期行为"，还配了单测（本测试的旧版本）。
+    /// 但 upstream 被 UI 用来判「这个插件是不是按链接装的」（plugin_edit_dialog.dart:197）
+    /// ⇒ 误判成链接型 ⇒ 编辑框预填接口地址 + 类型锁死
+    /// ⇒ 点保存走 install_plugin(那个地址) ⇒ **把本地插件覆盖坏**。
+    /// ```
+    ///
+    /// ⇒ 现在只认头部注释的「上游接口」；正文常量一律不认，返回空串。
+    ///   `bilibili` 属于"用户自己写的源码"，本来就没有安装来源。
+    #[test]
+    fn upstream_ignores_body_const_api() {
+        // ① 头部只有元信息、正文有 const API ⇒ 必须为空（这正是 bilibili 的形状）
+        let bili = "/** @id bilibili @name 哔哩哔哩 @author dsh */\nconst API = 'https://api.bilibili.com';";
+        assert_eq!(upstream_of(bili), "", "接口地址不能被当成安装来源");
+        // ② 三种引号都不认（整条回退都删了，不是只改一种）
+        assert_eq!(upstream_of("const API = \"https://a.example.com\""), "");
+        assert_eq!(upstream_of("const API = `https://b.example.com`"), "");
+        // ③ 但头部有「上游接口」时照常认 —— 转换器插件的主路径不受影响
+        let conv = "/**\n * 影视天涯\n * 上游接口（苹果CMS v10）：http://tyyszy.com/api.php/provide/vod\n */\nconst API = \"http://tyyszy.com/api.php/provide/vod\";";
+        assert_eq!(upstream_of(conv), "http://tyyszy.com/api.php/provide/vod");
+    }
+
+    /// ★★ 宁可为空也不能给错 —— 界面会把它当"上游链接"展示并可复制
+    ///
+    /// 三类的拒绝理由：
+    /// ```text
+    /// ① 相对路径    用户复制出来是个不能用的东西
+    /// ② 非 http 协议 file:// / javascript: 之类不该出现在"上游"位置
+    /// ③ 没有链接     本机 4 个内置源（cctv/cycani/iptv/tvbox-live）就是这种
+    /// ```
+    #[test]
+    fn upstream_is_empty_rather_than_wrong() {
+        // ① 相对路径
+        assert_eq!(upstream_of("const API = '/api.php/provide/vod'"), "");
+        // ② 非 http(s)
+        assert_eq!(upstream_of("const API = 'ftp://x.example.com'"), "");
+        // ③ 完全没有
+        assert_eq!(upstream_of("globalThis.plugin = { id: 'cctv' };"), "");
+        // ④ 头部那行是相对路径时，**不再**去看正文 —— 正文那条已删（会误判成来源）
+        let src = "/** 上游接口（苹果CMS v10）：/api.php/provide/vod */\nconst API = 'https://real.example.com';";
+        assert_eq!(upstream_of(src), "", "相对路径照旧不认，且不回头扫正文");
+    }
+
+    /// ★ 拼接式 `const API = base + "/x"` 也不能被扫出来（这条回退整个删了）
+    ///
+    /// 原来专门有个"只认第一个引号"的逻辑来防它 —— 现在不需要了，
+    /// 因为正文常量一律不看。保留断言是为了锁住"不会哪天又加回来"。
+    #[test]
+    fn upstream_ignores_concatenated_const_api() {
+        let src = "const API = base + \"/api.php/provide/vod\";";
+        assert_eq!(upstream_of(src), "");
+    }
+
+    // ═══════════════════════════════════════════════════════════════
     //  task-23：版本比较 / 元数据 / 历史档 / 老数据兼容
     // ═══════════════════════════════════════════════════════════════
 
@@ -3772,6 +3999,82 @@ globalThis.plugin = {
         assert!(c.server_side_history, "★ serverSideHistory 必须读到");
         // 没声明的要保持 false
         assert!(!c.live, "未声明的 live 不该变成 true");
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  task-9 ③：resolve 的**第一个参数**选谁（Owner：「播放第二集实际还是第一集」）
+    // ═══════════════════════════════════════════════════════════════
+
+    /// ★★★ episode_id 是 http(s) URL ⇒ 用它当第一个参数
+    ///
+    /// # 为什么
+    ///
+    /// tvbox 转换插件的 ¤detail()¤ 里剧集 id **就是剧集地址**
+    /// （¤154.js:369  id: e.url¤），而它的 ¤resolve(id)¤ 只认第一个参数、
+    /// **完全忽略 req**（¤154.js:392¤）⇒ 宿主若传条目 id，它就去查详情、
+    /// 取 ¤eps[0]¤ ⇒ **永远第一集**（Owner 报的 bug）。
+    #[test]
+    fn resolve_first_arg_uses_episode_url() {
+        let src = "/** @id t9tvbox @name 测试 */\n";
+        let p = JsPluginProvider::from_source(src).unwrap();
+
+        // 插件把收到的第一个参数原样回吐（探针插件）
+        let req = PlayRequest {
+            source_code: None,
+            episode_id: Some("https://cdn.test/e2.m3u8".into()),
+            quality: None,
+        };
+        let arg = p.resolve_first_arg(&MediaId::new("t9tvbox", "150758"), &req);
+        assert_eq!(
+            arg, "https://cdn.test/e2.m3u8",
+            "★ 第2集地址必须原样成为第一个参数（否则插件会退回第一集）"
+        );
+    }
+
+    /// ★★ 反向控制：episode_id **不是** URL ⇒ 与改前**逐字相同**（传条目 id）
+    ///
+    /// 这条是"不许把次元城打坏"的护栏：cycani 拿 ¤episode_id¤ 当 section_id，
+    /// 若不加判断地一律替换，它收到的东西就变了。
+    #[test]
+    fn resolve_first_arg_keeps_native_id_for_non_url() {
+        let src = "/** @id cycani @name 测试 */\n";
+        let p = JsPluginProvider::from_source(src).unwrap();
+        let id = MediaId::new("cycani", "51463");
+
+        for ep in [Some("51463"), Some("cycani:51463"), Some(""), None] {
+            let req = PlayRequest {
+                source_code: None,
+                episode_id: ep.map(|s| s.to_string()),
+                quality: None,
+            };
+            assert_eq!(
+                p.resolve_first_arg(&id, &req),
+                "51463",
+                "episode_id={ep:?} 时必须维持原行为（传剥过前缀的条目 id）"
+            );
+        }
+    }
+
+    /// ★ 前缀剥除仍然生效（改动的另一条护栏）
+    #[test]
+    fn resolve_first_arg_still_strips_prefix() {
+        let src = "/** @id cycani @name 测试 */\n";
+        let p = JsPluginProvider::from_source(src).unwrap();
+        let req = PlayRequest {
+            source_code: None,
+            episode_id: Some("cycani:51463".into()),
+            quality: None,
+        };
+        // 条目 id 带自己的前缀 ⇒ 剥掉
+        assert_eq!(
+            p.resolve_first_arg(&MediaId::new("cycani", "cycani:51463"), &req),
+            "51463"
+        );
+        // 别的 provider 的前缀不动
+        assert_eq!(
+            p.resolve_first_arg(&MediaId::new("cycani", "other:abc"), &req),
+            "other:abc"
+        );
     }
 
     /// ★★ 前缀只能加在**媒体条目**上，不能误伤剧集/线路/区块

@@ -515,20 +515,32 @@ void main() {
       );
     });
 
-    test('★★ `_flash` 会把消息同步到 `_toastRev`', () {
+    test('★★ `_flash` 走统一 toast（`_toastRev` 已退役为死通道）', () {
+      /*
+       * ★ 2026-10-10：这条原来断言 `_flash` 必须写 `_toastRev.value = msg;`
+       *   —— 那是**旧机制**：当时 host 的 toast 画在自己的 Stack 里，被整屏
+       *   push 路由盖住，所以二级页看不到任何反馈，才需要这条同步链路。
+       *
+       *   现在 `_flash` 走 `showAppToast`，而宿主 `ToastHost` 挂在
+       *   `lib/shell.dart` 的 `MaterialApp.builder` 里、**Navigator 之外**
+       *   ⇒ 二级页天然能弹，同步链路不再需要。
+       *   （那 5 条「ToastHost 真的挂在树上」的守卫在
+       *    `test/toast_host_mounted_test.dart`，本轮实测 5/5 绿。）
+       *
+       *   ⚠️ `_toastRev` **故意保留**（恒 null 的死通道）：删掉它要连带改
+       *   所有读取点，漏一个就是「二级页没反馈」的新回归。
+       */
       final flash = bodyOf(code, 'void _flash(String msg) {');
       expect(
-        flash.contains('_toastRev.value = msg;'),
+        flash.contains('showAppToast(context, msg)'),
         isTrue,
-        reason: '★★ `_flash` 必须同步 `_toastRev` —— 它是二级页唯一能看到'
-            '提示的通道（host 的 toast 被路由盖住）',
+        reason: '★★ `_flash` 必须走统一 toast —— 它挂在 Navigator 之外，'
+            '二级页也看得见（这正是 `_toastRev` 存在的理由已消失的原因）',
       );
-      // ★ 同时**必须**保留原有的 `_toast` 语义（一级页行为不许变）
       expect(
-        flash.contains('setState(() => _toast = msg);'),
-        isTrue,
-        reason: '★ 一级页原有的 `_toast` 通道**必须保留** —— '
-            '这个改动是**追加**，不是替换',
+        flash.contains('_toastRev.value = msg;'),
+        isFalse,
+        reason: '★ `_flash` 不该再写 `_toastRev`（那条通道已退役，恒 null）',
       );
     });
 
@@ -599,16 +611,27 @@ void main() {
       expect(page.contains('SettingsSubPage('), isTrue);
     });
 
-    test('★★ ⑥ 局域网遥控在 JS 插件入口**之前**（用户要求"放最上面"）', () {
-      final remote = raw.indexOf("title: '局域网遥控',");
-      final entry = raw.indexOf('JS 插件（二级页入口');
-      expect(remote > 0, isTrue, reason: '★ 前置：必须能找到遥控区块');
-      expect(entry > 0, isTrue, reason: '★ 前置：必须能找到 JS 插件入口');
-      expect(
-        remote < entry,
-        isTrue,
-        reason: '★★ 用户原话「局域网遥控设置放在最上面」⇒ 遥控必须在 JS 插件入口之前',
-      );
+    test('★★ ⑥「远程」分组排在「内容源与插件」之前（Owner：放最上面）', () {
+      /*
+       * ★ 2026-10-10：设置页信息架构重做后，遥控不再是一个裸区块，
+       *   而是被归进「远程」分组；JS 插件归在「内容源与插件」分组里。
+       *   ⇒ 判据改成比较**分组标签**的位置（那才是屏幕上真实看到的顺序），
+       *     而不是某个具体条目的标题。
+       *
+       *   Owner 的原话「局域网遥控设置放在最上面」依然成立：
+       *   「远程」是第一个分组。
+       */
+      final remote = raw.indexOf("SettingsGroupLabel(text: '远程'");
+      final plugins = raw.indexOf("SettingsGroupLabel(text: '内容源与插件'");
+      expect(remote > 0, isTrue, reason: '★ 前置：必须能找到「远程」分组');
+      expect(plugins > 0, isTrue, reason: '★ 前置：必须能找到「内容源与插件」分组');
+      expect(remote, lessThan(plugins),
+          reason: '★★ Owner 原话「局域网遥控设置放在最上面」⇒ '
+              '「远程」分组必须在「内容源与插件」之前');
+      // 「远程」还必须是**第一个**分组标签
+      final firstOther = raw.indexOf('SettingsGroupLabel(');
+      expect(firstOther, remote,
+          reason: '★★「远程」必须是第一个分组（Owner 要求的「放最上面」）');
     });
   });
 }

@@ -26,11 +26,12 @@
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 
 import 'package:sourin_spike/ui/subtitle/subtitle_panel.dart';
 import 'package:sourin_spike/ui/widgets/player_settings_sheet.dart';
+import 'package:sourin_spike/ui/app_scaffold.dart';
+import 'package:sourin_spike/ui/app_theme.dart';
 
 // ═══════════════════════════════════════════════════════════════════════
 //  注释剥离器（逐字照抄 `player_capability_test.dart:61-110`）
@@ -142,10 +143,10 @@ const List<String> _hostForbidden = <String>[
 // ═══════════════════════════════════════════════════════════════════════
 
 Widget _host(Widget child) {
-  final theme = FTheme.neutral.dark.desktop;
+  final theme = AppTheme.themeFor(Brightness.dark);
   return MaterialApp(
-    theme: theme.toApproximateMaterialTheme(),
-    builder: (_, c) => FTheme(data: theme, child: c ?? const SizedBox()),
+    theme: theme,
+    builder: (_, c) => AppThemeHost(data: theme, child: c ?? const SizedBox()),
     home: Scaffold(body: Stack(children: [child])),
   );
 }

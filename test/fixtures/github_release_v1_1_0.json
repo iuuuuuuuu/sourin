@@ -1,0 +1,47 @@
+{
+  "tag_name": "v1.1.0",
+  "name": "源影 v1.1.0",
+  "body": "## 本次更新\n\n- **新增**：按 ABI 选择安装包\n- 修复了若干问题\n- `更新下载方式` 现在支持镜像加速\n\n1. 第一项\n2. 第二项\n\n详见 [发行说明](https://github.com/sourin-app/sourin/releases/tag/v1.1.0)。",
+  "draft": false,
+  "prerelease": false,
+  "published_at": "2026-10-08T12:00:00Z",
+  "html_url": "https://github.com/sourin-app/sourin/releases/tag/v1.1.0",
+  "assets": [
+    {
+      "name": "Sourin-Setup-1.1.0.exe",
+      "size": 29800000,
+      "browser_download_url": "https://github.com/sourin-app/sourin/releases/download/v1.1.0/Sourin-Setup-1.1.0.exe",
+      "html_url": "https://github.com/sourin-app/sourin/releases/tag/v1.1.0"
+    },
+    {
+      "name": "sourin-windows-v1.1.0.zip",
+      "size": 28300000,
+      "browser_download_url": "https://github.com/sourin-app/sourin/releases/download/v1.1.0/sourin-windows-v1.1.0.zip",
+      "html_url": "https://github.com/sourin-app/sourin/releases/tag/v1.1.0"
+    },
+    {
+      "name": "sourin-macos-v1.1.0.dmg",
+      "size": 130000000,
+      "browser_download_url": "https://github.com/sourin-app/sourin/releases/download/v1.1.0/sourin-macos-v1.1.0.dmg",
+      "html_url": "https://github.com/sourin-app/sourin/releases/tag/v1.1.0"
+    },
+    {
+      "name": "sourin-android-arm64-v1.1.0.apk",
+      "size": 52000000,
+      "browser_download_url": "https://github.com/sourin-app/sourin/releases/download/v1.1.0/sourin-android-arm64-v1.1.0.apk",
+      "html_url": "https://github.com/sourin-app/sourin/releases/tag/v1.1.0"
+    },
+    {
+      "name": "sourin-android-armv7-v1.1.0.apk",
+      "size": 41000000,
+      "browser_download_url": "https://github.com/sourin-app/sourin/releases/download/v1.1.0/sourin-android-armv7-v1.1.0.apk",
+      "html_url": "https://github.com/sourin-app/sourin/releases/tag/v1.1.0"
+    },
+    {
+      "name": "SHA256SUMS.txt",
+      "size": 800,
+      "browser_download_url": "https://github.com/sourin-app/sourin/releases/download/v1.1.0/SHA256SUMS.txt",
+      "html_url": "https://github.com/sourin-app/sourin/releases/tag/v1.1.0"
+    }
+  ]
+}

@@ -39,11 +39,12 @@
 // ```
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
 
 import 'package:sourin_spike/ui/widgets/skip_marker_dialog.dart';
 import 'package:sourin_spike/ui/widgets/skip_timeline.dart';
+import 'package:sourin_spike/ui/app_scaffold.dart';
+import 'package:sourin_spike/ui/app_theme.dart';
 
 /// 认领一次 pump 期间积压的环境异常（无核心库的 FFI 异常等）
 ///
@@ -60,10 +61,10 @@ void _claim(WidgetTester tester) {
 /// ⚠️ `home:` 里**必须**有一个 `Scaffold` —— 那是"生产里提示能显示"的来源
 ///    （`PlayerPage.build` 返回 `Scaffold(...)`，见 `player_page.dart:6613`）。
 Widget _host({required Widget Function(BuildContext) body}) {
-  final theme = FTheme.neutral.light.desktop;
+  final theme = AppTheme.themeFor(Brightness.light);
   return MaterialApp(
-    theme: theme.toApproximateMaterialTheme(),
-    builder: (_, c) => FTheme(data: theme, child: c ?? const SizedBox()),
+    theme: theme,
+    builder: (_, c) => AppThemeHost(data: theme, child: c ?? const SizedBox()),
     home: Scaffold(body: Builder(builder: body)),
   );
 }

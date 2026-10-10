@@ -32,8 +32,9 @@
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:forui/forui.dart';
 import 'package:material_ui/material_ui.dart';
+import 'package:sourin_spike/ui/app_scaffold.dart';
+import 'package:sourin_spike/ui/app_theme.dart';
 
 /// 造 n 个可聚焦方块，排成 rows×cols
 List<FocusNode> _grid(int n) => List.generate(n, (_) => FocusNode());
@@ -92,15 +93,15 @@ void main() {
 
   testWidgets('② 套 FTheme + FToaster + FScaffold（真实壳的形状）', (t) async {
     final nodes = _grid(6);
-    final theme = FTheme.neutral.dark.desktop;
+    final theme = AppTheme.themeFor(Brightness.dark);
 
     await t.pumpWidget(MaterialApp(
-      theme: theme.toApproximateMaterialTheme(),
-      builder: (context, child) => FTheme(
+      theme: theme,
+      builder: (context, child) => AppThemeHost(
         data: theme,
-        child: FToaster(child: child ?? const SizedBox()),
+        child: child ?? const SizedBox(),
       ),
-      home: FScaffold(child: _gridWidget(nodes)),
+      home: AppScaffold(child: _gridWidget(nodes)),
     ));
     nodes[0].requestFocus();
     await t.pump();
@@ -113,7 +114,7 @@ void main() {
 
   testWidgets('③ 全局 HardwareKeyboard handler 吃掉 ←/→（复现 shell 的写法）', (t) async {
     final nodes = _grid(6);
-    final theme = FTheme.neutral.dark.desktop;
+    final theme = AppTheme.themeFor(Brightness.dark);
 
     // 复刻 shell.dart 的 _onGlobalKey：←/→ 直接返回 true（消费掉）
     bool handler(KeyEvent e) {
@@ -130,12 +131,12 @@ void main() {
     addTearDown(() => HardwareKeyboard.instance.removeHandler(handler));
 
     await t.pumpWidget(MaterialApp(
-      theme: theme.toApproximateMaterialTheme(),
-      builder: (context, child) => FTheme(
+      theme: theme,
+      builder: (context, child) => AppThemeHost(
         data: theme,
-        child: FToaster(child: child ?? const SizedBox()),
+        child: child ?? const SizedBox(),
       ),
-      home: FScaffold(child: _gridWidget(nodes)),
+      home: AppScaffold(child: _gridWidget(nodes)),
     ));
     nodes[0].requestFocus();
     await t.pump();
@@ -148,15 +149,15 @@ void main() {
 
   testWidgets('④ 显式注册 DirectionalFocusIntent（候选修法）', (t) async {
     final nodes = _grid(6);
-    final theme = FTheme.neutral.dark.desktop;
+    final theme = AppTheme.themeFor(Brightness.dark);
 
     await t.pumpWidget(MaterialApp(
-      theme: theme.toApproximateMaterialTheme(),
-      builder: (context, child) => FTheme(
+      theme: theme,
+      builder: (context, child) => AppThemeHost(
         data: theme,
-        child: FToaster(child: child ?? const SizedBox()),
+        child: child ?? const SizedBox(),
       ),
-      home: FScaffold(
+      home: AppScaffold(
         child: Shortcuts(
           shortcuts: const {
             SingleActivator(LogicalKeyboardKey.arrowLeft):

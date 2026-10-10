@@ -206,12 +206,27 @@ class HlsDownloadResult {
     required this.bytes,
     required this.segments,
     required this.elapsed,
+    this.paused = false,
+    this.partPath,
   });
 
   final String path;
   final int bytes;
   final int segments;
   final Duration elapsed;
+
+  /// ★★★ task-11 ③：true = **因为用户暂停而收尾**（不是完成，也不是失败）
+  ///
+  /// # 为什么暂停要「正常返回」而不是抛异常
+  /// ```text
+  /// 本类的 catch 分支有一条硬纪律：「失败绝不留半截文件」⇒ 删 .part。
+  /// 而暂停**必须**保留 .part（已下好的分片一片不丢，继续时从下一片接上）。
+  /// ⇒ 暂停不能走异常路径，只能走「正常返回 + 一个标志位」。
+  /// ```
+  final bool paused;
+
+  /// 暂停时**半成品**的路径（`<目标>.part`）—— 继续下载时从它接着写
+  final String? partPath;
 
   double get mb => bytes / 1048576;
 }
@@ -243,6 +258,18 @@ class HlsDownloader {
     List<(String, String)> headers = const [],
     void Function(int done, int total)? onProgress,
     bool Function()? isCancelled,
+
+    /// ★★★ task-11 ③：**暂停**判据 —— 在**分片边界**被问。
+    ///
+    /// 返回 true ⇒ 立即停止拉新分片，但**正常返回**（保留 .part）。
+    /// ⚠️ 与 [isCancelled] 语义**不同**：后者抛异常 ⇒ .part 被删。
+    bool Function()? isPaused,
+
+    /// ★★★ task-11 ③ 续传：.part 里**已经写完**的分片数（跳过它们）
+    ///
+    /// 由调用方从任务状态带来（暂停时 `HlsDownloadResult.segments` 回报的值）。
+    /// null / 0 = 全新下载。
+    int? initialDone,
   }) async {
     final sw = Stopwatch()..start();
     final client = HttpClient()
@@ -283,18 +310,111 @@ class HlsDownloader {
         throw HlsDownloadException('播放列表里没有分片地址。');
       }
 
-      // ② 顺序拉分片，边拉边拼（顺序写 = 拼出来的文件天然可播）
-      final sink = part.openWrite();
-      var bytes = 0;
+      /*
+       * ★★★ task-11 ③：**续传** —— 已存在的 .part 不覆盖，从它后面接着写。
+       *
+       * # 为什么续传是安全的（不需要分片级断点文件）
+       * ```text
+       * HLS 是**定序**的：分片 0,1,2,…,N 必须按序拼接才有意义。
+       * .part 的长度 = 已完整写入的分片字节数之和（暂停点永远在分片边界）。
+       * ⇒ 只要记下"写到第几片"就能接上。
+       *
+       * ★ 不记分片号、改用**按字节数反推**：每片长度已知（先 HEAD/GET 拿到），
+       *   但那要额外请求。更稳的做法是续传时**重放前 k 片**的判定 ——
+       *   见 download() 的 initialDone 参数：调用方从任务状态里带来。
+       * ```
+       */
+      // ★★★ CR-24：**按 [initialDone] 决定打开模式，不看盘上有没有 .part**
+      //
+      // # 判据（这条判据在真机上能红，见 test/zz_cr_dl_c24_hls_part_test.dart）
+      // ```text
+      // 旧实现：只要盘上有非空 .part 就 append —— 哪怕这次是全新下载。
+      // .part 遗留的常见成因是**进程被杀 / 断电** ⇒ 那次的 catch 根本没跑 ⇒
+      // 盘上留着一段半截文件。用户重试（initialDone = 0）时：
+      //     旧半截 1 MB + 新完整 48 KB ⇒ 成品在拼接点损坏。
+      // 实测（未修）：成品 1097728 = 1048576 + 49152，正是「叠在一起」。
+      // ```
+      //
+      // # 两个条件缺一不可
+      // · `initialDone > 0` = 调用方**确实是在续传**（否则要的是覆盖）；
+      // · `.part` 非空       = 前面那几片**真的在盘上**。
+      // 只看后者的旧行为，在 `initialDone > 0 但 .part 已被清理` 时会
+      // 跳过从未写入的前 N 片 ⇒ 成品**缺片**（实测少 5 片 = 20480 字节）。
+      final wantResume = (initialDone ?? 0) > 0;
+      final partBytes =
+          part.existsSync() ? part.lengthSync() : 0;
+      final append = wantResume && partBytes > 0;
+      //
+      // ★ 要 append 却发现 .part 已经没了/空了 ⇒ skip 必须跟着归零：
+      //   前面那几片从来没落过盘，跳过它们 = 成品缺片（比重复拼接更隐蔽，
+      //   因为文件长度看着「差不多」，只有播到缺口才会卡住）。
+      final staleSkip = wantResume && !append;
+      final sink = append
+          ? part.openWrite(mode: FileMode.append)
+          : part.openWrite();
+      var bytes = append ? partBytes : 0;
       try {
         final ordered = <HlsSegment>[
           if (pl.initUri != null) HlsSegment(uri: pl.initUri!),
           ...pl.segments,
         ];
         total = ordered.length;
+        /*
+         * ★★★ task-11 ③ 续传：跳过已经写进 .part 的分片。
+         *
+         * `initialDone` 由调用方从任务状态带来（= 暂停时下载器回报的 segments）。
+         * ⚠️ 为什么必须**跳过而不是重下**：重下会让 .part 里出现重复分片
+         *    ⇒ 拼出来的文件在拼接点坏掉（播放器会卡在那个时间点）。
+         */
+        // ★ [staleSkip] = 调用方说"已经下过 N 片"，但盘上的 .part 已经
+        final skip = staleSkip ? 0 : (initialDone ?? 0).clamp(0, total);
+        if (staleSkip && (initialDone ?? 0) > 0) {
+          AppLog.write('DL',
+              '续传标记 $initialDone 片但 .part 已丢失 ⇒ 从头重下 $fileName');
+        }
         for (var i = 0; i < ordered.length; i++) {
+          if (i < skip) continue; // ★ 续传：这一片已在 .part 里了
           if (isCancelled?.call() ?? false) {
             throw HlsDownloadException('已取消');
+          }
+          /*
+           * ★★★ task-11 ③：**分片边界**检查暂停。
+           *
+           * 位置在这里（拿下一片**之前**）是有意的：
+           * · 已写进 sink 的分片全部落盘，一片不丢；
+           * · 不会出现"半片"—— 分片是不可分割的写入单位。
+           * ★ 正常收尾（flush + close）后**返回**，走 return 而不是 throw，
+           *   这样下面那条"失败删 .part"的 catch 就不会碰到它。
+           */
+          if (isPaused?.call() ?? false) {
+            /*
+             * ★★ 关键：这里**只 flush，不 close**。
+             *
+             * 踩过的坑（探针实测报的错）：
+             * ```text
+             * PathAccessException: Cannot rename file to '…第01集 探针.ts',
+             *   path = '…第01集 探针.ts.part'
+             *   (OS Error: 另一个程序正在使用此文件…, errno = 32)
+             * ```
+             * 原因：这里 close 一次、外面 finally 又 close 一次 ⇒
+             *   **同一个 sink 被关两次**，句柄状态错乱 ⇒ 续传那一轮
+             *   写完 rename 时 Windows 报「文件被占用」。
+             * ⇒ 收尾统一交给 finally 的 close（它只跑一次，成功/暂停/失败都覆盖）。
+             */
+            await sink.flush();
+            AppLog.write(
+              'DL',
+              '整片暂停 ${target.path}.part（已下 i=$i/$total 片、'
+                  '${(bytes / 1048576).toStringAsFixed(1)} MB 已落盘）',
+            );
+            return HlsDownloadResult(
+              path: target.path,
+              bytes: bytes,
+              segments: i,
+              elapsed: sw.elapsed,
+              paused: true,
+              partPath: part.path,
+            );
           }
           final seg = await _getBytes(client, ordered[i].uri, headers);
           sink.add(seg);

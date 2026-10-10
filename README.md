@@ -41,6 +41,7 @@ Flutter 版用 **media_kit + libmpv**（自带完整 FFmpeg，完全不碰 Media
 - [配置说明](#配置说明) ← **这一节最详细**
 - [数据目录](#数据目录)
 - [插件开发](#插件开发)
+- [主题包](#主题包) ← 自己写一套配色（JSON，零门槛）
 - [测试](#测试)
 - [常见问题](#常见问题)
 - [许可证](#许可证)
@@ -205,9 +206,12 @@ Copy-Item rust\sourin_core\target\release\sourin_core.dll windows\
 
 `windows/CMakeLists.txt` 会在构建时把它拷到 runner 目录。
 
-> ⚠️ **CMake 的拷贝是按时间戳的** —— 重编了 `.dll` 但 mtime 没变（比如从备份还原）
-> 时，构建会**静默跳过**拷贝，你跑的还是旧的。这是本项目踩过的真事故：
-> 症状是「改了 Rust 但行为没变」。**改完核心一定核 mtime，或直接删掉目标文件**。
+> ⚠️ **`.dll` 必须真的重新编出来。** `cargo build --release` 在源码没改动时会
+> 直接跳过，`mtime` 保持不变；此时若你只是把一个**旧的** `.dll` 拷回
+> `rust/sourin_core/target/release/`，构建会把那个旧件原样装进包 ——
+> 症状是「改了 Rust 但行为没变」。**改完核心请核 `sourin_core.dll` 的哈希或
+> `mtime` 确实变了**。（`windows/CMakeLists.txt` 用的是 `install(FILES ...)`，
+> 它会无条件复制源件，不按时间戳判断；需要强制刷新时直接删掉包目录里的那个 `.dll`。）
 
 ### 4. 编 Flutter
 
@@ -646,6 +650,8 @@ flutter build macos --release -t lib/shell.dart
 ├── tvbox-sources.json          TVBox 订阅来源
 ├── remote-pref.json            手机遥控配置
 ├── sync-settings.json          WebDAV 配置（不含密码）
+├── themes/                     主题包目录（*.json，见「主题包」）
+│   └── *.json                  自定义配色
 ├── plugins/                    插件目录
 │   ├── *.js                    插件源码
 │   └── .data/*.json            插件私有数据（含凭据，注意保护）
@@ -670,13 +676,141 @@ flutter build macos --release -t lib/shell.dart
 
 ---
 
+## 主题包
+
+主题包是**一个 JSON 文件**，描述一套配色。放进数据目录下的 `themes/`
+就会自动出现在「设置 → 主题 → 配色」里；也可以在那一页直接
+**从文件导入**或**粘贴 JSON**。切换即时生效，不需要重启。
+
+> 这一节对应 Owner 的一条需求：「主题如果可以做多主题就是外部插件式
+> 或者之类的，能做的话就做一下」。
+
+### 「明暗」与「配色」是两件独立的事
+
+主题页分成两个区块，这不是为了凑成两个下拉框：
+
+| 区块 | 管什么 | 可选值 |
+|---|---|---|
+| **明暗** | 这个界面是亮底还是暗底 | 跟随系统 / 浅色 / 深色 |
+| **配色** | 这个界面的具体颜色 | 午夜 / 日间 / OLED 纯黑 / 深海蓝 / 樱粉 / 森绿 / 你的自定义 |
+
+所以「深色 + 樱粉」是合法的组合。**没有选配色时**完全退回原来的
+三态明暗行为（兼容旧偏好 `dsh.theme`）。
+
+> 播放器画面区域**始终深色**，不跟主题变 —— 亮色画面适配是 mpv 侧的
+> 另一套逻辑，与主题无关。
+
+### 最小主题包
+
+```json
+{
+  "name": "我的暗夜",
+  "brightness": "dark",
+  "colors": {
+    "primary": "#8ED9A8"
+  }
+}
+```
+
+只有三行也是合法的：**没写的字段一律用默认值**（深色主题的默认色板）。
+应用不会因为你少写了字段而拒绝它。
+
+### 全部字段
+
+```json
+{
+  "version": 1,
+  "id": "my-theme",
+  "name": "我的暗夜",
+  "brightness": "dark",
+
+  "colors": {
+    "background":       "#0A0A0A",
+    "surface":          "#171717",
+    "foreground":       "#FAFAFA",
+    "mutedForeground":  "#A1A1A1",
+    "primary":          "#E5E5E5",
+    "onPrimary":        "#171717",
+    "secondary":        "#262626",
+    "border":           "#1AFFFFFF",
+    "error":            "#FF6467"
+  },
+
+  "radius": 12,
+  "buttonPadding": { "horizontal": 10, "vertical": 11 }
+}
+```
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `version` | 整数 | 格式版本，当前是 `1`。写成更大的值**也能用**，只是未知字段会被忽略并给一条提示 |
+| `id` | 字符串 | 唯一标识。**省略时用文件名**（去掉 `.json`） |
+| `name` | 字符串 | 主题页上显示的名字。省略时叫「导入的主题」 |
+| `brightness` | `"dark"` \| `"light"` \| `"system"` | 省略 `system` 时按 `colors.background` 的亮度自动推断 |
+| `colors.*` | `#RGB` \| `#RRGGBB` \| `#AARRGGBB` | 颜色。`#RGB` 的简写**不支持**，请写全 |
+| `radius` | 0–40 | 控件圆角。省略 = 10 |
+| `buttonPadding` | 对象 | 按钮内边距，`horizontal` / `vertical` 都要给 |
+
+`colors` 里的角色对应关系：
+
+| 角色 | 用在哪 |
+|---|---|
+| `background` | 页面底色 |
+| `surface` | 卡片 / 弹窗 / 提示条的底 |
+| `foreground` | 正文 |
+| `mutedForeground` | 次要文字（说明、时间戳） |
+| `primary` | 选中态、开关、滑杆、进度、主按钮底 |
+| `onPrimary` | 主色之上的文字（图标与文字） |
+| `secondary` | 次级填充面 |
+| `border` | 描边。**可以带 alpha**（写 `#1AFFFFFF` 就是白 10%） |
+| `error` | 错误提示 |
+
+### 写坏了会怎样
+
+**不会让应用起不来。** 这是这个功能最重要的一条性质，所以它是被测试
+守着的（`test/theme_pack_test.dart`）：
+
+| 你写错了 | 发生什么 |
+|---|---|
+| JSON 语法错误 | 该文件**不出现在列表里**，日志里一行说明。手动导入时会提示 |
+| 少了几个颜色 | 其余用默认值，**已写的照常生效** |
+| 颜色值是 `#GGGGGG` / `not-a-color` | **那一个**字段回落默认，并提示是哪个字段 |
+| `radius` 是 9999 | 忽略（圆角会画出整屏），并提示 |
+| `buttonPadding` 只写一半 | 整项忽略，并提示 |
+| `version` 比应用新 | 仍能用，未知字段忽略，并提示 |
+| `brightness` 拼错 | 按 `colors.background` 的亮度推断，并提示 |
+
+主题页里也会把警告原文显示出来 —— 一份「导入成功但有 N 处被忽略」
+比一句「导入成功」诚实得多：你不会以为每个字段都按你写的生效了。
+
+### 对比度
+
+内置的每一套主题都按 WCAG 校验过（`test/theme_pack_test.dart` 逐套断言）：
+
+| 角色 | 阈值 |
+|---|---|
+| 正文 | ≥ 4.5:1 |
+| 次要文字 | ≥ 3:1 |
+| 主色按钮（文字 vs 底） | ≥ 4.5:1 |
+
+⚠️ **自己写主题包时**：如果正文压到 4.5:1 以下，在电视和手机远距离
+上会明显看不清。可以自己量一下（取两个色的相对亮度再按
+`(亮+0.05)/(暗+0.05)` 算），或者从内置主题改起 —— 内置的那几套都过线。
+
+### 删除
+
+主题卡片右上角的 ✕ 删掉的是**文件本身**（内置主题没有 ✕，删不掉）。
+
+---
+
 ## 插件开发
 
 插件是**一个 JS 文件**，跑在 Rust 侧的 QuickJS 沙箱里。
 
 > **配套仓库**：[sourin-app/sourin-plugins](https://github.com/sourin-app/sourin-plugins) ——
 > 作者自用的源、完整的插件 API 契约（`docs/API.md`）与可运行示例（`examples/demo.js`）。
-> 本节的契约以**那个仓库的 `docs/API.md`** 为最新准；它是私有仓库，需要访问权限。
+> 本节的契约以**那个仓库的 `docs/API.md`** 为最新准。
+> 那个仓库是**公开仓库**（无需任何权限即可访问与克隆）。
 
 ### 最小插件
 
