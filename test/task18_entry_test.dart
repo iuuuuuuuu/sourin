@@ -70,6 +70,32 @@ const String _dllRel = r'build\windows\x64\runner\Release\sourin_core.dll';
 /// ★ 环境前提：DLL 在不在。不在就**跳过**（不是失败）。
 final bool _dllReady = File(_dllRel).existsSync();
 
+/// ★ 核心库的**平台相关**裸名 —— 必须与 `lib/core/ffi.dart` 的 `_openLibrary()`
+///   （`ffi.dart:222-259`）逐分支一致。那边是 private，测试里拿不到，
+///   所以这里手工镜像一份；**改 ffi.dart 的加载分支必须同步改这里**。
+///
+/// ```text
+/// ffi.dart:225-226  Windows          → sourin_core.dll
+/// ffi.dart:227-229  Android | Linux  → libsourin_core.so
+/// ffi.dart:230-254  macOS | iOS      → 先试包内绝对路径，找不到退回 libsourin_core.dylib
+/// ffi.dart:255-257  其它平台          → UnsupportedError
+/// ```
+///
+/// ★★ 为什么要派生（2026-10-11，CI run 38066756145 的 macOS 唯一 3 红）：
+///   这里原来写死 `contains('sourin_core.dll')` ⇒ macOS 缺件态的降级文案是
+///   `Failed to load dynamic library 'libsourin_core.dylib': dlopen(...)` ⇒
+///   这条断言在 macOS **恒红**、在 Windows 恒绿 —— 同一份门禁在两个平台说不同的话。
+///   而「降级文案里必须带上是**哪个库**没加载」这个意图是**平台无关**的，
+///   所以派生期望库名，而不是删断言、也不是写死单平台名。
+String _expectedCoreLibName() {
+  if (Platform.isWindows) return 'sourin_core.dll';
+  if (Platform.isAndroid || Platform.isLinux) return 'libsourin_core.so';
+  if (Platform.isMacOS || Platform.isIOS) return 'libsourin_core.dylib';
+  throw UnsupportedError(
+      '不支持的平台: ${Platform.operatingSystem}'
+      '（与 lib/core/ffi.dart:255-257 对齐 —— 那边同样会抛）');
+}
+
 /// 把 DLL 按**绝对路径**载进本进程 ⇒ 之后 `ffi.dart` 的裸名 open 命中它
 void _preloadCoreDll() {
   if (!_dllReady) return;
@@ -470,8 +496,13 @@ void main() {
         expect(verText, startsWith('读不到（核心未加载：'),
             reason: '$tag| ★★ 缺件态：核心版本必须**如实降级**成'
                 '「读不到（核心未加载：…）」，不许编一个版本号出来');
-        expect(verText, contains('sourin_core.dll'),
-            reason: '$tag| ★ 降级文案里必须带上是哪个库没加载');
+        // ★ 期望库名**派生**自平台分支（见 `_expectedCoreLibName` 的注释）：
+        //   Windows `sourin_core.dll` / macOS `libsourin_core.dylib` /
+        //   Android|Linux `libsourin_core.so` —— 写死单平台名 = 另一平台恒红。
+        final wantLib = _expectedCoreLibName();
+        expect(verText, contains(wantLib),
+            reason: '$tag| ★ 降级文案里必须带上是哪个库没加载'
+                '（本平台 ${Platform.operatingSystem} ⇒ 期望含「$wantLib」）');
       } else {
         expect(verText, isNot(startsWith('读不到')),
             reason: '$tag| ★★ 在位态：核心已加载，版本行不该再是降级文案');
@@ -822,4 +853,70 @@ void main() {
 //   （provider 列表、插件、直播分组）在本文件里**缺件态一律没测到**。
 // · 首屏 `CircularProgressIndicator` 只在**在位态**为 1（缺件态 `loadAll()`
 //   很快失败 ⇒ 首帧可能已经是 0）⇒ 该断言未放进两态公共路径。
+// ```
+//
+// ═══════════════════════════════════════════════════════════════════════
+//  T16（task-42）平台耦合修复记录 —— 2026-10-11
+// ═══════════════════════════════════════════════════════════════════════
+//
+// # 根因（CI run 38066756145，macOS job 114255854635：2805 passed / 3 failed）
+// ```text
+// 3 条红**全部**在本文件，是同一个用例的三条设备形态腿
+// （A.desktop / A.touchOnly / A.tv），Windows job 同 run 全绿 ⇒ 纯平台耦合缺陷。
+//   :470  expect(verText, startsWith('读不到（核心未加载：'))   ⇒ macOS 通过
+//   :473  expect(verText, contains('sourin_core.dll'))       ⇒ macOS 恒红
+// macOS 缺件态实际读数（CI 日志逐字）：
+//   Failed to load dynamic library 'libsourin_core.dylib': dlopen(libsourin_core.dylib, 0x0001): tried: ...
+// `Failed to load dynamic library` 里抛出的库名**是平台相关的**
+// （lib/core/ffi.dart:226 裸名 sourin_core.dll / :254 裸名 libsourin_core.dylib），
+// 而断言把 Windows 名写死了 ⇒ 同一份门禁在两个平台说不同的话。
+// ```
+//
+// # 改法：期望库名从平台分支**派生**，而不是删断言 / 放宽成恒真
+// ```text
+// :90-97  String _expectedCoreLibName()  —— 它对齐的是 lib/core/ffi.dart:222-258
+//         `_openLibrary()` 的平台分支（不是本文件 :68 的 _dllRel）：
+//           Windows         → 'sourin_core.dll'
+//           Android | Linux → 'libsourin_core.so'
+//           macOS  | iOS    → 'libsourin_core.dylib'
+//           其它            → throw UnsupportedError（与 ffi.dart:255-257 同口径）
+// :502-505  final wantLib = _expectedCoreLibName();
+//           expect(verText, contains(wantLib), reason: '…必须带上是哪个库没加载…');
+// ⇒ 断言的**意图**（降级文案必须点名是哪个库没加载）在两平台都保留，且都是真断言。
+// ```
+//
+// # 改后本机两态（Windows；dll 在位 / 改名 .hold 缺件）
+// ```text
+// 在位态：flutter test test/task18_entry_test.dart   ⇒ 00:11 +5: All tests passed!  exit=0
+// 缺件态：同命令（dll 改名 .hold）                   ⇒ 00:11 +5: All tests passed!  exit=0
+// 缺件态版本行读数（Windows 平台派生结果）：
+//   [T18E] A.desktop|   版本行 = 读不到（核心未加载：Invalid argument(s): Failed to load dynamic library 'sourin_core.dll': The specified module could not be found.
+//   [T18E] A.touchOnly| 版本行 = （同上）
+//   [T18E] A.tv|        版本行 = （同上）
+// analyze：flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings ⇒ exit=0
+// ```
+//
+// # 阳性对照（两轮，各自**逐字节**还原；口径同上面 T10 的 PC 表）
+// ```text
+// | # | 变异点 | 冻结 sha16 → 变异 → 还原 | exit | 红在哪 | Expected / Actual |
+// |---|---|---|---|---|---|
+// | PC-A | 本文件 :91 期望库名 'sourin_core.dll' → 'libsourin_core.dylib'（模拟「在 Windows 上写死 macOS 名」） | 19C5E9B4B36865B3 → D211073ECBC6DBE9 → 19C5E9B4B36865B3 ✔ | 1 | :503 | contains 'libsourin_core.dylib' / Actual 里是 'sourin_core.dll' |
+// | PC-B | lib/core/ffi.dart:226 产品裸名 'sourin_core.dll' → '_t16_no_such_core.dll'（把降级文案里的库名抹掉） | E142E3354E518FC0 → 51D262F4A48D6E01 → E142E3354E518FC0 ✔ | 1 | :503 | contains 'sourin_core.dll' / Actual 里是 '_t16_no_such_core.dll' |
+// ⇒ 两轮都是**三条腿同时红**（A.desktop / A.touchOnly / A.tv），尾部 `00:12 +2 -3: Some tests failed.`
+//   （+2 = B、C 两条不依赖核心的用例；-3 = A 组三条腿）。
+// ⇒ PC-A 证明「期望库名写错平台」必红；PC-B 证明「产品不再说出库名」必红
+//   ⇒ 这条断言不是恒真，它真的在看着产品代码。
+// 原始输出：.probe/ops/_t16_pcA_t18.txt / _t16_pcB_t18.txt（各 148 行）
+// 报告：.probe/ops/macos-task18-fix.md
+// ```
+//
+// # 本文件仍然**测不到**的（诚实标注）
+// ```text
+// · 本机是 Windows ⇒ `_expectedCoreLibName()` 的 macOS / Android / Linux 分支
+//   在本机**从未被执行过**（只被 analyze 检查了语法）。它们正确的依据是
+//   「与 lib/core/ffi.dart:222-258 逐分支人工比对」，不是本机跑出来的证据；
+//   真正在 macOS 上执行它的证据只能来自 CI。
+// · macOS 缺件态的库名 `libsourin_core.dylib` 来自 CI 日志文本，本机无法复现。
+// · 本函数是**复制**不是**引用**：若 ffi.dart 将来改裸名（例如 macOS 只走包内
+//   绝对路径），它不会自动跟着变。兜底判据是 PC-B —— 产品一旦不再说出库名就红。
 // ```
