@@ -245,8 +245,37 @@ void main() {
     final asPosix = canonicalLocalPathAs(raw, windows: false);
     debugPrint('A-3 规范化(win)   = ' + asWin);
     debugPrint('A-3 规范化(posix) = ' + asPosix);
-    expect(asWin, req.mediaId,
-        reason: '★ Windows 语义下 mediaId 就是规范化后的 key');
+    /*
+     * ★★★ OPS-19（macOS CI 红）修复点：这里钉的必须是**当前平台语义**的契约。
+     * ```text
+     * 生产代码（lib/ui/cache_page.dart:817-818）：
+     *   String canonicalLocalPath(String raw) =>
+     *       canonicalLocalPathAs(raw, windows: Platform.isWindows);
+     * ⇒ mediaId 的真契约 = 「按**当前平台**语义规范化后的路径」。
+     *   原来这里钉的是 asWin（**写死 Windows 语义**）：
+     *     · Windows 主机上 asWin == asNative ⇒ 恰好绿 ⇒ 这条断言**只在 Windows 上成立**，
+     *       正是「用本机平台伪装成通用契约」的假门禁形状；
+     *     · macOS 上 asWin 折小写、而生产算出的 mediaId 逐字保留大小写
+     *       ⇒ 必红（CI job 114203045495 逐字：Expected '…/T/t3_12_defA/…'
+     *       Actual '…/t/t3_12_defa/…'，Differ at offset 47）。
+     * ```
+     * ⇒ 改成 asNative：Windows 上 asNative == asWin（**强度不变**，照样钉死折小写），
+     *   macOS 上 asNative == asPosix（照样钉死逐字保留）—— 两边都是真契约，不跳过。
+     * ★ 平台差异本身**不靠本机平台**来证明：由下面 asWin/asPosix 的**显式参数**
+     *   断言（:279 起）在任意主机上钉死，含 POSIX 形状路径的恒等性（:296 起）。
+     */
+    final asNative = canonicalLocalPathAs(raw, windows: Platform.isWindows);
+    expect(req.mediaId, asNative,
+        reason: '★★ mediaId 必须 = 按**当前平台**语义规范化后的路径'
+            '（Windows ⇒ 折小写；POSIX ⇒ 逐字保留大小写）；'
+            '把期望写死成 Windows 语义（asWin）就会在 macOS 上必红 —— 即 OPS-19');
+    // ★ 平台分派本身也要有牙齿（两侧**都**断言，不是跳过）：
+    //   Platform.isWindows  ⇒ 必须等于 windows:true 的结果；
+    //   !Platform.isWindows ⇒ 必须等于 windows:false 的结果。
+    //   任何一侧写错都红，且这条在 Windows 与 macOS 上都会执行。
+    expect(asNative, Platform.isWindows ? asWin : asPosix,
+        reason: '★ canonicalLocalPath 的平台分派必须与 Platform.isWindows 一致'
+            '（Windows ⇒ asWin；POSIX ⇒ asPosix）—— 两侧都断言，无跳过');
     expect(asWin.toLowerCase(), asWin,
         reason: '★ Windows 规范化必须整体折小写（NTFS 大小写不敏感）');
     expect(asWin, isNot(equals(raw)),

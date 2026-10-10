@@ -76,6 +76,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:material_ui/material_ui.dart';
 
 import 'package:sourin_spike/core/device.dart';
+import 'package:sourin_spike/core/sourin_api.dart';
 import 'package:sourin_spike/ui/app_theme.dart';
 import 'package:sourin_spike/ui/app_scaffold.dart';
 import 'package:sourin_spike/ui/settings_page.dart';
@@ -104,6 +105,25 @@ const int kStaleDeltaThreshold = 4;
 
 /// Tab 最多按几次去找那一行（真输入，不是 requestFocus）
 const int kMaxTabs = 40;
+
+/// ★★★ 2026-10-10 新增（NAV）：核心库**此刻在不在交付目录里**
+///
+/// CI（Windows STEP 11 / macOS STEP 9）跑 flutter test 时构建步还没跑 ⇒
+/// `build\windows\x64\runner\Release\sourin_core.dll` 不存在；本机存在。
+/// 这个布尔就是「CI 条件 / 本机条件」的**唯一**判据 —— 不是平台判断，
+/// 因为同一个平台两种条件都可能出现（把 dll 改名就能在本机造出 CI 条件）。
+final bool _dllReady = File(_dllRel).existsSync();
+
+/// ★★★ 2026-10-10 新增（NAV）：降级文案的**第二份**字面串
+///
+/// ⚠️ 故意**再写一份**而不是直接引用产品常量 —— 若只引用
+/// `SettingsPageState.kCoreVersionFallbackLabel`，产品常量被改成空串 /
+/// 改成伪装成真实版本的串时，两边一起变 ⇒ 门禁失效（假绿）。
+/// 现在两份必须相等（见 `核心库不可用…` 用例第 ④ 条）。
+const String kCoreVersionFallbackLabelExpected = '核心未加载 · 架构与设备信息';
+
+/// ★★★ 2026-10-10 新增（NAV）：修复前「关于」行的版本串后缀（逐字）
+const String kCoreVersionLabelSuffix = ' · 架构与设备信息';
 
 void _preloadCoreDll() {
   final f = File(_dllRel);
@@ -192,6 +212,16 @@ Finder _entryRow(String title) => find
     .ancestor(of: find.text(title), matching: find.byType(SettingsEntryRow))
     .first;
 
+/// ★★★ 2026-10-10 新增（NAV）：「关于」那一行（「数据与外观」分组里，整页最后一行）
+Finder _aboutRow() => _entryRow('关于');
+
+/// ★★★ 2026-10-10 新增（NAV）：把一级设置页整页建出来的高视口
+///
+/// 实测（本机、无 dll 条件）：1444×805 只建出 **6** 个 [SettingsEntryRow]，
+/// 「关于」是第 9 行、**没被懒建** ⇒ 拿它做断言会得到
+/// 「找不到 widget」这种**仪器问题**式的假红。1444×3000 下 9 行全建出来。
+const Size kTallViewport = Size(1444, 3000);
+
 /// 这一行的 InkWell 自己的 FocusNode（焦点高亮挂在它上面）
 FocusNode _rowFocus(WidgetTester tester, String title) =>
     Focus.of(tester.element(find.text(title)));
@@ -271,6 +301,27 @@ void main() {
       final embyRow = _entryRow('Emby');
       expect(jsRow, findsOneWidget, reason: '设置列表里找不到「JS 插件」入口行');
       expect(embyRow, findsOneWidget, reason: '设置列表里找不到「Emby」入口行（对照组）');
+
+      // ★★★ 2026-10-10 新增（NAV）：把「整页崩成 ErrorWidget」钉死
+      //
+      // # 为什么必须有这一条（修复前的 CI 红就是它）
+      //
+      // 修复前 build() 里 :2358 同步读 `SourinApi.version`，核心库不在时抛
+      // `Invalid argument(s): Failed to load dynamic library 'sourin_core.dll'`
+      // ⇒ Flutter 把**整棵** SettingsPage 子树换成 ErrorWidget ⇒ 连
+      // :1797 的 `if (_loading) return AppLoading()` 都没机会执行。
+      // 那时读数：SettingsPage=1 / ErrorWidget=1 / SettingsEntryRow=0 /
+      // AppLoading=0 / ListView=0 ⇒ 上面两条 `_entryRow(...)` 先抛
+      // `StateError: Bad state: No element`（find.ancestor(...).first）。
+      //
+      // ⚠️ 这条**不能**靠 `_settle` 里那个 `takeException()` 兜 ——
+      // 它把异常吞了，于是「整页崩」在测试里表现为「找不到 widget」而不是
+      // 一个明确的读数。这里显式数 ErrorWidget，崩没崩一眼可见。
+      final navErrWidgets = find.byType(ErrorWidget).evaluate().length;
+      log('整页崩溃读数：ErrorWidget=$navErrWidgets（dllReady=$_dllReady）');
+      expect(find.byType(ErrorWidget), findsNothing,
+          reason: '设置页 build() 抛了异常 ⇒ 整棵子树被换成 ErrorWidget（读数=$navErrWidgets）。'
+              '这就是 CI 上那条唯一的红：核心库不在时不许让异常逃出 build()');
 
       final jsRect = tester.getRect(jsRow);
       final embyRect = tester.getRect(embyRow);
@@ -453,6 +504,159 @@ void main() {
       //   ⑥a 26 级（= hover 6 + focus 20）、⑥b 20 级
       // 恢复后 ⑥a 6 级（纯 hover）、⑥b 0 级。
       // 业主截图量到的 220,222,226 正是那 20 级。
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  }, timeout: kTimeout);
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // ★★★ 2026-10-10 新增（NAV）：「关于」行在**核心库取不到版本**时不许把
+  //     整页带崩 —— 这是 CI 上唯一那条红的硬门禁。
+  //
+  // # 缺陷（修复前，CI 上必红）
+  //
+  // `build()` 里 :2358 那行 `subtitle: '${SourinApi.version} · 架构与设备信息'`
+  // 是本页**唯一**的同步 FFI 读；核心库不在时
+  // `SourinCore.version` → `_ensureBound` → `DynamicLibrary.open('sourin_core.dll')`
+  // 同步抛 `Invalid argument(s): Failed to load dynamic library 'sourin_core.dll':`
+  // `The specified module could not be found. (error code: 126)`
+  // ⇒ Flutter 把**整棵** SettingsPage 子树换成 ErrorWidget
+  // ⇒ 连 :1797 `if (_loading) return AppLoading()` 都没机会执行。
+  // 实测读数：SettingsPage=1 / ErrorWidget=1 / SettingsEntryRow=0 /
+  //           AppLoading=0 / ListView=0。
+  //
+  // # 为什么 CI 上必现、本机却看不到（机制，不是平台判断）
+  //
+  // `_openLibrary()`（lib/core/ffi.dart:222-259）在 Windows 上用**裸名**
+  // `DynamicLibrary.open('sourin_core.dll')`。裸名走的是 **Windows 的模块搜索
+  // 顺序**，其中「已在进程内加载的同名模块」优先命中 ⇒
+  // 只要**同一个测试进程**里有人先用**绝对路径**载过一次，
+  // 后续裸名 open 就直接拿到那个已加载模块，**不再碰磁盘**。
+  // `setUpAll(_preloadCoreDll)` 干的就是这件事，所以本机（dll 在
+  // `build\windows\x64\runner\Release\` 里）永远绿。
+  //
+  // ⚠️ 已实测的两个反直觉事实（别被它们误导）：
+  //   A. **跨套件不漏**：`flutter test a b` 里 a 预加载、b 不预加载时，
+  //      b 的裸名 open **照样失败** ⇒ 预加载不跨进程泄漏
+  //      （探针 .probe/nav_probe/nav_preload_probe_test.dart +
+  //        nav_nocore_probe_test.dart 实测）。
+  //   B. **dll 不在文件系统 ≠ 裸名 open 失败**：本机上把 dll 改名之后，
+  //      本文件的 `setUpAll` 因为找不到文件而**不预加载**，可进程里只要还有
+  //      任何一处按绝对路径载过（本文件自己的 `_settle` 之后由
+  //      `task18_entry_test.dart` 那种 `DynamicLibrary.open(绝对路径)` 载入的
+  //      可能性同样存在），裸名就仍会命中。
+  //      ⇒ ★ 所以**模拟 CI 条件的唯一可靠办法是「让 dll 从磁盘消失」**，
+  //        不能反过来假设「文件不在 ⇒ open 必失败」。
+  //
+  // # 本用例怎么做到「两种环境都必须绿」
+  //
+  // 判据只有一个：`_dllReady`（= 交付目录里此刻有没有 dll）。
+  // 两个分支**都是真断言**，没有 `skip`、没有整块平台跳断言：
+  //   • 无 dll（= CI 条件）：整页必须渲染出来、「关于」行必须存在、
+  //     subtitle 必须是那句**常量**降级文案、且页面里不许有 ErrorWidget。
+  //   • 有 dll（= 本机条件）：subtitle 必须**逐字**等于真实版本串。
+  // ══════════════════════════════════════════════════════════════════════════
+  testWidgets('核心库取不到版本时，「关于」行降级显示且整页不崩（两态门禁）',
+      (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+    tester.view.physicalSize = kTallViewport;
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    try {
+      // ── ① 纯函数三态（不碰任何全局/平台状态，Windows 上就能把两侧语义钉死）──
+      //
+      // 范本：test/zz_t12_defect_a_probe_test.dart:237-280（显式参数的纯函数断言）。
+      log('纯函数：dllReady=$_dllReady '
+          'coreVersionLabelFor("9.9.9")=${SettingsPageState.coreVersionLabelFor("9.9.9", null)}');
+      expect(SettingsPageState.coreVersionLabelFor('9.9.9', null), '9.9.9$kCoreVersionLabelSuffix',
+          reason: '核心可用时输出必须与修复前**逐字相同**（\'\$version · 架构与设备信息\'）');
+      expect(SettingsPageState.coreVersionLabelFor('', null), kCoreVersionLabelSuffix,
+          reason: '空版本串也走「可用」分支 —— 降级只认「取版本失败」这一件事，'
+              '不许把「版本为空」也偷偷算成失败（那会吞掉真 bug）');
+      expect(
+          SettingsPageState.coreVersionLabelFor(
+              null, StateError('Bad state: No element')),
+          kCoreVersionFallbackLabelExpected,
+          reason: '取版本抛异常 ⇒ 必须给降级文案');
+      expect(
+          SettingsPageState.coreVersionLabelFor(
+              null, Exception('Invalid argument(s): Failed to load dynamic library')),
+          kCoreVersionFallbackLabelExpected,
+          reason: '核心库缺失（CI 的真实异常类型）也必须降级');
+      expect(() => SettingsPageState.coreVersionLabelFor(null, null),
+          throwsA(isA<ArgumentError>()),
+          reason: '★ 既没有版本也没有异常 ⇒ 不许静默降级：'
+              '没有「取版本失败」的证据就降级 = 把真 bug 伪装成「核心未加载」');
+
+      // ── ② 产品常量与门禁自己那份字面串必须一致 ──
+      //
+      // 门禁里那份是**另写一遍**的（见文件顶 kCoreVersionFallbackLabelExpected
+      // 的注释）：若这里改用产品常量做期望值，产品常量被改成空串时两边
+      // 一起变 ⇒ 假绿。
+      expect(SettingsPageState.kCoreVersionFallbackLabel,
+          kCoreVersionFallbackLabelExpected,
+          reason: '产品降级文案与门禁期望值不一致 —— 改文案必须同时改门禁，'
+              '否则这条门禁名存实亡');
+      expect(SettingsPageState.kCoreVersionFallbackLabel.trim(), isNotEmpty,
+          reason: '降级文案不许是空串（空 subtitle 会把这一行变成没有信息的空行）');
+
+      // ── ③ 真渲染：整页 + 两条行都在，且「关于」行 subtitle 就是降级文案 ──
+      final theme = AppTheme.themeFor(Brightness.light);
+      await tester.pumpWidget(MaterialApp(
+        debugShowCheckedModeBanner: false,
+        theme: theme,
+        builder: (context, c) =>
+            AppThemeHost(data: theme, child: c ?? const SizedBox()),
+        home: const ColoredBox(
+          color: LightTokens.bgBase,
+          child: SettingsPage(),
+        ),
+      ));
+      await _settle(tester);
+
+      final errs = find.byType(ErrorWidget).evaluate().length;
+      log('降级用例读数：dllReady=$_dllReady ErrorWidget=$errs '
+          'SettingsPage=${find.byType(SettingsPage).evaluate().length} '
+          'EntryRow=${find.byType(SettingsEntryRow).evaluate().length} '
+          'JS插件=${find.text('JS 插件').evaluate().length} '
+          '关于=${find.text('关于').evaluate().length}');
+      expect(find.byType(ErrorWidget), findsNothing,
+          reason: '整棵设置页子树被换成 ErrorWidget（读数=$errs）⇒ build() 抛了异常。'
+              '这就是 CI 上那条唯一的红：核心库不在时不许让异常逃出 build()');
+      expect(find.byType(SettingsPage), findsOneWidget,
+          reason: '一级设置页没建起来 —— 仪器问题，不是入口问题');
+      expect(find.text('JS 插件'), findsOneWidget,
+          reason: '核心库不在时「JS 插件」入口行也必须渲染出来');
+      expect(find.text('关于'), findsOneWidget,
+          reason: '核心库不在时「关于」入口行也必须渲染出来');
+
+      final aboutRow = _aboutRow();
+      expect(aboutRow, findsOneWidget, reason: '找不到「关于」入口行');
+      final aboutSubtitle =
+          tester.widget<SettingsEntryRow>(aboutRow).subtitle;
+      log('关于行 subtitle = 「$aboutSubtitle」');
+
+      if (!_dllReady) {
+        // ===== CI 条件：核心库不在交付目录里 =====
+        expect(aboutSubtitle, kCoreVersionFallbackLabelExpected,
+            reason: '核心库不可用时「关于」行必须显示降级文案（逐字）—— '
+                '这是本任务的产品修复本身');
+        expect(find.descendant(of: aboutRow, matching: find.text(kCoreVersionFallbackLabelExpected)),
+            findsOneWidget,
+            reason: '降级文案必须**真的画在「关于」那一行里**（只改字段不算）');
+        expect(RegExp(r'\d+\.\d+').hasMatch(aboutSubtitle), isFalse,
+            reason: '降级文案里不许出现任何像版本号的数字 —— '
+                '否则用户会把「核心未加载」误读成一个版本号，比不显示更糟');
+      } else {
+        // ===== 本机条件：核心库在，且 setUpAll 已把它按绝对路径载进本进程 =====
+        final real = '${SourinApi.version}$kCoreVersionLabelSuffix';
+        log('核心可用时「关于」行应当是「$real」');
+        expect(aboutSubtitle, real,
+            reason: '核心可用时输出必须与修复前**逐字相同** —— '
+                '修复不许顺手改掉正常路径上的文案');
+        expect(find.text(kCoreVersionFallbackLabelExpected), findsNothing,
+            reason: '核心可用时不许出现降级文案（否则用户看到的是假的「核心未加载」）');
+      }
     } finally {
       debugDefaultTargetPlatformOverride = null;
     }

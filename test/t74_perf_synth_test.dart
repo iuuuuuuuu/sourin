@@ -49,6 +49,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:material_ui/material_ui.dart';
 
+import 'package:sourin_spike/core/ffi.dart';
 import 'package:sourin_spike/core/models.dart';
 import 'package:sourin_spike/shell.dart';
 import 'package:sourin_spike/ui/follow_page.dart';
@@ -57,6 +58,7 @@ import 'package:sourin_spike/ui/search_page.dart';
 import 'package:sourin_spike/ui/settings_page.dart';
 import 'package:sourin_spike/ui/app_scaffold.dart';
 import 'package:sourin_spike/ui/app_theme.dart';
+import 'package:sourin_spike/ui/widgets/app_loading.dart';
 
 // ═══════════════════════════════════════════════════════════════════════
 //  仪器 ①：元素重建计数器
@@ -364,7 +366,10 @@ void main() {
   });
 
   // ═══════════════════════════════════════════════════════════════════════
-  //  PB 设置页：★ 合成侧**挂不上** —— 这里量的是「为什么挂不上」
+  //  PB 设置页：★ 2026-10-10 起**挂得上** —— 这里量滚动重建面
+  //
+  //  ⚠️ 本用例换过结论（旧标题「合成侧**挂不上**」）。换的理由见下面
+  //     `// # ⇒ 因此` 那一段 —— 不是放宽断言，是旧结论的前提被修好了。
   // ═══════════════════════════════════════════════════════════════════════
   //
   // # 实测读数（不是猜的）
@@ -375,15 +380,20 @@ void main() {
   //              Stack=1 ErrorWidget=1 CustomScrollView=0 SingleChildScrollView=0
   // ```
   //
-  // `SettingsPage.build()`（`settings_page.dart:1613-1621`）**只有两个出口**：
+  // `SettingsPage.build()` 只有两个出口（**修复前**的形状）：
   // ```dart
   //   if (_loading) return const Center(child: CircularProgressIndicator());
   //   return Stack(children: [ ListView(...), ... ]);
   // ```
-  // 而读数里 **Center=0 且 ListView=0** ⇒ 两个出口都没走到
+  // 而**修复前**的读数里 **Center=0 且 ListView=0** ⇒ 两个出口都没走到
   // ⇒ 只能是 `build()` **抛异常**，被框架换成了 `ErrorWidget`（ErrorWidget=1）。
   //
-  // # 抛在哪一行（逐字行号）
+  // ★ 修复后 loading 出口换成了 `return const Center(child: AppLoading());`
+  //   ⇒ 「页面建出来了」的判据是 `ListView > 0`（稳定态、非 loading），
+  //   而 `AppLoading` 计数只是诊断（loading 态下它 > 0 是正常的）。
+  //
+  // # 抛在哪一行（逐字行号 —— ⚠️ 以下是**修复前**的行号，现已漂移，
+  //   保留仅为记录旧读数是怎么来的）
   //
   // ```text
   // settings_page.dart:2059   subtitle: '${SourinApi.version} · 架构与设备信息',
@@ -392,27 +402,29 @@ void main() {
   //   → ffi.dart:182         static void _ensureBound()
   //   → ffi.dart:169         _lib = DynamicLibrary.open('sourin_core.dll');
   // ⇒ 测试进程里没有这个核心库 ⇒ 抛
-  //   ★ 库名**随平台**变（见下面 L467 那条断言的注释）——
-  //     本文件原来把 macOS 也当 Windows 写死了，所以在 macOS 上假红。
+  //   ★ 库名**随平台**变（`_openLibrary()` 按平台分派）—— 所以噪声里的
+  //     库名在不同 CI 平台上不同，任何断言都不许写死某一个平台的名字。
   // ```
   //
-  // ★ 这一行在 `ListView.children` 里 ⇒ 它一抛，**整个 ListView 元素**
-  //   被换成 `ErrorWidget`（所以 `ListView=0` 而不是 `ListView=1`），
+  // ★ 修复前：这一行在 `ListView.children` 里 ⇒ 它一抛，**整个 ListView
+  //   元素**被换成 `ErrorWidget`（所以 `ListView=0` 而不是 `ListView=1`），
   //   而 `Stack`/`Scaffold`/`SettingsPage` 还在（=1）—— 读数形状完全吻合。
+  //   修复后 `_probeCoreVersion()` 在 `initState()` 里就把它 try/catch 掉，
+  //   `build()` 不再抛 —— 下面 `expect(ew, 0)` 就是这条的护栏。
   //
-  // # ⇒ 因此
+  // # ⇒ 因此（2026-10-10 起）
   //
   // ```text
-  // ❌ 合成侧**无法**给出「设置页滚动 600px 的重建面」读数
-  //    —— 页面根本没渲染出来，滚的是空树。
-  // ✅ 设置页滚动只能在**真机**上量（`.probe/t74_perf_real_pages.txt`）。
+  // ✅ 合成侧**能**给出「设置页滚动 600px 的重建面」读数（下面就是）。
+  // ✅ 「缺核心库时页面仍须建出来」也在这里守：
+  //    ListView/AppLoading > 0 且 ErrorWidget == 0。
+  // ⚠️ 真机读数（`.probe/t74_perf_real_pages.txt`）仍然要 ——
+  //    「重建面」与真机 raster 耗时**不是同一个量**（本文件头 :18-20 的铁律）。
   // ```
   //
-  // ★ 本用例**故意**断言「挂不上」这个事实 —— 而不是删掉它或让它跳过。
-  //   理由（铁律：一条永远为真的断言比没有断言更危险）：
-  //   若哪天有人给设置页补了注入口/兜底，本用例会**变红**，
-  //   那时就该把滚动读数补回来，而不是继续报「合成侧量不到」。
-  testWidgets('PB 设置页：合成侧挂不上（真因 = 缺核心库）⇒ 必须真机量',
+  // ★ 本用例**故意**断言「页面建得出来 + 滚得动 + 不崩」这三件事 ——
+  //   而不是删掉断言或让它跳过（铁律：一条永远为真的断言比没有断言更危险）。
+  testWidgets('PB 设置页：滚动重建面 / 墙钟（核心不可用也须建出来）',
       (t) async {
     await sizeView(t, _size);
     await t.pumpWidget(host(const SettingsPage(), _size));
@@ -429,10 +441,19 @@ void main() {
     final lv = find.byType(ListView).evaluate().length;
     final cpi = find.byType(CircularProgressIndicator).evaluate().length;
     final ew = find.byType(ErrorWidget).evaluate().length;
+    final appLoading = find.byType(AppLoading).evaluate().length;
+
+    /*
+     * ★ 平台无关的「核心库到底有没有加载成功」判据。
+     *   `SourinCore.isLoaded` 在**碰过核心之后**才有意义（设置页
+     *   `initState()` 里 `_probeCoreVersion()` 已经碰过）⇒ 这里读它 =
+     *   直接告诉你「本用例这一次跑在哪种条件下」，不用猜平台、不用猜路径。
+     */
+    final coreLoaded = SourinCore.isLoaded;
 
     // ignore: avoid_print
     print('PB|设置页：ListView=$lv CircularProgressIndicator=$cpi '
-        'ErrorWidget=$ew');
+        'ErrorWidget=$ew AppLoading=$appLoading 核心isLoaded=$coreLoaded');
     // ignore: avoid_print
     print('PB|关键类型: ${_countTypes(t, [
           'SettingsPage',
@@ -447,52 +468,116 @@ void main() {
         ])}');
     // ignore: avoid_print
     print('PB|★ 树上类型（前 40）: ${_dumpTypes(t)}');
-    // ignore: avoid_print
-    print('PB|★ 结论：合成侧量不到设置页滚动 '
-        '⇒ 只能真机量（.probe/t74_perf_real_pages.txt）');
-
     /*
-     * ★ 前置（判别力前提）：若**两个出口都不在**而设置页真的渲染出来了
-     *   ⇒ 那时本用例的「量不到」结论就是错的，必须改回滚动读数。
+     * ★ 前置（判别力前提，硬断言）：设置页必须真的渲染出 ListView。
+     *   —— 修复前这里是 `expect(ew, greaterThan(0))`（页面崩成
+     *   ErrorWidget）；2026-10-10 起设置页自己吞掉核心库异常，
+     *   所以「崩」不再是合法状态：页面**必须建出来**。
      */
-    if (lv > 0 || cpi > 0) {
-      fail('★ 设置页在合成侧**渲染出来了**'
-          '（ListView=$lv CircularProgressIndicator=$cpi）⇒ '
-          '本用例「合成侧量不到」的结论已失效，'
-          '必须把滚动重建面读数补回来（不要放宽这条断言）');
-    }
-
-    expect(ew, greaterThan(0),
-        reason: '★ 前置不成立：既没有 ListView/CircularProgressIndicator，'
-            '也没有 ErrorWidget ⇒ 页面去哪了？读数无法解释'
+    expect(lv, greaterThan(0),
+        reason: '★ 设置页在合成侧没渲染出 ListView（读数 lv=$lv '
+            'cpi=$cpi ew=$ew）⇒ 页面没建出来，滚动读数无从谈起'
             '  噪声=$noise');
 
     /*
-     * ★ 真因必须是「缺核心库」，不能是别的原因
-     *   （否则本用例在守一个错误的机制）
-     *
-     * ★★ 断言里的库名**必须平台无关**：`lib/core/ffi.dart:165-179`
-     *    `_openLibrary()` 是按平台分派的 ——
-     *      Windows          → `sourin_core.dll`
-     *      Android / Linux  → `libsourin_core.so`
-     *      macOS / iOS      → `libsourin_core.dylib`
-     *    ⇒ 写死 `'sourin_core.dll'` 的话，macOS 上噪声里是
-     *      `Failed to load dynamic library 'libsourin_core.dylib'`，
-     *      这条**必然**假红（2026-10-08 macOS CI 实测）。
-     *    ★ 判据没变：仍然是「真因 = 缺核心库」—— 不是放宽。
+     * ★ ErrorWidget 必须为 0：这是「设置页 build() 抛异常 ⇒ 整棵子树被
+     *   换成 ErrorWidget」那条崩坏链的护栏（`settings_page.dart` 的
+     *   `_probeCoreVersion()` 就是为它加的兜底）。
      */
-    final joined = noise.join(' | ');
-    expect(joined.contains('sourin_core'), isTrue,
-        reason: '★ 真因不是缺核心库（Windows `sourin_core.dll` / '
-            'macOS `libsourin_core.dylib` / Linux `libsourin_core.so`）'
-            ' ⇒ 设置页挂不上另有原因，'
-            '本用例记录的机制是错的，必须重新定位'
-            '  噪声=$joined');
+    expect(ew, 0,
+        reason: '★ 设置页 build() 又抛异常了（ErrorWidget=$ew）⇒ '
+            '异常逃出了 build()，整页被替换 —— 不许接受'
+            '  噪声=$noise');
 
     // ★ 收尾：`_flash()` 排了一个 3 秒的 `Future.delayed`
-    //   （`settings_page.dart:477`）⇒ 不冲掉就是 "A Timer is still pending"
+    //   （`settings_page.dart` 的 `_flash()`）⇒ 不冲掉就是
+    //   "A Timer is still pending"；也必须在滚动读数**之前**冲掉，
+    //   否则量到的是加载态而不是稳定后的列表。
     await t.pump(const Duration(seconds: 4));
     _claim(t);
+
+    /*
+     * ★ 稳定态复核（上面那次 `expect(lv, ...)` 读的是 loading 可能尚未
+     *   结束的早期时刻；这里才是冲掉定时器之后的最终读数）。
+     */
+    final lvStable = find.byType(ListView).evaluate().length;
+    expect(lvStable, greaterThan(0),
+        reason: '★ 稳定态下设置页没有 ListView（lv=$lvStable）⇒ '
+            '页面没建出来，滚动读数无从谈起');
+
+    /*
+     * ★★ 滚动读数（这才是「把读数补回来」）。
+     *   —— 修复前设置页挂不上，合成侧根本滚不动，只能在真机上量；
+     *   现在页面建得出来 ⇒ 滚动代价在合成侧量得到，就在这里量。
+     *   口径与 PC 追更页（本文件 :568-575 区）一致：
+     *     `_install()` 清计数 → `jumpTo()` → `_pumpMicros()` → 读 `_all`。
+     *
+     *   ⚠️⚠️ 2026-10-10 实测纠正（必须留痕）：
+     *   本段原来照 PC 口径写了一条 `expect(rebuilds, greaterThan(0))` 当
+     *   「阳性对照」，**实测必然为假** —— 而且不是设置页特殊：
+     *   `debugOnRebuildDirtyWidget` 只在 `Element.rebuild()` 里回调
+     *   （`flutter/lib/src/widgets/framework.dart`），而滚动时新露出的
+     *   子项走 `inflateWidget`/`mount`（**首次构建**），不触发 rebuild
+     *   ⇒ 任何列表的「滚动重建面」都是 0。同一次跑里 PC 追更页的滚动
+     *   读数逐字是 `PC|追更页滚动 200px ⇒ 重建面=0`（它注入 20 条时
+     *   读数是 562 ⇒ 仪器本身活着）。
+     *   ⇒ 一条**必然为假**的断言会把真事实判成红（与「永远为真的断言」
+     *   同样是假信号），所以这里换成两件**真正有牙**的事：
+     *     ① `expect(sc.position.pixels, target)` —— 滚动真的发生了；
+     *     ② 末尾 `expect(instrumentAlive, greaterThan(0))` —— 重建面
+     *        仪器真的活着（同类型 widget 重 pump ⇒ 元素 update ⇒ 必走
+     *        `Element.rebuild()`）。
+     *   滚动重建面本身仍然逐字打印：它仍是真读数，`0` 的含义是
+     *   「设置页列表是 `children:` 静态列表，滚动不重建」。
+     *   ⚠️ 仍不写「重建面必须小于某个魔数」这类阈值断言 —— 合成侧的
+     *   绝对重建面与真机 raster 不是同一个量（见文件头铁律）。
+     */
+    final scrollables = find.byType(Scrollable);
+    expect(scrollables, findsWidgets,
+        reason: '★ 前置：设置页里一个 Scrollable 都没有 ⇒ 页面建出来了'
+            ' 但不可滚，滚动读数无从谈起');
+    final sc = t.state<ScrollableState>(scrollables.first);
+    final max = sc.position.maxScrollExtent;
+    expect(max, greaterThan(0),
+        reason: '★ 前置：设置页根本不可滚（maxScrollExtent=$max）'
+            ' ⇒ 滚动读数无从谈起');
+    // `jumpTo` 只接受 `[0, max]` 内的值 ⇒ 取 min(600, max) 同时防越界
+    final double target = max < 600 ? max : 600.0;
+    _install();
+    sc.position.jumpTo(target);
+    final micros = await _pumpMicros(t);
+    final rebuilds = _all;
+    _claim(t);
+    // ignore: avoid_print
+    print('PB|设置页滚动 ${target}px（maxScrollExtent='
+        '${max.toStringAsFixed(1)}）⇒ 重建面=$rebuilds 墙钟=${micros}us');
+    // ignore: avoid_print
+    print('PB|设置页滚动墙钟(us) 分位数: ${_stat([micros])}');
+    // ★ 有牙断言 ①：滚动**真的发生了**（不是空滚）
+    expect(sc.position.pixels, target,
+        reason: '★ 阳性对照：jumpTo($target) 之后 '
+            'pixels=${sc.position.pixels}'
+            ' ⇒ 滚动没真的发生，上面的读数（重建面=$rebuilds）不可信');
+    /*
+     * ★ 有牙断言 ②：重建面仪器**真的活着**。
+     *   同类型 widget 重 pump ⇒ 元素 update ⇒ 必走 `Element.rebuild()`
+     *   ⇒ `debugOnRebuildDirtyWidget` 必须收到 > 0 次回调。
+     *   这条若红：说明仪器被卸掉 / 钩子失效 ⇒ 上面 `rebuilds=0` 的
+     *   解释（「静态列表滚动不重建」）不成立，必须重新定位。
+     *   （`SettingsPage` 无 key、同类型 ⇒ 走 `Element.update`，`State`
+     *   保留、不会重跑 `initState` ⇒ 不会引入新的定时器。）
+     */
+    _install();
+    await t.pumpWidget(host(const SettingsPage(), _size));
+    await t.pump();
+    final instrumentAlive = _all;
+    _claim(t);
+    // ignore: avoid_print
+    print('PB|仪器活性对照：重 pump 设置页 ⇒ 重建面=$instrumentAlive');
+    expect(instrumentAlive, greaterThan(0),
+        reason: '★ 阳性对照：重 pump 同类型 widget 必须触发 rebuild —— '
+            '读数 0 说明重建面仪器失效，'
+            '上面 rebuilds=$rebuilds 的解释不成立');
   });
 
   // ═══════════════════════════════════════════════════════════════════
