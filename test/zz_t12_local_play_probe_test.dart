@@ -26,7 +26,6 @@ library;
 // ⚠️ 硬规则：数据目录用 `ClipDownloader.debugSetDataDir` 指到 TEMP 沙盒，
 //    **绝不碰** %APPDATA%\app.sourin.player（用户真实库）。
 //    (d) 那条要对照的「在线进度」也是**自己造一条**再对照，不读用户真实库。
-library;
 
 import 'dart:async';
 import 'dart:io';

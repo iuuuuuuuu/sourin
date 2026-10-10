@@ -17,7 +17,6 @@ library;
 //   目的：让 lead 与我都能用 ASCII 渲染器共同"看到"成品。
 //
 // ⚠️ 沙盒一律在 TEMP，**绝不碰** %APPDATA% 与 Owner 真实的下载目录。
-library;
 
 import 'dart:io';
 
