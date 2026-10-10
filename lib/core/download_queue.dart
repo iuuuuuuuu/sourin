@@ -767,6 +767,25 @@ class DownloadQueue {
   /// ③ 两级都失败 ⇒ 如实记日志（目标路径 + 两次异常原文），绝不再静默；
   ///    并尽力清掉 tmp，不在用户目录里留垃圾。
   /// ```
+  ///
+  /// ★★★ **测试专用接缝**：把「rename 失败」从**平台语义**里解耦出来。
+  ///
+  /// # 为什么需要它
+  /// 真实的撞锁（目标被别的句柄持住）只有 Windows 会抛（见上面 ① 的实测），
+  /// POSIX 的 rename(2) 只看**路径**能不能写 ⇒ 永远成功。于是「重试 → 兜底 →
+  /// 如实记日志」这三级处理在 macOS/Linux 上**没有任何用例能真的走到**，
+  /// 门禁退化成「Windows 专属语义」—— CI 上 macOS 那一栏就是这么红的。
+  ///
+  /// # 语义（默认 0 ⇒ 生产行为逐字节不变）
+  /// > 0 时，前 N 次 rename **先减一、再抛**一个与 Windows 实测**同形**的
+  /// [PathAccessException]（`OS Error: 拒绝访问。`, errno = 5），而不是真的 rename。
+  /// 计数器为 0 时只多一次静态读 + 比较，控制流与改前**完全一致**。
+  ///
+  /// ⚠️ 只接管 rename 这一步，**不接管**退避、兜底与日志 —— 门禁验的是
+  ///    真正的三级处理，不是一个 mock。
+  @visibleForTesting
+  static int debugForceRenameFailures = 0;
+
   static Future<bool> _atomicReplaceWith(
     File tmp,
     File target, {
@@ -775,6 +794,14 @@ class DownloadQueue {
     Object? renameErr;
     for (var attempt = 0; attempt <= _replaceBackoffMs.length; attempt++) {
       try {
+        if (debugForceRenameFailures > 0) {
+          debugForceRenameFailures--;
+          throw PathAccessException(
+            tmp.path,
+            const OSError('拒绝访问。', 5),
+            "Cannot rename file to '${target.path}'",
+          );
+        }
         await tmp.rename(target.path);
         if (attempt > 0) {
           AppLog.write('DL',

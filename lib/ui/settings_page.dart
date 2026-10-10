@@ -247,6 +247,26 @@ class SettingsPage extends StatefulWidget {
 class SettingsPageState extends State<SettingsPage> {
   bool _loading = true;
 
+  /// ★★★ 「关于」行显示的版本串 —— build() **只读**这个字段，不再同步读 FFI
+  ///
+  /// # 为什么（2026-10-10 修复 · CI 唯一红）
+  ///
+  /// 修复前 :2358 写的是 `subtitle: '${SourinApi.version} · 架构与设备信息'` ——
+  /// 这是整个 build() 里**唯一**的同步 FFI 读。CI（Windows STEP 11 / macOS STEP 9）
+  /// 跑 flutter test 时构建步还没跑 ⇒ `build\windows\x64\runner\Release\sourin_core.dll`
+  /// 不存在 ⇒ `SourinCore.version` 同步抛
+  /// `Invalid argument(s): Failed to load dynamic library 'sourin_core.dll'`
+  /// ⇒ Flutter 把**整棵** SettingsPage 子树换成 ErrorWidget（实测
+  /// SettingsPage=1 / ErrorWidget=1 / SettingsEntryRow=0 / AppLoading=0 / ListView=0）
+  /// ⇒ 连 :1797 的 `if (_loading) return AppLoading()` 分支都没机会执行。
+  ///
+  /// 本机为什么一直绿：门禁 setUpAll 的 _preloadCoreDll() 用**绝对路径**把那份 dll
+  /// 载进进程 ⇒ 之后裸名 `DynamicLibrary.open('sourin_core.dll')` 命中已加载模块 ⇒ 不抛。
+  ///
+  /// 现在：initState 里同步探一次，失败只降级这一个字段（文案见
+  /// [kCoreVersionFallbackLabel]），核心可用时输出与修复前**逐字相同**。
+  String _coreVersionLabel = kCoreVersionFallbackLabel;
+
   /// ★★★ 「首次加载是否已完成」—— 全页转圈的**唯一**判据
   ///
   /// # 为什么不能用 `_providers.isEmpty` 当判据（2026-09-25 实测）
@@ -396,7 +416,24 @@ class SettingsPageState extends State<SettingsPage> {
   @override
   void initState() {
     super.initState();
+    _probeCoreVersion();
     WidgetsBinding.instance.addPostFrameCallback((_) => loadAll());
+  }
+
+  /// 同步探一次核心版本，取不到就降级 —— **绝不让异常逃出 build()**
+  ///
+  /// 时机必须是 initState（首帧 build **之前**）：首帧读到的就是最终值，
+  /// 既没有空串中间态，也不需要 setState（不会撞 "setState() called during build"）。
+  ///
+  /// ★ try 只包「取版本」这一步：别的异常不许在这里被吞掉（吞了会造成误判，
+  ///   例如把页面自身的 bug 显示成「核心未加载」）。
+  void _probeCoreVersion() {
+    try {
+      _coreVersionLabel = coreVersionLabelFor(SourinApi.version, null);
+    } catch (e) {
+      debugPrint('[SETTINGS] 核心版本读取失败（关于行降级显示）: $e');
+      _coreVersionLabel = coreVersionLabelFor(null, e);
+    }
   }
 
   /// 拉取全部数据
@@ -2355,7 +2392,7 @@ class SettingsPageState extends State<SettingsPage> {
             SettingsEntryRow(
               icon: Icons.info_outline,
               title: '关于',
-              subtitle: '${SourinApi.version} · 架构与设备信息',
+              subtitle: _coreVersionLabel,
               onTap: () => _openSubPage(const AboutSettingsPage()),
             ),
           ],
@@ -2502,6 +2539,27 @@ class SettingsPageState extends State<SettingsPage> {
       newIndex: newIndex,
     );
   }
+  /// 「关于」行版本串的**常量后缀** —— 与修复前逐字相同（`'$version · 架构与设备信息'`）
+  static const String kCoreVersionLabelSuffix = ' · 架构与设备信息';
+
+  /// 核心库取不到版本时的**降级文案** —— 常量、可断言、不伪装成真实版本
+  static const String kCoreVersionFallbackLabel = '核心未加载 · 架构与设备信息';
+
+  /// 「关于」行版本串的**纯函数**：不读任何全局 / 平台状态，两侧语义都能在任意平台断言
+  ///
+  /// - `version != null` ⇒ `'$version · 架构与设备信息'`（核心可用，与修复前**逐字相同**）
+  /// - `version == null && error != null` ⇒ [kCoreVersionFallbackLabel]（诚实降级）
+  /// - 两者都为 null ⇒ 抛 [ArgumentError]：没有「取版本失败」的证据就**不许**降级，
+  ///   否则这个函数会被拿去把「还没探过」也显示成「核心未加载」
+  @visibleForTesting
+  static String coreVersionLabelFor(String? version, Object? error) {
+    if (version != null) return '$version$kCoreVersionLabelSuffix';
+    if (error != null) return kCoreVersionFallbackLabel;
+    throw ArgumentError(
+        'coreVersionLabelFor：version 与 error 不能同时为 null —— '
+        '没有「取版本失败」的证据就不许降级');
+  }
+
   /// 「直播源」tab 拖动排序
   Future<void> _onReorderLive(int oldIndex, int newIndex) async {
     final live = _liveSources;
