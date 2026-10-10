@@ -7220,6 +7220,39 @@ class _PlayerPageState extends State<PlayerPage>
 
     /*
      * ══════════════════════════════════════════════════════════════════
+     * ★★★ task-39（T13 残留①）：换会话后刷新顶栏站名 —— **两条支路都要**
+     * ══════════════════════════════════════════════════════════════════
+     *
+     * # 改前为什么会坏（T7 如实上报的残留）
+     * ```text
+     * 下面那个分流里，**只有** else 支（在线）会经 `_resolveAndPlay`
+     * 在解析成功后刷新站名；if 支（本地）走 `_bootLocalFile`，
+     * 那个方法**只**做 _streams / _prepareResume / _startPlayback /
+     * _loadSkipMarker —— 从头到尾不碰 `_providerName`。
+     * ⇒ 从在线会话切到本地会话（req.provider == 'local'）之后，
+     *   顶栏仍挂着**上一个站点**的名字（比"不显示"更糟：用户会以为
+     *   换源/换集没生效）。Owner-1009 要的正是"显示原来源而不是 local"。
+     * ```
+     *
+     * # 为什么放在**分流之前**、且不 await
+     * ```text
+     * ① 两条支路都要刷新 ⇒ 放在 if/else 内部必然要抄两份
+     *    （本项目反复记录过"两处同构必须一起改"的坑）。
+     * ② 必须在 setState({ _provider = req.provider; }) **之后**调 ——
+     *    `_loadProviderName` 里那个代次判据比的正是 `_provider`
+     *    （与 `_resolveAndPlay` 里那条"★ 换源后刷新顶栏的站名"同款纪律），
+     *    顺序反了会把这次当成过期结果**直接丢弃**。
+     * ③ 不 await：查名字要过一次 `listProviders()`，而它**只挡首帧**
+     *    （之后是进程内缓存，见 provider_name.dart:47）；await 会把它
+     *    塞进"换集 → 起播"的关键路径上，白白让用户多等。
+     *    `_loadProviderName` 自己就是 async + 自带代次保护 + 永不抛
+     *    ⇒ 与 `:6381`（_resolveAndPlay）同一写法。
+     * ```
+     */
+    unawaited(_loadProviderName());
+
+    /*
+     * ══════════════════════════════════════════════════════════════════
      * ★★★ task-12 ④ 改动 B（2026-10-09）：本地会话的换集走**本地短路**
      * ══════════════════════════════════════════════════════════════════
      *
@@ -8193,6 +8226,32 @@ class _PlayerPageState extends State<PlayerPage>
       _error = null;
       _errorKind = null;
     });
+
+    /*
+     * ══════════════════════════════════════════════════════════════════
+     * ★★★ task-39（T13 残留②）：换直播台后刷新顶栏站名
+     * ══════════════════════════════════════════════════════════════════
+     *
+     * # 改前为什么会坏（T7 如实上报的残留）
+     * ```text
+     * 上面那个 setState 刚把 `_provider` 换成 `pick.provider`（新台所属的源），
+     * 但整段方法**没有任何**取名字的调用 ⇒ 换到**别的 provider** 的台之后，
+     * 顶栏仍然是旧 provider 的名字。
+     * ```
+     *
+     * # 为什么必须在 setState **之后**、且不 await
+     * ```text
+     * ① 顺序：`_loadProviderName` 的代次判据比的是 `_provider`
+     *    （与 `:6381` 那条"★ 换源后刷新顶栏的站名"同一条纪律）——
+     *    放在 setState 之前会把这次当成过期结果丢弃。
+     * ② 不 await：换台要立刻出画面；查名字只挡首帧，之后是进程内缓存。
+     * ③ 并发切台的**画面**代次由下面那条 `_liveChannelId != next.id`
+     *    守卫负责（它是权威）；本条只管站名，两者不冲突：
+     *    即便这次切台随后被判过期，站名也只是提前显示了新源的名字，
+     *    而那种情况下 `_provider` 本来就已是新值。
+     * ```
+     */
+    unawaited(_loadProviderName());
 
     try {
       final list = await SourinApi.getLiveStream(pick.provider, next.id);

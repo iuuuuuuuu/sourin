@@ -45,6 +45,35 @@
 //        ⇒ 立刻红（本地会话又拿 'local' 去查名字）。
 //  腿②：把 _loadProviderName 改回 providerDisplayName(_provider)、
 //        把 if (!_isLocalSession) 删掉 ⇒ 立刻红。
+//
+//  ═══════════════════════════════════════════════════════════════════════
+//  ★★★ task-39（T13）：再补两条 —— 改 `_provider` 的两段方法体里
+//      必须跟着重取站名（这是 T7 如实上报、本轮修掉的两条残留）
+//  ═══════════════════════════════════════════════════════════════════════
+//
+//  ```text
+//  残留① lib/ui/player_page.dart::applySession
+//          分流前刚 setState({ _provider = req.provider; })，
+//          但本地支（if (req.localPath != null)）走 _bootLocalFile
+//          —— 那个方法只做 _streams/_prepareResume/_startPlayback/
+//             _loadSkipMarker，**从不碰 _providerName**
+//          ⇒ 从在线会话切到本地会话后，顶栏仍挂着**上一个站点**的名字。
+//  残留② lib/ui/player_page.dart::_adoptLiveChannel
+//          setState({ _provider = pick.provider; }) 之后整段没有取名字调用
+//          ⇒ 换到**别的 provider** 的直播台后，顶栏仍是旧 provider 的名字。
+//  ```
+//
+//  ★ 新腿为什么分成「源码契约」与「行为腿」两档（**红度不同**）
+//  ```text
+//  契约档：断言全文里存在 `unawaited(_loadProviderName());`
+//          ⇒ 便宜，但**把那一行挪进一个永不执行的分支也照样绿**。
+//  行为档：用同一个配平切片把两个方法的**函数体**切出来，再断言
+//          「_provider 赋值 < 取名字调用」这个**相对顺序**
+//          ⇒ 挪出方法体 / 挪到赋值之前 / 挪进 else 支 / 挪进 catch 都会红。
+//  ```
+//
+//  ⚠️ 两档都**仍然不含渲染腿**，理由与上面那条裁决逐字相同
+//     （CI 没有 libmpv ⇒ `Player(...)` 抛 ⇒ widget 断言会假绿）。
 library;
 
 import 'dart:io';
@@ -159,6 +188,34 @@ String _moreMenuSource(String page) {
   final to = page.indexOf('String? _trackHint(', from);
   expect(to, greaterThan(from), reason: 'player_page.dart 里找不到 _moreMenuGroups 的结尾锚点');
   return page.substring(from, to);
+}
+
+/// ★ task-39：取某个方法（从签名起到其后第一个 `async {`）的**函数体**
+///
+/// 与 `_moreMenuSource` 的区别：那个按"下一个方法签名"截断，**只够用**于
+/// 菜单那种线性方法；这两个方法的体内还有嵌套的 `{`（setState 闭包、
+/// try/catch）⇒ 必须按**括号配平**切（[_sliceBalanced]），否则会在
+/// 第一个 `});` 处**静默切短**，把后面的取名字调用切掉 ⇒ 假绿。
+///
+/// ⚠️ 配平失败时 [_sliceBalanced] 直接 `fail`（不是返回空串）——
+///    这正是"锚点失效不许变成全绿"的落点。
+String _methodBody(String page, String signature) {
+  final from = page.indexOf(signature);
+  expect(from, greaterThan(-1), reason: '★ 找不到方法签名「$signature」');
+  final brace = page.indexOf('async {', from);
+  expect(brace, greaterThan(from), reason: '★「$signature」之后找不到 async {');
+  return _sliceBalanced(page, brace, '{', '}');
+}
+
+/// ★ task-39 的判据本体（抽出来是为了让**元门禁**能把它证伪）
+///
+/// 语义：`call` 必须**真的**出现在 `assign` 之后 —— 两者缺一都判假。
+/// 单独写成函数而不是内联 indexOf，是因为下面那条自检用例要拿
+/// **合成的**字符串来证明这个判据**不是恒真**（恒真 = 假门禁）。
+bool _callFollowsAssign(String body, String assign, String call) {
+  final a = body.indexOf(assign);
+  final c = body.indexOf(call);
+  return a > -1 && c > a;
 }
 
 void main() {
@@ -408,6 +465,95 @@ void main() {
       );
     });
 
+    test('T13①：applySession 改完 _provider 必须重新取站名（含本地支）', () {
+      final body = _methodBody(page, 'Future<void> applySession(PlayRequestData req)');
+
+      // ① 行为腿：取名字的调用必须**真的**排在 _provider 赋值之后。
+      expect(
+        _callFollowsAssign(
+          body,
+          '_provider = req.provider;',
+          'unawaited(_loadProviderName());',
+        ),
+        isTrue,
+        reason: '★★ 残留①：applySession 分流前那个 setState 已经把 _provider '
+            '换成新会话的源，而本地支走 _bootLocalFile —— 那个方法只做 '
+            '_streams/_prepareResume/_startPlayback/_loadSkipMarker，'
+            '**从不碰 _providerName** ⇒ 不在这里补一次取名字，'
+            '从在线会话切到本地会话后顶栏会一直挂着**上一个站点**的名字',
+      );
+
+      // ② 反向：不许只给"在线那一支"补 —— 本地支会再次漏掉。
+      //    分流点是 req.localPath（task-12 ④ 的判据），
+      //    取名字必须排在它**之前**，才能被两条支路共同经过。
+      final branch = body.indexOf('if (req.localPath != null)');
+      expect(
+        branch,
+        greaterThan(-1),
+        reason: '★ 找不到本地/在线分流点 ⇒ 本用例"两条支路"的前提没了（锚点失效）',
+      );
+      expect(
+        body.indexOf('_loadProviderName()'),
+        lessThan(branch),
+        reason: '★★ 取名字必须排在**分流之前** —— 塞进任何一支都会漏掉另一支'
+            '（这正是残留①的形态：只有 _resolveAndPlay 那一支会刷新）',
+      );
+    });
+
+    test('T13②：_adoptLiveChannel 改完 _provider 必须重新取站名', () {
+      final body = _methodBody(page, 'Future<void> _adoptLiveChannel(');
+
+      expect(
+        _callFollowsAssign(
+          body,
+          '_provider = pick.provider;',
+          'unawaited(_loadProviderName());',
+        ),
+        isTrue,
+        reason: '★★ 残留②：换直播台会把 _provider 换成新台所属的源 —— '
+            '不重取站名的话，换到**别的 provider** 的台之后顶栏仍是旧 provider',
+      );
+
+      // ★ 反向：取名字不许被塞进"只有解析成功才走到"的分支里。
+      //   _provider 在 setState 那一刻就已经变了 ⇒ 站名要跟着立刻变，
+      //   不能等 getLiveStream 回来（中途会显示错的名字）。
+      final tryIdx = body.indexOf('try {');
+      expect(tryIdx, greaterThan(-1), reason: '★ 找不到 try { ⇒ 方法结构变了');
+      expect(
+        body.indexOf('_loadProviderName()'),
+        lessThan(tryIdx),
+        reason: '★ 取名字必须排在 try 之前 —— _provider 在 setState 里就已经换了',
+      );
+    });
+
+    test('T13①②：两处补的取名字调用必须真的挂在改 _provider 的方法体里', () {
+      // ★ 这一条钉的是**位置**：全文里存在 unawaited(_loadProviderName());
+      //   并不能证明它挂在"改 _provider"的那两个方法里 ——
+      //   挪进任何一个永不执行的分支都照样绿。
+      expect(
+        page.contains('unawaited(_loadProviderName());'),
+        isTrue,
+        reason: '★ 取名字的调用整条不见了',
+      );
+      for (final sig in <String>[
+        'Future<void> applySession(PlayRequestData req)',
+        'Future<void> _adoptLiveChannel(',
+      ]) {
+        final body = _methodBody(page, sig);
+        expect(
+          body.contains('_provider = '),
+          isTrue,
+          reason: '★「$sig」里没有 _provider 赋值 ⇒ 锚点切错了方法（自检）',
+        );
+        expect(
+          body.contains('_loadProviderName()'),
+          isTrue,
+          reason: '★★「$sig」改了 _provider 却不在自己的方法体里取站名 —— '
+              '挪到别处（哪怕全文里还在）都算漏',
+        );
+      }
+    });
+
     test('自检：本文件的解析器不许空跑（防"扫不到 ⇒ 全绿"）', () {
       // ★ 这一条是本文件的**元门禁**：如果锚点/剥离器哪天失效了，
       //   上面的契约断言会变成"什么都没扫到 ⇒ 假绿"。
@@ -428,6 +574,60 @@ void main() {
         isNot(contains("MoreMenuGroup('弹幕'")),
         reason: '★ 配平切片不许越过「播放」这一组的右括号',
       );
+      // ★ task-39 元自检：上面那条判据本体不许恒真/恒假
+      expect(
+        _callFollowsAssign(
+          'a _provider = x; b _loadProviderName(); c',
+          '_provider = x;',
+          '_loadProviderName();',
+        ),
+        isTrue,
+        reason: '★ 调用确实排在赋值之后时必须为真（否则新腿是假红）',
+      );
+      expect(
+        _callFollowsAssign(
+          'a _loadProviderName(); b _provider = x; c',
+          '_provider = x;',
+          '_loadProviderName();',
+        ),
+        isFalse,
+        reason: '★★ 调用排在赋值**之前**时必须为假 —— 恒真 = 假门禁'
+            '（把修复挪到赋值之前就抓不到了）',
+      );
+      expect(
+        _callFollowsAssign(
+          'a _provider = x; c',
+          '_provider = x;',
+          '_loadProviderName();',
+        ),
+        isFalse,
+        reason: '★★ 根本没有调用时必须为假 —— 这一条正是残留①的原始形态',
+      );
+      // ★ 新助手 _methodBody 必须真的切到**函数体**（不是签名、不是空串）
+      final t13 = _methodBody(
+        page,
+        'Future<void> applySession(PlayRequestData req)',
+      );
+      expect(t13.length, greaterThan(800),
+          reason: '★ 函数体不可能这么短 ⇒ 锚点切错了');
+      expect(t13.startsWith('{'), isTrue, reason: '★ 必须从 { 起切');
+      expect(t13.endsWith('}'), isTrue, reason: '★ 必须切到配平的 } 为止');
+      // ★ 合成反例：残留①的**原始形态**（只有在线支会取名字）必须被判为假
+      const onlyOnline =
+          '{ setState(() { _provider = req.provider; }); '
+          'if (req.localPath != null) { await _bootLocalFile(path: req.localPath); } '
+          'else { await _resolveAndPlay(req.provider, req.id, null, null); } }';
+      expect(
+        _callFollowsAssign(
+          onlyOnline,
+          '_provider = req.provider;',
+          'unawaited(_loadProviderName());',
+        ),
+        isFalse,
+        reason: '★★ 残留①的原始形态（本地支不刷新）必须判为假 —— '
+            '这是新腿红度的合成证明',
+      );
+
       final groups = RegExp(r"MoreMenuGroup\('([^']*)'")
           .allMatches(body)
           .map((m) => m.group(1))
