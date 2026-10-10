@@ -206,9 +206,12 @@ Copy-Item rust\sourin_core\target\release\sourin_core.dll windows\
 
 `windows/CMakeLists.txt` 会在构建时把它拷到 runner 目录。
 
-> ⚠️ **CMake 的拷贝是按时间戳的** —— 重编了 `.dll` 但 mtime 没变（比如从备份还原）
-> 时，构建会**静默跳过**拷贝，你跑的还是旧的。这是本项目踩过的真事故：
-> 症状是「改了 Rust 但行为没变」。**改完核心一定核 mtime，或直接删掉目标文件**。
+> ⚠️ **`.dll` 必须真的重新编出来。** `cargo build --release` 在源码没改动时会
+> 直接跳过，`mtime` 保持不变；此时若你只是把一个**旧的** `.dll` 拷回
+> `rust/sourin_core/target/release/`，构建会把那个旧件原样装进包 ——
+> 症状是「改了 Rust 但行为没变」。**改完核心请核 `sourin_core.dll` 的哈希或
+> `mtime` 确实变了**。（`windows/CMakeLists.txt` 用的是 `install(FILES ...)`，
+> 它会无条件复制源件，不按时间戳判断；需要强制刷新时直接删掉包目录里的那个 `.dll`。）
 
 ### 4. 编 Flutter
 

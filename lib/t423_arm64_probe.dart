@@ -26,7 +26,7 @@
 //
 //   A  MaterialApp 裸壳（无 theme / 无 builder）        ← 引擎能不能画 MaterialApp
 //   B  A + 产品 theme:materialTheme                    ← 产品 ThemeData 有没有问题
-//   C  B + 产品 builder: FTheme→FToaster→WindowFrame→ColoredBox
+//   C  B + 产品 builder: AppThemeHost→WindowFrame→ColoredBox
 //                                                      ← 外壳那一串
 //   D  C + home: ShellPage（产品首页整棵树）             ← 真正的产品内容
 //   E  runApp(SourinApp(...))                          ← 与 t421 段 6 逐字相同
@@ -99,7 +99,7 @@ String _workDir = '';
 /// 0  PRE-INIT 金丝雀（阳性对照：前置做完后引擎还能画）
 /// 1  A  MaterialApp 裸壳
 /// 2  B  + 产品 theme:materialTheme
-/// 3  C  + 产品 builder（FTheme→FToaster→WindowFrame→ColoredBox）
+/// 3   C   + builder（AppThemeHost → WindowFrame → ColoredBox）
 /// 4  D  + home: ShellPage（产品首页）
 /// 5  E  runApp(SourinApp(...))        ← 复刻 t421 段 6
 /// 6  F  恢复金丝雀（证明黑过之后进程还活着）
@@ -331,7 +331,7 @@ Future<void> main() async {
   ));
   await _holdStage(2, 'B = A + theme:materialTheme（产品 ThemeData）');
 
-  // ── C：B + 产品 builder 那一串（FTheme→FToaster→WindowFrame→ColoredBox）
+  // ── C：B + 产品 builder 那一串（AppThemeHost→WindowFrame→ColoredBox）
   runApp(RepaintBoundary(
     key: _rootKey,
     child: MaterialApp(
@@ -350,7 +350,7 @@ Future<void> main() async {
       home: const _Flat(color: Color(0xFFC81EC8), label: 'C + product builder'),
     ),
   ));
-  await _holdStage(3, 'C = B + builder（FTheme→FToaster→WindowFrame→ColoredBox）');
+  await _holdStage(3, 'C = B + builder（AppThemeHost→WindowFrame→ColoredBox）');
 
   // ── D：C + home: ShellPage（产品首页整棵树） ─────────────────
   runApp(RepaintBoundary(

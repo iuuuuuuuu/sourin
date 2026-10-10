@@ -252,13 +252,14 @@ class PlayerBottomBar extends StatelessWidget {
           popoverId: PlayerPopoverIds.quality,
           active: controller.isOpen(PlayerPopoverIds.quality),
         ),
-      _BarAction(
-        icon: Icons.speed,
-        label: '${_trimRate(rate)}x',
-        tooltip: '倍速',
-        popoverId: PlayerPopoverIds.rate,
-        active: controller.isOpen(PlayerPopoverIds.rate),
-      ),
+      /*
+       * ★ OPS-5 ②（Owner 2026-10-10 反馈第 2 条）：这里原来还有一枚「倍速」
+       *   `_BarAction`，**没有任何 if 门控** ⇒ 恒渲染，于是底栏上出现
+       *   两个倍速入口（截图：左边「▶ 🔊 ──●── 1x」+ 右边那排又一枚 1x）。
+       *   常驻高频组（`primary`，本文件下面的 `_PopoverButton`）里那枚才是
+       *   「任何宽度都在第一行、永不折叠」的正主（test/t80_cast_wiring_test.dart
+       *   A⑩ 钉着它的顺序）⇒ 删这一枚，不是删那一枚。
+       */
       if (trackGroups.isNotEmpty)
         _BarAction(
           icon: Icons.closed_caption,
@@ -344,16 +345,20 @@ class PlayerBottomBar extends StatelessWidget {
       PlayerPopoverIds.tracks when trackGroups.isNotEmpty => _panelSurface([
         for (final entry in trackGroups.entries) ...[
           PopoverGroupLabel(entry.key),
-          for (final o in entry.value) _row(o),
+          for (final o in entry.value) _trackRow(entry.key, o),
         ],
       ], width: 220),
       PlayerPopoverIds.danmaku => _danmakuPanel(),
       PlayerPopoverIds.more => _morePanel(),
       _ => const SizedBox.shrink(),
     };
-    return PopoverKeepAlive(
+    return _PopoverAnchorLayer(
       controller: controller,
-      child: PopoverMotion(visible: id != null, child: body),
+      id: id,
+      child: PopoverKeepAlive(
+        controller: controller,
+        child: PopoverMotion(visible: id != null, child: body),
+      ),
     );
   }
 
@@ -374,6 +379,22 @@ class PlayerBottomBar extends StatelessWidget {
     onTap: o.enabled
         ? () {
             onPickQuality?.call(o.value);
+            controller.close();
+          }
+        : null,
+  );
+
+  /// ★ CR-17：字幕 / 音轨的行**不能**复用 [_row]。
+  ///
+  /// [_row] 的 onTap 写死了 `onPickQuality`，所以复用它等于「选一条字幕 = 把
+  /// 清晰度切成字幕 id」，而 `onPickTrack(group, id)` 一次都不会被调用。
+  Widget _trackRow(String group, PopoverOption<String> o) => PopoverRow(
+    label: o.label,
+    hint: o.hint,
+    checked: o.checked,
+    onTap: o.enabled
+        ? () {
+            onPickTrack?.call(group, o.value);
             controller.close();
           }
         : null,
@@ -517,12 +538,17 @@ class PlayerBottomBar extends StatelessWidget {
                 enabled: a.enabled,
                 active: a.active,
               )
-            else if (a.label != null)
+            // ★ CR-18：`popoverId != null` 就要走 [_PopoverButton]。
+            //   以前这里只判 `label != null`，于是「字幕与音轨」这类
+            //   **只有图标 + popoverId** 的条目落到下面的 `_BarIconButton`,
+            //   而它的 onTap 本来就是 null ⇒ `IconButton.onPressed == null`
+            //   ⇒ 永远点不动、永远灰着，弹层也就永远打不开。
+            else if (a.label != null || a.popoverId != null)
               _PopoverButton(
                 controller: controller,
                 id: a.popoverId ?? '',
                 icon: a.icon,
-                label: a.label!,
+                label: a.label,
                 tooltip: a.tooltip,
                 active: a.active,
                 onTap: a.onTap,
@@ -575,6 +601,120 @@ class PlayerBottomBar extends StatelessWidget {
   static const double _kBarRowWidth = 720;
 }
 
+/// ★★ OPS-5 ②：把面板**挪到它那枚按钮上方**，并保证整块留在窗口里。
+///
+/// # 为什么必须是「布局期」而不是「build 期读 Rect」
+/// ```text
+/// 面板这一层挂在页面整屏 Stack 里，而按钮在底栏里 —— 两者是**兄弟**。
+/// 兄弟节点之间没有先后保证：面板 build 的时候按钮可能还没布局，
+/// 读到的 rect 会是上一帧的旧值（横竖屏切换时会闪到错误位置）。
+/// ⇒ 走 `CustomSingleChildLayout`：它的 `getPositionForChild` 在
+///   **子件布局完之后**才被调用，且子件尺寸已经确定（能拿到面板真实宽高
+///   去 clamp）。这一步只是平移，不再触发一轮布局，没有循环风险。
+/// ```
+///
+/// # 对齐规则（三条，按优先级）
+/// ```text
+/// ① 右缘对齐：面板右缘 = 按钮右缘（B 站 / 腾讯那一档的观感）
+/// ② 不越窗口：整块 clamp 进 [Sp.x2, 窗口宽 - Sp.x2]
+///    （宿主本来就给了 `right: Sp.x2` 的边距，这里再兜一次底）
+/// ③ 上下：面板底边贴在按钮上沿上方 Sp.x2 —— 由宿主的 `bottom: 96` 保证；
+///    按钮因安全区抬高时再补一个 Δ，保证缝隙恒定
+/// ```
+///
+/// ⚠️ 锚点还没登记（面板先于按钮挂载的那一帧）⇒ 原样交给宿主定位，
+///    绝不猜一个位置。
+class _PopoverAnchorLayer extends StatelessWidget {
+  const _PopoverAnchorLayer({
+    required this.controller,
+    required this.id,
+    required this.child,
+  });
+
+  final PopoverController controller;
+  final String? id;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) => CustomSingleChildLayout(
+    // 这一层是「面板坐标系的原点」：探针量到的全局矩形要减掉它的全局原点
+    key: controller.layerKey,
+    delegate: _PopoverAnchorDelegate(
+      anchor: controller.anchorRectOf(id),
+      viewport: MediaQuery.sizeOf(context),
+      viewPadding: MediaQuery.viewPaddingOf(context),
+      spacing: Sp.x2,
+    ),
+    child: child,
+  );
+}
+
+/// 面板的定位代理：读按钮的屏幕矩形，把面板平移过去
+class _PopoverAnchorDelegate extends SingleChildLayoutDelegate {
+  const _PopoverAnchorDelegate({
+    required this.anchor,
+    required this.viewport,
+    required this.viewPadding,
+    required this.spacing,
+  });
+
+  /// 当前展开那枚按钮的屏幕矩形（null = 还没上报 ⇒ 走宿主的默认定位）
+  final Rect? anchor;
+  final Size viewport;
+  final EdgeInsets viewPadding;
+  final double spacing;
+
+  @override
+  BoxConstraints getConstraintsForChild(BoxConstraints constraints) =>
+      constraints.loosen();
+
+  @override
+  Offset getPositionForChild(Size size, Size childSize) {
+    // 宿主给的是「面板右下角贴窗口右下角（留 Sp.x2）」⇒ 锚点缺失时原样沿用
+    final fallback = Offset(
+      size.width - spacing - childSize.width,
+      size.height - spacing - childSize.height,
+    );
+    final a = anchor;
+    if (a == null) return fallback;
+
+    // ① 右缘对齐 + ② 左右都 clamp 进窗口（窗口太窄时优先保左缘）
+    final minLeft = spacing;
+    final maxLeft = size.width - spacing - childSize.width;
+    var left = a.right - childSize.width;
+    if (left > maxLeft) left = maxLeft;
+    if (left < minLeft) left = minLeft;
+
+    // ③ 底边贴按钮上沿上方 Sp.x2（按钮被安全区抬高时跟着抬）
+    final desiredBottom = a.top - spacing;
+    var top = fallback.dy - (size.height - spacing - desiredBottom);
+    final maxTop = size.height - spacing - childSize.height;
+    if (top > maxTop) top = maxTop;
+    // 上沿还要让开状态栏 / 刘海（viewPadding 在无安全区时是 0）
+    final minTop = viewPadding.top + spacing;
+    if (top < minTop) top = minTop;
+
+    return Offset(left, top);
+  }
+
+  /// ★ 必须**恒为 true**，不能逐字段比较！
+  ///
+  /// 面板收起时 body 是 `SizedBox.shrink()` ⇒ 布局盒当时是按 childSize
+  /// (0,0) 算出位置的；面板展开后 delegate 的四个字段**一个都没变**
+  /// （anchorKey 在面板未展开时本来就是 null），逐字段比较会返回 false ⇒
+  /// 渲染对象认为不需要重新布局，面板就带着「按 0×0 算出来的旧偏移」被画出去。
+  /// 实测（修复前）：面板画在 Rect.fromLTRB(1384, 796, 1552, 1017) ——
+  /// 正是 `size - spacing - 0`，一半在窗口外，点不到。
+  /// 这里返回 true 只是「内容换了就必须重算位置」，代价是子件重新布局一次
+  /// （只有一个子件，且只在 build 出新的 delegate 时才触发），可以忽略。
+  @override
+  bool shouldRelayout(covariant _PopoverAnchorDelegate old) =>
+      old.anchor != anchor ||
+      old.viewport != viewport ||
+      old.viewPadding != viewPadding ||
+      old.spacing != spacing;
+}
+
 /// 底栏图标按钮（深色系，不读主题）
 class _BarIconButton extends StatelessWidget {
   const _BarIconButton({
@@ -609,12 +749,16 @@ class _BarIconButton extends StatelessWidget {
 }
 
 /// 带下划文字的入口（选集 / 清晰度 / 弹幕 / 更多）
+///
+/// ★ CR-18：[label] 现在可以是 **null** —— 「字幕与音轨」只有图标 +
+///   `popoverId`（底栏横向空间有限，不给它排文字），但它同样需要
+///   「点击 / 悬停 → 控制器切换 → 弹层开合」的完整接线。
 class _PopoverButton extends StatelessWidget {
   const _PopoverButton({
     required this.controller,
     required this.id,
     required this.icon,
-    required this.label,
+    this.label,
     this.tooltip,
     this.active = false,
     this.onTap,
@@ -623,31 +767,27 @@ class _PopoverButton extends StatelessWidget {
   final PopoverController controller;
   final String id;
   final IconData icon;
-  final String label;
+  final String? label;
   final String? tooltip;
   final bool active;
   final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
+    final color = active ? const Color(0xFF32C7FF) : Colors.white;
     final child = Padding(
       padding: const EdgeInsets.symmetric(horizontal: Sp.x1, vertical: Sp.x1),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(
-            icon,
-            size: 18,
-            color: active ? const Color(0xFF32C7FF) : Colors.white,
-          ),
-          const SizedBox(width: Sp.x1),
-          Text(
-            label,
-            style: TextStyle(
-              color: active ? const Color(0xFF32C7FF) : Colors.white,
-              fontSize: FontSizes.sm,
+          Icon(icon, size: 18, color: color),
+          if (label != null) ...[
+            const SizedBox(width: Sp.x1),
+            Text(
+              label!,
+              style: TextStyle(color: color, fontSize: FontSizes.sm),
             ),
-          ),
+          ],
         ],
       ),
     );

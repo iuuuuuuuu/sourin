@@ -95,6 +95,10 @@ import '../core/sourin_api.dart';
 //   绝不在这里写第二份归一化/相似度（两份必然漂移，见那个文件头的说明）。
 import '../core/title_match.dart';
 import 'tokens.dart';
+// ★ 已缓存页卡片要能画**盘上的**封面（Owner 第 1009 批）——
+//   解码尺寸沿用全站同一对函数，免得两页的解码算法漂移。
+import 'widgets/app_loading.dart';
+import 'widgets/cover_image.dart';
 import 'widgets/motion_prefs.dart';
 import 'widgets/overlay_motion.dart' show showAppDialog;
 import 'widgets/poster_card.dart';
@@ -205,11 +209,18 @@ class CachedWork {
   ///
   /// ★ 与 [cover] 的分工：
   /// ```text
-  /// cover         = 网络 URL（联网时用它，或在 coverFile 缺失时兜底）
-  /// localCoverPath= 磁盘上的图片文件（**离线也能显示**）
+  /// cover         = 网络 URL（联网上才画得出来）
+  /// localCoverPath= 磁盘上的图片文件（**离线也在、跨机器也在**）
   /// ```
-  /// ⇒ 本地页优先 [localCoverPath]；「已缓存」页卡片仍是网络图
-  ///   （列表里没法为一堆卡片各读一次文件，而它在联网时显示更好）。
+  /// ⇒ **显示时一律优先 [localCoverPath]**（本地页、已缓存页卡片、
+  ///   播放请求的 cover 都是），[cover] 退成兜底。
+  ///
+  /// ★★★ 2026-10-10（Owner 第 1009 批）改了这条规矩：
+  /// 原注释写「已缓存页卡片仍是网络图」，理由是「列表里没法为一堆卡片
+  /// 各读一次文件」—— 但那张灰方块正是 Owner 报的 bug
+  /// 「已缓存的也要显示原来的封面」。实测 Image.file 由 Flutter 的
+  /// FileImage 走 ImageCache，**同一张图多张卡片只解一次码**，
+  /// 「读一次文件」这个代价并不存在 ⇒ 以 Owner 的观感为准。
   final String? localCoverPath;
 
   /// 有没有任何可显示的元信息（本地页据此决定要不要画"简介"那一段）
@@ -562,12 +573,26 @@ Future<CachedWork> _scanWork(Directory dir) async {
     }
   }
 
-  if (cover == null || cover.trim().isEmpty) {
+  /*
+   * ★★★ Owner 第 1009 批：旁文件缺失时，**来源**也必须能找回
+   * ```text
+   * 原判据只有「封面空不空」——
+   *   ⇒ 旁文件里有封面但没有 provider 的目录，去库里问也白问（白跑一次查询）
+   *   ⇒ provider/mediaId 一直是 null ⇒ 详情页「来源」只能退成「本地」。
+   * 现在：**三样里缺任意一样**都去问一次库（问一次的结果三条都补上）。
+   * ```
+   *
+   * ⚠️ 赋值一律用 `??=`（**旁文件优先**）：
+   *   库里那条是"按目录名猜"的，猜错了会**覆盖**旁文件里的真值。
+   *   （原代码的 `cover = hit.cover` 在 hit.cover 为 null 时还会把
+   *    旁文件里的好封面**抹掉**。）
+   */
+  if (_blank(cover) || _blank(provider) || _blank(mediaId)) {
     final hit = await resolveCacheMetaByDirName(dirName);
     if (hit != null) {
       provider ??= hit.provider;
       mediaId ??= hit.nativeId;
-      cover = hit.cover;
+      cover ??= hit.cover;
       title ??= hit.title;
     }
   }
@@ -591,6 +616,56 @@ Future<CachedWork> _scanWork(Directory dir) async {
 String _extOf(String name) {
   final dot = name.lastIndexOf('.');
   return dot < 0 ? '' : name.substring(dot).toLowerCase();
+}
+
+/// 「这个字段没有值」（null 或全是空白）—— 判据只有一处，别写第二份
+bool _blank(String? s) => s == null || s.trim().isEmpty;
+
+// ═══════════════════════════════════════════════════════════════════════
+//  盘上封面（Owner 第 1009 批）的几何与绘制
+// ═══════════════════════════════════════════════════════════════════════
+//
+// # 为什么这里的尺寸要**逐字抄** PosterCard
+// ```text
+// PosterCard 算自己那一格：w = min(AppMetrics.posterWidth, 可用宽)，
+// 高 = w / AppMetrics.posterAspect。
+// 我们叠上去的那层必须**占同一块**，否则封面会偏出去半格。
+// ⇒ 但它又不能重算一遍「万一 PosterCard 改了默认值」的公式，
+//   所以这里把它的**当前**公式原样写下来，并在旁边钉死同步义务。
+// ```
+double _posterBoxWidth(BuildContext context) {
+  final avail = MediaQuery.sizeOf(context).width;
+  const want = AppMetrics.posterWidth;
+  return want > avail ? avail : want;
+}
+
+double _posterBoxHeight(BuildContext context) =>
+    _posterBoxWidth(context) / AppMetrics.posterAspect;
+
+/// 画**盘上**的封面文件
+///
+/// # 为什么是 Image.file 而不是把路径塞给 [PosterCard]
+/// coverImage 里写死了 Image.network（lib/ui/widgets/cover_image.dart:195），
+/// 而 [PosterCard] 的 cover 语义就是网络 URL。改那两个共用文件会把
+/// 「本地文件路径」这个新语义摊到 5 个在线页面上 ⇒ 不值得，本地这张卡自己画。
+///
+/// # 失败时**让位**而不是画裂图标
+/// 占位块在下面（PosterCard 自己的底色）⇒ 这里返回 SizedBox.shrink()
+/// 就等于「让位给它」，不画任何东西，避免两层错误提示叠在一起。
+Widget _localCoverImage(BuildContext context, {required String path}) {
+  final w = _posterBoxWidth(context);
+  return Image.file(
+    File(path),
+    fit: BoxFit.cover,
+    // ★ 与 coverImage 逐字同一条规则：2:3 卡片 + 16:9 源图时
+    //   **按高度解码**才不糊（见 cover_image.dart 的 A1–A5 说明）。
+    cacheHeight: coverDecodeHeightFor(
+      context,
+      layoutWidth: w,
+      layoutHeight: w / AppMetrics.posterAspect,
+    ),
+    errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+  );
 }
 
 Future<Map<String, dynamic>?> _readSidecar(Directory dir) async {
@@ -666,6 +741,8 @@ class CachedPlayRequest {
     required this.mediaId,
     required this.title,
     this.cover,
+    this.originProvider,
+    this.originMediaId,
   });
 
   final CachedWork work;
@@ -673,6 +750,22 @@ class CachedPlayRequest {
 
   /// ★ 恒为 [kLocalProvider]（见上面「为什么必须独立命名空间」）
   final String provider;
+
+  /// ★★ **原下载源**（B站 / 弹弹play / cycani …），拿不到时为 null
+  ///
+  /// # 为什么单独拎一个字段（Owner 第 1009 批：「要显示原来源，而不是 local」）
+  /// ```text
+  /// [provider] 恒为 'local' —— 它是**续播的命名空间**，不能改（改了旧进度全丢）。
+  /// 但「原来源」是**给人看的**：详情页/播放页那个「来源」标签要的是
+  /// 「B站」而不是「local」。
+  /// ⇒ 两者**必须分开存**：一个当主键用，一个当文案用。
+  ///
+  /// 来源是 [CachedWork.provider]（扫盘时从旁文件或库里找回，见 _scanWork）。
+  /// ```
+  final String? originProvider;
+
+  /// 原站的条目 id（与 [originProvider] 配对；拿不到为 null）
+  final String? originMediaId;
 
   /// ★ 视频文件的规范化绝对路径（同一集 ⇒ 同一 id ⇒ 续播成立）
   final String mediaId;
@@ -721,18 +814,77 @@ const String kLocalProvider = 'local';
 ///   所以这里实现一个**最小**版本，只做「让同一个文件永远算出同一个串」
 ///   必需的那几件事，**不碰文件系统**（不做 realpath —— 那会要求文件存在，
 ///   而这里可能在扫盘结果被删之后才调用）。
-String canonicalLocalPath(String raw) {
+String canonicalLocalPath(String raw) =>
+    canonicalLocalPathAs(raw, windows: Platform.isWindows);
+
+/// ★★★ 平台判断**参数化**的规范化实现（[canonicalLocalPath] 只是它的一行委托）
+///
+/// # 为什么必须把 `Platform.isWindows` 变成**入参**（本改动的全部理由）
+/// ```text
+/// 跑测试的机器是 Windows ⇒ `Platform.isWindows` 是**编译期常量 true**。
+/// ⇒ 任何被 `if (Platform.isWindows)` 守卫包住的 POSIX 断言，在这台机器上
+///   **永远不执行**：绿了也只证明「Windows 分支没坏」，对 macOS CI **零保证**
+///   —— 那正是本仓铁律「假门禁比红更糟」要防的事。
+/// ⇒ 把平台判断从编译期常量变成**入参**，POSIX 语义就能在 Windows 主机上
+///   被**真跑一遍**（见 test/zz_cr_dl_c25_canon_path_test.dart 的用例 ③）。
+/// ```
+///
+/// # CR-25 的两条说法，实测核对（结论钉在这里，别照抄 CR）
+/// ```text
+/// ① 「反斜杠转正斜杠只对 Windows 生效」⇒ **不成立**。
+///    下面 ① 那行 replaceAll 在**任何平台**都跑，与 windows 参数无关
+///    （测试用例 ② 在任何平台都通过 —— 那就是证据）。
+/// ② 「非 Windows 也要折小写」⇒ **是错的**。
+///    POSIX 大小写敏感：折小写会把 /movies/E1.mp4 与 /movies/e1.mp4
+///    （**两个不同文件**）算成同一个进度键 ⇒ 续播串集。
+///    ⇒ 折小写只在 windows:true 时做（见 ⑥）。
+/// ```
+///
+/// # ⚠️ 与「逐字搬运」的两处**必要偏离**（探针实测出的既有缺陷）
+/// ```text
+/// 判据（测试，不许改）钉死了两条 UNC 期望，原实现**算不出来**。
+/// 下面都是先把原函数跑一遍得到的**实测值**，不是读代码猜的：
+///
+///   · ② 的**判序**缺陷：原代码先判 startsWith('//?/') 并 substring(4)，
+///     之后才判 startsWith('//?/UNC/') —— 后者**永远不可达**。
+///     实测 \\?\UNC\nas\share\E1.mp4
+///       ⇒ d:/<cwd>/unc/nas/share/e1.mp4
+///     （UNC 被当成**相对路径**，还叠上了当前工作目录）
+///     期望（用例 ①第 3 条）：//nas/share/e1.mp4。
+///   · ④ 的**破坏**缺陷：③ 特意保留了开头那对斜杠（注释自己写着
+///     「UNC 靠它」），但 11 行后的 ④ 用 (isAbs ? '/' : '') 重建时
+///     只补**一个**斜杠 ⇒ 开头那对**在这里被吃掉**。
+///     实测 //nas/share//E1.mp4 ⇒ /nas/share/e1.mp4（只剩单个前导斜杠）
+///     期望（用例 ③第 4 条）：//nas/share/E1.mp4。
+///
+/// ⇒ 只动这两处（② 换成「长的先判」、④ 把开头那对原样接回去），
+///   其余**逐字不变**。这不是「改测试迁就实现」，而是测试先钉死了
+///   正确语义、实现来满足它。
+/// ```
+///
+/// ⚠️ 语义契约：[canonicalLocalPath] 的结果必须与
+///    canonicalLocalPathAs(raw, windows: Platform.isWindows) **完全相等**
+///    （用例 ②第 2 条钉死了这条 ⇒ 上面的委托写法天然满足）。
+String canonicalLocalPathAs(String raw, {required bool windows}) {
   var p = raw.trim();
   if (p.isEmpty) return p;
 
   // ① 正反斜杠统一成正斜杠（两种写法指向同一文件）
+  //    ★ 全平台无条件执行 —— CR-25 说「只对 Windows 生效」，实测不成立
   p = p.replaceAll(r'\', '/');
 
   // ② Win32 长路径前缀：\\?\D:/x  →  D:/x
   //    （系统加它只是为了绕开 MAX_PATH，不改变文件身份）
-  if (p.startsWith('//?/')) p = p.substring(4);
-  // UNC 前缀 \\?\UNC\server\share → //server/share
-  if (p.startsWith('//?/UNC/')) p = '//${p.substring(8)}';
+  //
+  //    ★★ 判序：**UNC 那条必须在前**（两条前缀互斥，长的先判）。
+  //    原代码把 //?/ 放在前面 ⇒ //?/UNC/... 被 substring(4) 削成
+  //    UNC/nas/...，UNC 判据**永远不可达** ⇒ 整条被当成相对路径。
+  if (p.startsWith('//?/UNC/')) {
+    // UNC 前缀 \\?\UNC\server\share → //server/share
+    p = '//${p.substring(8)}';
+  } else if (p.startsWith('//?/')) {
+    p = p.substring(4);
+  }
 
   // ③ 折叠重复斜杠（D://a///b → D:/a/b），但**保留**开头那对（UNC 靠它）
   final lead = p.startsWith('//') ? '//' : '';
@@ -740,7 +892,18 @@ String canonicalLocalPath(String raw) {
   p = lead + body.replaceAll(RegExp('/+'), '/');
 
   // ④ 折叠 `.` / `..` 段（纯词法折叠，不碰盘）
+  //
+  //    ★★ 重建时必须把 ③ 保住的开头那对**原样接回去**：原来只写
+  //    (isAbs ? '/' : '') ⇒ 单个斜杠，UNC 身份在这一步被吃掉。
+  //
+  //    ⚠️ 但只对**真 UNC 形状**（恰好两个前导斜杠、第 3 个字符不是斜杠）
+  //    接回那对：`///x` 按 POSIX 应折成单个 `/`（3 个以上前导斜杠与 1 个
+  //    等价），空的 `//` 也退回 `/`。这样除真 UNC 外，行为与改动前逐字一致
+  //    —— 由 zz_tmp_canon_diff_test.dart 对 34 组输入做的差分探针实测过。
   final isAbs = p.startsWith('/');
+  final head = (p.startsWith('//') && p.length > 2 && p[2] != '/')
+      ? '//'
+      : (isAbs ? '/' : '');
   final parts = p.split('/');
   final out = <String>[];
   for (final s in parts) {
@@ -751,10 +914,10 @@ String canonicalLocalPath(String raw) {
     }
     out.add(s);
   }
-  p = (isAbs ? '/' : '') + out.join('/');
+  p = head + out.join('/');
 
   // ⑤ Windows 盘符统一成大写（d:/x → D:/x）
-  if (Platform.isWindows && p.length >= 2 && p[1] == ':') {
+  if (windows && p.length >= 2 && p[1] == ':') {
     p = p[0].toUpperCase() + p.substring(1);
   }
 
@@ -762,13 +925,13 @@ String canonicalLocalPath(String raw) {
   //    ★ 为什么必须：NTFS 大小写不敏感 ⇒ `A.mp4` 与 `a.mp4` 是**同一个**
   //      文件，但字符串不同 ⇒ 会算出两个 key ⇒ 续播失效。（POSIX 上
   //      大小写敏感，**不能**折，否则会把两个不同文件混成一个 key。）
-  if (Platform.isWindows) p = p.toLowerCase();
+  if (windows) p = p.toLowerCase();
 
   // ⑦ 兜底：相对路径（没被 ④ 变成绝对）交给 File.absolute 补当前目录。
   //    放在最后 —— 它不碰盘，但会读 cwd。
-  if (!p.startsWith('/') && !(Platform.isWindows && p.length >= 2 && p[1] == ':')) {
+  if (!p.startsWith('/') && !(windows && p.length >= 2 && p[1] == ':')) {
     p = File(p).absolute.path.replaceAll(r'\', '/');
-    if (Platform.isWindows) p = p.toLowerCase();
+    if (windows) p = p.toLowerCase();
   }
 
   return p;
@@ -796,7 +959,15 @@ CachedPlayRequest? buildLocalPlayRequest(
     provider: kLocalProvider,
     mediaId: canonicalLocalPath(abs),
     title: work.displayTitle,
-    cover: work.cover,
+    // ★ 原来源**不是** local：它是这部作品当初从哪个站下的
+    //   （旁文件里有；旁文件没有时 _scanWork 已去库里按目录名找回）。
+    //   null ⇒ 真不知道，不猜（详情页会退成「本地」）。
+    originProvider: _blank(work.provider) ? null : work.provider,
+    originMediaId: _blank(work.mediaId) ? null : work.mediaId,
+    // ★★★ Owner 第 1009 批「已缓存的也要显示原来的封面」
+    //   本地封面文件**离线也在**、也不依赖站点代理端口，换机器/换网络都还在
+    //   ⇒ 优先用它，网络 URL 退成兜底（它只在联网上才画得出来）。
+    cover: work.localCoverPath ?? work.cover,
   );
 }
 
@@ -809,7 +980,7 @@ CachedPlayRequest? buildLocalPlayRequest(
 // 删缓存是**不可逆**的破坏性操作，而文件名来自扫盘、进而可能来自
 // 旁文件/用户手拷/恶意构造的目录名。
 // 而"文件名字段"是完全不受控的输入：文件名里可以有 `..`，
-// 例如一个叫 `��01集 ....mp4` 的文件，`dirname(dirname(path))` 就跑出去了。
+// 例如一个叫 `第01集 ....mp4` 的文件，`dirname(dirname(path))` 就跑出去了。
 // ⇒ 规则（一行判据，任何实现都照它）：
 //     **只允许删 <作品目录>/ 里的文件**，且文件名不得含路径分隔符或 '..'。
 // ```
@@ -1061,7 +1232,9 @@ class CachePageState extends State<CachePage> {
          * ```
          */
         if (_loading && active.isEmpty) {
-          return const Center(child: CircularProgressIndicator());
+          // ★ OPS-14：换成共享组件（原来没给尺寸 ⇒ Material 默认 40×40，
+          //   描边 4px 落在浅灰 `c.secondary` 轨道上，远看只是一圈发丝）。
+          return const Center(child: AppLoading());
         }
         if (_error != null && active.isEmpty) {
           return _empty(
@@ -1521,6 +1694,58 @@ class _CacheWorkCardState extends State<_CacheWorkCard> {
     );
 
     /*
+     * ★★★ Owner 第 1009 批：「已缓存的也要显示原来的封面」
+     * ```text
+     * 症状：已缓存页的卡片是一块灰方块（只剩标题第一个字「无」）。
+     * 根因：PosterCard 的 cover 只喂 coverImage(...) ⇒ **只认网络 URL**；
+     *       而这部作品盘上明明有 _sourin-cover.jpg（DownloadQueue 写的那份），
+     *       它从没被用过 —— 已缓存页等于「有封面也不显示」。
+     * ```
+     *
+     * # 为什么是**叠在上面**而不是把 PosterCard 的 cover 换掉
+     * ```text
+     * PosterCard 是 5 个页面共用的底座，cover 参数的语义是**网络 URL**
+     * （Image.network）。塞一条磁盘路径进去 ⇒ 每个调用点都要跟着分叉。
+     * ⇒ 不动底座，只在这张卡的**海报格**上叠一层本地图。
+     * ```
+     *
+     * # 三层的顺序（**谁先坏就退下一层**，不是二选一）
+     * ```text
+     * ① 本地封面文件（离线在、跨机器在、跨网络在）
+     * ② 网络 URL（PosterCard 自己画的，在它下面）
+     * ③ 占位块（PosterCard 的底色，永远在最底下）
+     * ⇒ 本地图读不出来（文件被删/损坏）时 errorBuilder 缩回 0×0，
+     *   ② 立刻透出来 —— 两层都在树里，不需要等谁失败再重建。
+     * ```
+     */
+    final localCover = _blank(widget.work.localCoverPath)
+        ? null
+        : widget.work.localCoverPath;
+    final Widget card = localCover == null
+        ? poster
+        : Stack(
+            children: [
+              poster,
+              Positioned(
+                left: 0,
+                top: 0,
+                width: _posterBoxWidth(context),
+                height: _posterBoxHeight(context),
+                // 图片只是装饰，永远不参与命中测试（否则会盖掉海报卡的点击）
+                child: IgnorePointer(
+                  child: ClipRRect(
+                    borderRadius: Radii.rMd,
+                    child: _localCoverImage(
+                      context,
+                      path: localCover,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          );
+
+    /*
      * ★ 三种输入方式**共用**下面那一个菜单（右键 / 长按 / 点「更多」）
      * ```text
      * 桌面拖鼠标、手机长按、TV 菜单键——三个入口若各写一份实现，
@@ -1545,7 +1770,8 @@ class _CacheWorkCardState extends State<_CacheWorkCard> {
         onLongPress: () => unawaited(_openMenu(_moreButtonCenter())),
         child: Stack(
           children: <Widget>[
-            poster,
+            // ★ card = poster（没本地封面时）或 poster + 盘上封面那层
+            card,
             // ── 「更多」：默认透明，悬停显形（危险操作按需浮现）──
             Positioned(
               top: Sp.x2,

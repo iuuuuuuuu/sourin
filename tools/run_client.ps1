@@ -88,19 +88,39 @@ if ($Dev) {
 # ── ③ 编（**-t lib/shell.dart 是硬编码的，改不了**）──
 if (-not $NoBuild) {
     Step 3 "flutter build windows --release -t lib/shell.dart"
-    $coreDll = "$root\build\windows\x64\runner\Release\sourin_core.dll"
-    $bak = Join-Path $env:TEMP "sourin_core_dll_backup.dll"
-    if (Test-Path $coreDll) { Copy-Item -LiteralPath $coreDll -Destination $bak -Force }
     & $flutter build windows --release -t lib/shell.dart
     $rc = $LASTEXITCODE
-    # ⚠️ CMake 的拷贝是**按时间戳**的（README:208-210）：从备份还原时 mtime 变旧，
-    #    构建会**静默跳过**拷贝 ⇒ 把刚编好的核心还原回去，保证两边一致。
-    if ((Test-Path $bak) -and (Test-Path $coreDll)) {
-        $a = (Get-Item $bak).Length; $b = (Get-Item $coreDll).Length
-        if ($a -ne $b) { Copy-Item -LiteralPath $bak -Destination $coreDll -Force; Ok "已把 sourin_core.dll 还原成 $a B（构建可能覆盖成旧版）" }
-        Remove-Item $bak -Force -ErrorAction SilentlyContinue
-    }
+    # ★ 构建失败就到此为止：绝不在失败的构建上动 bundle ——
+    #   否则会往客户端里塞一颗没有对应产物的核心。
     if ($rc -ne 0) { throw "flutter build 失败（exit $rc）" }
+
+    # ── 把 Rust 核心装进 bundle（2026-10-10，CR-02）──
+    # 这里**只往一个方向**拷：cargo 的输出 -> Release。
+    #
+    # 旧逻辑（已删）：构建**前**备份 Release 里那颗，构建后按大小比
+    # 不一致就盖回去。那等于把刚编出来的新核心换成构建前的旧核心，
+    # 注释却写着相反的话；而且它想解决的问题并不存在 ——
+    # windows/CMakeLists.txt:122-135 用的是 install(FILES ...)，
+    # 没有「按时间戳决定要不要拷」这种行为（README:208-211 的说法
+    # 在本仓 CMake 里没有对应实现）。
+    #
+    # 显式拷 + 比对 sha，是为了让「bundle 里跑的是哪颗核心」这件事
+    # 不再取决于构建系统的隐式行为。
+    $srcCore = "$root\rust\sourin_core\target\release\sourin_core.dll"
+    $dstCore = "$root\build\windows\x64\runner\Release\sourin_core.dll"
+    if (Test-Path $srcCore) {
+        Copy-Item -LiteralPath $srcCore -Destination $dstCore -Force
+        $srcSha = (Get-FileHash -LiteralPath $srcCore -Algorithm SHA256).Hash
+        $dstSha = (Get-FileHash -LiteralPath $dstCore -Algorithm SHA256).Hash
+        if ($srcSha -eq $dstSha) {
+            Ok "sourin_core.dll 已装进 Release（sha=$($srcSha.Substring(0,16))… 与 target\release 一致）"
+        } else {
+            Bad "装进 Release 的 sourin_core.dll 与 target\release 对不上（$($srcSha.Substring(0,16))… vs $($dstSha.Substring(0,16))…）"
+            exit 1
+        }
+    } else {
+        Write-Host "  ⚠️ rust\sourin_core\target\release 里没有 sourin_core.dll —— 没跑过 cargo build --release，bundle 里不会有核心" -ForegroundColor Yellow
+    }
 } else {
     Step 3 "跳过构建（-NoBuild）"
 }

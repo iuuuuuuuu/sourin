@@ -223,6 +223,19 @@ class _DanmakuSettingsDialogState extends State<DanmakuSettingsDialog> {
     text: widget.state.appSecret,
   );
 
+  /// ★ 屏蔽词必须是**同一个** controller 活过整个对话框的生命周期。
+  ///
+  /// 原来 `_blockWordsField()` 每次 build 都 `TextEditingController(text:
+  /// DanmakuConfig.blockWords.join('\n'))`：
+  /// 用户敲一个字 → onChanged → setBlockWords → widget.onChanged 触发宿主重建
+  /// → build 又造一个新 controller，而 EditableText 显示的就是
+  /// `controller.value`（editable_text.dart:4028），didUpdateWidget 还会
+  /// 重新把 controller 的监听器接上去 ⇒ **每敲一个字就被刷回规范化后的值**，
+  /// 第二个屏蔽词根本输不进去。
+  late final TextEditingController _blockWords = TextEditingController(
+    text: DanmakuConfig.blockWords.join('\n'),
+  );
+
   /// AppSecret 是否以明文显示（默认打码）
   bool _showSecret = false;
 
@@ -230,6 +243,7 @@ class _DanmakuSettingsDialogState extends State<DanmakuSettingsDialog> {
   void dispose() {
     _appId.dispose();
     _secret.dispose();
+    _blockWords.dispose();
     super.dispose();
   }
 
@@ -667,12 +681,12 @@ class _DanmakuSettingsDialogState extends State<DanmakuSettingsDialog> {
 
   /// 屏蔽词多行输入框
   ///
-  /// ⚠️ 用 StatefulWidget 的 controller 会与对话框重建打架，所以这里
-  ///    每次 build 都按当前偏好重建 controller（文本很短，代价可忽略）。
+  /// ★ controller 由 State 持有（见 [_blockWords]），**不要**在 build 里 new：
+  /// 每帧换 controller 会让输入框显示的值永远是偏好里的规范化文本，
+  /// 用户连第二个词都敲不进去。
   Widget _blockWordsField() {
-    final ctl = TextEditingController(text: DanmakuConfig.blockWords.join('\n'));
     return TextField(
-      controller: ctl,
+      controller: _blockWords,
       maxLines: 4,
       minLines: 3,
       style: const TextStyle(fontSize: 13),

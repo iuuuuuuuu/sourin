@@ -2080,7 +2080,12 @@ class _SourinAppState extends State<SourinApp>
             child: Device.isTouchOnly
                 ? SystemUiHost(
                     brightness: brightness,
-                    child: _TitleBarHost(child: child ?? const SizedBox()),
+                    // ★ 与桌面分支同一个 toast 宿主（见下面那段注释）：
+                    //   手机端少了这一层 ⇒ showAppToast 在手机端静默失效，
+                    //   设置页的"已保存/保存失败"全部没反应。
+                    child: ToastHost(
+                      child: _TitleBarHost(child: child ?? const SizedBox()),
+                    ),
                   )
                 : RemoteBridgeHost(
               globals: _globals,
@@ -4825,6 +4830,25 @@ class _ShellPageState extends State<ShellPage>
           episodeId: req.episode.fileName,
           localPath: req.episodeAbsolutePath,
           /*
+           * ★★★ OPS-13（反馈 C）：把**原来源**一起带下去。
+           *
+           * # 为什么必须在这里传（它是这条链上唯一的断点）
+           * ```text
+           * CachedPlayRequest 里**本来就有** originProvider/originMediaId
+           *   （cache_page.dart:744-745 :765 :767-768，
+           *    buildLocalPlayRequest 在 :965-966 填好）
+           * 但本方法组 MediaPage 时**没传** ⇒ 来源信息到这一层就没了
+           * ⇒ 播放器只知道自己是 local，**永远不知道该镜像到哪个站点键**
+           * ⇒ Owner 看到的「本地和线上的就彻底分开了」。
+           * ```
+           *
+           * ⚠️ 只加这两个可选参数，**不动**本方法任何既有字段 ——
+           *    provider 仍是 `local`（那是续播的命名空间，改了旧进度全丢，
+           *    见 cache_page.dart:722-734 的裁决）。
+           */
+          originProvider: req.originProvider,
+          originMediaId: req.originMediaId,
+          /*
            * ★ 作品信息（标题/简介/年份/地区/类型/角标）一并发过去 ——
            *   它就是在线播放页**同一个**详情区组件，差别只在数据来自哪。
            */
@@ -5152,6 +5176,17 @@ class _ShellPageState extends State<ShellPage>
 ///
 /// ⚠️ 桌面以外的平台**完全不渲染** —— Android 没有"窗口"概念，
 ///    minimize/toggleMaximize 在那平台上不存在（点了不会有反应）。
+/// 标题栏那一支的**兜底字色**（亮色档）
+///
+/// 取自 `ui/app_typeface.dart:48-50`（`AppTypeface.forPlatform` 的亮色分支）——
+/// 与主题**同源**，但不依赖 `Theme.of` / `ThemePackStore`（原因见
+/// `_TitleBarHostState.build` 里那段长注释：那里够不着主题，且这一层
+/// 不该随用户偏好变化）。
+///
+/// ⚠️ 深色态（播放页）**不用**它 —— `_CustomTitleBar` 自己按 `dark`
+///    算出 `Colors.white` / `Colors.white70` 并给每个 Text 显式传色。
+const Color _kTitleBarFallbackTextColor = Color(0xFF0A0A0A);
+
 class _TitleBarHost extends StatefulWidget {
   const _TitleBarHost({required this.child});
 
@@ -5226,7 +5261,94 @@ class _TitleBarHostState extends State<_TitleBarHost>
 
     final show = titleBarVisible.value;
     final isDark = titleBarDark.value;
-    return Column(
+    /*
+     * ══════════════════════════════════════════════════════════════════
+     * ★★★ OPS-20（业主反馈 ①）：整支**自己**钉死默认文字样式
+     * ══════════════════════════════════════════════════════════════════
+     *
+     * # 业主原话（逐字，m01667 第①条）
+     *
+     * > 「这个名字下面不要加下划线,太丑了难看」
+     *
+     * # 现象
+     *
+     * 标题栏里「源影」两个字下面有**两条黄线**（双下划线）。
+     * 像素取证（`.probe/ops/att_crop_128x46.png`）：字形下方 y28 与 y31
+     * 两条纯黄 (246,247,89) 水平线，x34-58 ⇒ 双下划线、线距 3px。
+     *
+     * # 根因：它是**继承**来的，不在本仓库任何一行代码里
+     *
+     * ```text
+     * ① material_ui 的 MaterialApp 把自己的**兜底样式**当 textStyle
+     *    传给 WidgetsApp：
+     *      material_ui-1.6.0/lib/src/app.dart:45-54   _errorTextStyle
+     *        decoration: TextDecoration.underline         ← 下划线
+     *        decorationColor: Color(0xFFFFFF00)           ← 纯黄
+     *        decorationStyle: TextDecorationStyle.double  ← 双线
+     *        fontSize: 48.0 / fontFamily: 'monospace'
+     *      同文件 :1034 / :1070 都是 `textStyle: _errorTextStyle,`
+     * ② Flutter 把它装成**整棵树的根 DefaultTextStyle**：
+     *      flutter/packages/flutter/lib/src/widgets/app.dart:1737-1738
+     *        if (widget.textStyle != null) {
+     *          result = DefaultTextStyle(style: widget.textStyle!, child: result);
+     *        }
+     * ③ 标题栏挂在 `MaterialApp.builder` 里、**在 Navigator 之外**
+     *    （本文件 :2087 / :2137），这一支没有任何 Material/Scaffold 祖先
+     *    ⇒ 最近的 DefaultTextStyle 就是 ② 那个 _errorTextStyle。
+     * ④ `Text('源影')` 的 TextStyle 是 `inherit: true` 且没写 decoration
+     *    ⇒ `TextStyle.merge` 逐字段 copyWith
+     *      （flutter/.../painting/text_style.dart:1109
+     *       `decoration: other.decoration,` —— other.decoration 为 null 时
+     *       copyWith 保留 this 的值）
+     *    ⇒ 颜色/字号被自己的样式覆盖（所以不是红的、不是 48px），
+     *      **但 underline + 纯黄 + double 全留着**。
+     * ```
+     *
+     * # 为什么必须包在**这一层**（而不是只给那个 Text 补一行 decoration）
+     *
+     * 实测范围（`test/zz_ops20_scope_probe_test.dart`，遍历真实渲染树）：
+     * ```text
+     * A 标题栏本体（本类之下、Navigator 之上）  5 个 RenderParagraph
+     *     └ 只有「源影」吃到兜底（underline / double / 纯黄）
+     *     └ 另 4 个都是 Icon —— Icon 自带 decoration: none，天然免疫
+     * B 路由内容（Navigator 之下）             17 个 RenderParagraph
+     *     └ 吃到兜底 = 0（Material/Scaffold 自带更近的 DefaultTextStyle）
+     * ```
+     * ⇒ 兜底样式**只在标题栏那一支**能活下来，因为只有它没有 Material 祖先。
+     *   所以这里包住整支：这一支里**将来任何**没写 decoration 的 Text 都
+     *   不会再踩（`ui/widgets/settings_sub_page.dart:12-19` 描述的
+     *   「自绘标题栏没有返回按钮」那一类新加内容同样受保护）。
+     *
+     * ⚠️ 但**不能**把它挪到 Navigator 之下：路由那边本来就有更近的
+     *    Material 兜底样式（B 支实测 0 命中），改过去是**无谓的观感变更**。
+     *
+     * # 为什么钉死「三项」而不是只写 decoration
+     *
+     * 只写 `decoration` 是治症状：兜底样式里还有 `decorationColor` /
+     * `decorationStyle`，将来有人在这支里加一个没写 decoration 的 Text，
+     * 而某个祖先又把 decoration 设回 underline，黄双线会**原样回来**。
+     * 三项一起钉死，`merge` 之后无论怎么叠加都是 none。
+     *
+     * # 为什么不用 `AppTypeface.bodyStyle` / `AppPalette`（想过，不行）
+     *
+     * ```text
+     * AppTypeface.forPlatform()  → 只看 Brightness，不看主题包
+     * AppPalette.of(context)     → 读 Theme.of(context) 的 extension，而
+     *                              这个 context 在 AppThemeHost **之上**
+     *                              （本类的调用点在 :1780 的返回值**里面**），
+     *                              找不到 ⇒ 走 :140-146 兜底并**打一行日志**
+     * AppTheme.colorsFor(b)      → 走 ThemePackStore，会读磁盘偏好
+     * ```
+     * 而这里只需要一个**"安全"的兜底**，不是一个"好看"的兜底：
+     * `_CustomTitleBar` 自己算好 `barFg` / `barFgStrong` 并给**每个 Text
+     * 显式传色**（见 `_titleBarRow`）⇒ 本样式里的 color/fontSize
+     * **当前没有任何 Text 会用到**，它的意义只是「万一漏传，也不丑」。
+     * 用磁盘/主题包去换那点"万一"的好看，代价是给这一层引入一个
+     * **随用户偏好变化**的依赖（而它现在是纯常量）。
+     * ⇒ 用与主题同源的常量：字色 `0xFF0A0A0A` 取自
+     *   `ui/app_typeface.dart:50`（亮色档），字族/字号同源同文件。
+     */
+    final Widget column = Column(
       children: [
         /*
          * ★ 用 AnimatedSize 做"收起"动画
@@ -5319,6 +5441,23 @@ class _TitleBarHostState extends State<_TitleBarHost>
          */
         Expanded(child: ClipRect(child: widget.child)),
       ],
+    );
+
+    /*
+     * ⚠️ 两个分支都必须走这一层 —— 非桌面在上面就 return 了（:5249），
+     *    能到这里的都是桌面，也就是标题栏**真的**会渲染。
+     */
+    return DefaultTextStyle(
+      style: const TextStyle(
+        color: _kTitleBarFallbackTextColor,
+        fontFamily: 'Microsoft YaHei UI',
+        fontFamilyFallback: <String>['Microsoft YaHei', 'Noto Sans SC', 'Segoe UI'],
+        fontSize: 14,
+        decoration: TextDecoration.none,
+        decorationColor: Colors.transparent,
+        decorationStyle: TextDecorationStyle.solid,
+      ),
+      child: column,
     );
   }
 }
@@ -5499,11 +5638,22 @@ class _CustomTitleBar extends StatelessWidget implements PreferredSizeWidget {
         const SizedBox(width: 9),
         Text(
           '源影',
+          /*
+           * ★ OPS-20（业主反馈 ①）：这里**必须**自己写死 `decoration: none`。
+           *
+           * 只靠外面那层 `DefaultTextStyle`（`_TitleBarHostState.build`）
+           * 也能修好，但这一行是这个缺陷**唯一**被业主看见的地方
+           * （「这个名字下面不要加下划线,太丑了难看」）——
+           * 双保险的成本是 1 行，收益是：哪怕将来有人把这支从
+           * `DefaultTextStyle` 里挪出去（比如搬进某个 Material 页面），
+           * 这个具体症状也不会**复发**。
+           */
           style: TextStyle(
             fontSize: FontSizes.cap,
             fontWeight: FontWeight.w600,
             letterSpacing: 0.3,
             color: fgStrong,
+            decoration: TextDecoration.none,
           ),
         ),
 

@@ -56,6 +56,7 @@ import 'cache_page.dart'
 import 'media_session.dart';
 import '../core/network_status.dart';
 import 'tokens.dart';
+import 'widgets/app_loading.dart';
 import 'widgets/cover_image.dart';
 import 'widgets/detail_raw_meta.dart';
 import 'widgets/provider_name.dart';
@@ -483,6 +484,40 @@ String _decodeHtmlEntities(String s) {
 /// 这里只开一个测试专用门（与文件里其它 @visibleForTesting 一致）。
 @visibleForTesting
 String decodeHtmlEntitiesForTest(String s) => _decodeHtmlEntities(s);
+
+/// 本地页"认回来源"要读的那两张表（生产路径来自 FFI）
+typedef LocalOriginRecords = ({
+  List<Progress> progress,
+  List<Favorite> favorites,
+});
+
+/// ★ CR-12（**仅供测试**）：替换"读应用自己的记录"那两步
+///
+/// # 为什么需要这个口子（真实原因，不是"为了测试而测试"）
+/// ```text
+/// [_resolveLocalOrigin] 靠 [SourinApi.listAllProgress] / [SourinApi.listFavorites]
+/// 去认"本地这一集是从哪个站的哪一条下载下来的"。
+/// 而 `flutter test` 里 FFI **必然失败**
+///   （`Failed to load dynamic library 'sourin_core.dll'`，error 126）
+/// ⇒ 那两张表恒为空 ⇒ 恒"未命中" ⇒ **CR-12 这条缺陷根本造不出来**：
+///   造不出"带 cover 的命中记录"，就量不到"认回来源把刚铺好的封面与简介抹掉"。
+/// ```
+///
+/// # 为什么把口子开在这个文件，而不是 [SourinApi]
+/// ```text
+/// `sourin_api.dart` 里已有同形态的先例
+///（`debugSyncStatusFetcher` / `debugHomeFetcher` / `debugListFetcher`），
+/// 但改那个文件会牵动全仓所有调用点 —— 而这里只有**一个页面的一个调用点**要测。
+/// ⇒ 就在被测代码旁边开一条，生产路径一字未动（为 null 时就是原来那两句 FFI）。
+/// ```
+@visibleForTesting
+LocalOriginRecords Function()? debugLocalOriginRecords;
+
+/// 装上/卸掉这两张表的来源（传 `null` = 回到生产路径）
+@visibleForTesting
+void debugSetLocalOriginRecords(LocalOriginRecords Function()? f) {
+  debugLocalOriginRecords = f;
+}
 
 /// ★ task-12 ⑤：本地文件模式的「来源」文案
 ///
@@ -1384,6 +1419,84 @@ class _DetailPageState extends State<DetailPage> {
   /// 本地模式下「那几枚操作按钮」画不画（Owner ⑬：没网就不显示）
   bool get _showLocalActions => !widget.isLocalFile || _online;
 
+  /// ★★★ OPS-9：**这一集磁盘上已经有可播文件** ⇒ 不画那枚「换源」
+  ///
+  /// # Owner 原话（逐字）
+  /// ```text
+  /// > 这个好像是概率性的,**缓存到本地就不要显示换源按钮了**
+  /// ```
+  ///
+  /// # ⚠️ 与 [_showLocalActions] 是**两件不同的事**（别合并、别互相顶替）
+  /// ```text
+  /// _showLocalActions  整条操作行画不画   （离线 ⇒ 四枚全不画）
+  /// _hasLocalPlayable  只摘掉「换源」     （有本地文件 ⇒ 其余三枚照旧）
+  /// ```
+  /// ⇒ 上一版把它们混成了一个开关，结果就是"要么四枚都在、要么四枚都不在"，
+  ///   而 Owner 要的是**在**的那三枚一个不少、只有换源消失。
+  ///
+  /// # 三条判据（按优先级；全部读**真实** widget / 队列状态）
+  ///
+  /// ```text
+  /// ① 播放器报了这一集（currentEpisodeId != null）
+  ///    ⇒ 这一集的文件名在 localEpisodes 里吗？
+  ///       ★ 判据与 [_activeLocalPath] **逐字同源**（本地会话的 episodeId
+  ///         就是磁盘文件名 —— 见 cache_page.buildLocalPlayRequest 的调用点），
+  ///       ⇒ 本页**不自己拼路径**、不自己 stat 磁盘。
+  ///
+  /// ② 播放器还没报（currentEpisodeId == null，语义是"还没报"而**不是**
+  ///    "没有当前集"—— 见 [_activeEpisodeId] 的长注释）
+  ///    ⇒ 进的就是本地页（本页在放一个本地文件），且本地页的选集只列
+  ///      **已下载**的那几集 ⇒ localEpisodeCount > 0 即成立。
+  ///
+  /// ③ 都还没定（在线页 / 本地页刚进来）
+  ///    ⇒ 队列里有没有**这一集**的活任务、且**已经落了片**？
+  /// ```
+  ///
+  /// # ③ 为什么必须要求 `done > 0`
+  /// ```text
+  /// 只有落了片才有"能播的东西"（.part 也算，播放器支持边下边播）；
+  /// done == 0 时清单都还没拿到 ⇒ 盘上一个字节都没有 ⇒ 换源照画。
+  /// ⚠️ 刻意**不**去扫磁盘上有没有 .part：仓库口径里 .part **不算**"已下好"
+  ///    （见 media_page 的 _localEpisodeRefs 只收 e.isComplete）。
+  /// ```
+  /// ⚠️ [DownloadQueue.tasks] 只在内存（无持久化）⇒ 重启后"已下好"这件事
+  ///    只由 ①② 覆盖；③ 管的是"这次会话里正在下的那一集"。
+  bool get _hasLocalPlayable {
+    final episodes = widget.localEpisodes;
+
+    // ① 播放器报了这一集 —— 复用既有判据（文件名比对），不拼路径
+    final reported = widget.currentEpisodeId;
+    if (reported != null) {
+      for (final e in episodes) {
+        if (e.fileName == reported) return true;
+      }
+      // ★ 报的这一集不在已下载列表里 ⇒ 落到 ③ 看队列（在线页切集的情形）
+    }
+
+    // ② 进的就是本地页，且本地页有已下载的集
+    if (widget.isLocalFile &&
+        (episodes.isNotEmpty || widget.localEpisodeCount > 0)) {
+      return true;
+    }
+
+    // ③ 这一集正在下载、且已经有可播片段
+    final ids = <String>{
+      if (reported != null) reported,
+      if (_pickedEpisodeId != null) _pickedEpisodeId!,
+      if (_selectedEpisodeId != null) _selectedEpisodeId!,
+    };
+    if (ids.isEmpty) return false;
+    for (final t in DownloadQueue.tasks.value) {
+      if (t.state != DownloadState.running) continue;
+      if (t.done <= 0 || t.total <= 0) continue;
+      if (t.provider != widget.provider) continue;
+      if (t.mediaId != widget.id) continue;
+      if (!ids.contains(t.episodeId)) continue;
+      return true;
+    }
+    return false;
+  }
+
   /// 解析本地模式的「来源」，并把**真封面**用上（task-17 ②）
   ///
   /// 三档行为见上面那段长注释。**无论哪一档都必然给 _localOrigin 一个值** ——
@@ -1402,8 +1515,8 @@ class _DetailPageState extends State<DetailPage> {
   /// ③ 真要补也该由**用户主动点**才发请求，而不是进页面就自动打一次网络。
   /// ```
   /// ⚠️ 取舍的**代价**（如实写在代码里，免得下一个人以为是 bug）：
-  ///    本地详情页**没有**简介/评分/演员/类型 —— 那几行由 [_detail] 的字段决定，
-  ///    而这里只填了 title / cover。若将来 Owner 要它们，
+  ///    这里**不会**去补简介/评分/演员/类型 —— 本地页显示什么，取决于
+  ///    [_initLocal] 从本地 meta 里铺出来的字段；若 Owner 之后要在线详情，
   ///    正确做法是加一个"查看在线详情"的**显式入口**，不是把网络请求加回这里。
   Future<void> _loadLocalOrigin() async {
     final hit = await _resolveLocalOrigin();
@@ -1436,19 +1549,42 @@ class _DetailPageState extends State<DetailPage> {
       _localOriginItem = (provider: hit.provider, id: hit.id);
       _localOrigin = name;
       /*
-       * ★★★ task-17 ②：**真封面** —— 记录里带 cover 时才覆盖。
+       * ★★★ task-17 ②：**真封面** —— 只在本页**还没有**封面时才用记录里的。
        *
        * ⚠️ 只在非空时覆盖：`hit.cover == null` 表示"这条记录没封面"，
        *    那时**保留**外层给的那张（可能来自旁文件），不能用一个 null 把它抹掉。
        * ⚠️ 标题**不动**：外层给的标题就是本地目录名（用户看得见的那个），
        *    而 hit.title 是站点标题 —— 两者归一化后相等，换过去只会让标题"跳一下"。
+       *
+       * ★★ CR-12：这里**原来**是只要 `hit.cover` 非空就 `MediaDetail(id:,
+       *    title:, cover:)` 整个换掉 —— 而 [MediaDetail] 剩下每一个字段都
+       *    取默认值，于是 [_initLocal] 刚铺好的 description / year / area /
+       *    kind / badges **一起消失**，本地封面路径也被换成记录里的网络图 URL。
+       *    最常见的触发路径恰恰是"先在线看过、再下载"（本地目录里 meta 齐全，
+       *    progress/favorites 也有带 cover 的一条）。Owner 的反馈就是这个：
+       *    本地播放详情页的封面和「来源」要保留。
+       *
+       *    现在改成：本地页**已经有**封面就一个字节都不动；确实没有封面时，
+       *    才把记录里的 cover 补上，并且**照抄**其余字段（不新造一个空壳）。
+       *    [MediaDetail] 没有 copyWith，所以只能显式转写。
        */
       final c = hit.cover;
-      if (c != null && c.isNotEmpty) {
+      final cur = _detail;
+      if (c != null && c.isNotEmpty && cur != null && (cur.cover ?? '').isEmpty) {
         _detail = MediaDetail(
-          id: _detail?.id ?? widget.localFile ?? widget.id,
-          title: _detail?.title ?? widget.localTitle ?? widget.id,
+          id: cur.id,
+          title: cur.title,
           cover: c,
+          description: cur.description,
+          year: cur.year,
+          area: cur.area,
+          kind: cur.kind,
+          actors: cur.actors,
+          directors: cur.directors,
+          badges: cur.badges,
+          meta: cur.meta,
+          episodes: cur.episodes,
+          sources: cur.sources,
         );
       }
     });
@@ -1515,12 +1651,21 @@ class _DetailPageState extends State<DetailPage> {
     final List<Progress> progress;
     final List<Favorite> favorites;
     try {
-      final r = await Future.wait([
-        SourinApi.listAllProgress(),
-        SourinApi.listFavorites(),
-      ]);
-      progress = (r[0] as List).cast<Progress>();
-      favorites = (r[1] as List).cast<Favorite>();
+      // ★ CR-12：测试口子在**这里**接管（见 [debugLocalOriginRecords] 的说明）。
+      //   为 null 时下面两句一字未改 ⇒ 生产路径与改前完全一致。
+      final injected = debugLocalOriginRecords;
+      if (injected != null) {
+        final rec = injected();
+        progress = rec.progress;
+        favorites = rec.favorites;
+      } else {
+        final r = await Future.wait([
+          SourinApi.listAllProgress(),
+          SourinApi.listFavorites(),
+        ]);
+        progress = (r[0] as List).cast<Progress>();
+        favorites = (r[1] as List).cast<Favorite>();
+      }
     } catch (e) {
       AppLog.write('LOCAL', '来源匹配放弃：读应用自己的记录失败 $e');
       return null;
@@ -2297,7 +2442,7 @@ class _DetailPageState extends State<DetailPage> {
     final content = Stack(
       children: [
         if (_loading)
-          const Center(child: CircularProgressIndicator())
+          const Center(child: AppLoading())
         else if (_error != null)
           _ErrorView(
             message: _error!,
@@ -2533,6 +2678,8 @@ class _DetailPageState extends State<DetailPage> {
           providerName: widget.isLocalFile ? _localOrigin : _providerName,
           localMode: widget.isLocalFile,
           showActions: _showLocalActions,
+          // ★★★ OPS-9：这一集磁盘上有没有可播文件 ⇒ 只决定那枚「换源」画不画
+          hasLocalFile: _hasLocalPlayable,
           isFav: _isFav,
           following: _following,
           resume: _resume,
@@ -3546,13 +3693,34 @@ class _Cover extends StatelessWidget {
 
   /// 这个封面是**本地文件**还是**网络 URL**
   ///
-  /// ★ 判据是「能不能被解析成本地路径」—— `Uri.tryParse` 能解出 scheme 的
-  ///   就是网络地址（http/https）。真正的 Windows 路径解析出来是无 scheme 的。
+  /// ⚠️ **不能**只看 `Uri.tryParse(...).hasScheme`（CR-11）：
+  ///   Windows 盘符路径 `C:\Users\…\_sourin-cover.jpg`
+  ///   会被 URI 解析器读成「scheme = `C`」⇒ `hasScheme == true` ⇒ 落进
+  ///   `Image.network` 分支；而主力平台 Windows 上
+  ///   `Image.network('C:\…')` 必然加载失败 ⇒ 本地封面永远退化成
+  ///   首字母占位符（断网时连磁盘上那张图都看不到）。
+  ///
+  /// ★ 正确判据（**先认磁盘路径，再谈 URI**）：
+  ///   ① `http://` / `https://` 开头 ⇒ 网络；
+  ///   ② 盘符 `C:\…` / `C:/…` ⇒ 本地；
+  ///   ③ UNC `\\server\share\…`（两个反斜杠开头）⇒ 本地；
+  ///   ④ POSIX 绝对路径 `/…` ⇒ 本地；
+  ///   ⑤ 其余才交给 `Uri.tryParse`：有 scheme（`file://`、`data:` 等）⇒ 非本地；
+  ///      无 scheme（`cover.jpg` 这类相对名）⇒ 本地。
   static bool _isLocalCover(String? cover) {
     if (cover == null || cover.isEmpty) return false;
     if (cover.startsWith('http://') || cover.startsWith('https://')) return false;
+    // ★ CR-11：盘符（正则只认前缀，`C:\\` 与 `C:/` 两种写法都算）
+    if (_driveLetter.hasMatch(cover)) return true;
+    // UNC：两个反斜杠开头
+    if (cover.startsWith('\\\\')) return true;
+    // POSIX 绝对路径
+    if (cover.startsWith('/')) return true;
     return Uri.tryParse(cover)?.hasScheme != true;
   }
+
+  /// 盘符前缀，如 `C:\\` / `d:/`（只判前缀，不判整条路径）
+  static final RegExp _driveLetter = RegExp(r'^[a-zA-Z]:[\\/]');
 
   final MediaDetail detail;
   final double width;
@@ -3662,6 +3830,7 @@ class _Info extends StatelessWidget {
     this.localCount = 0,
     this.localMode = false,
     this.showActions = true,
+    this.hasLocalFile = false,
     required this.sourceCount,
     required this.providerName,
     required this.isFav,
@@ -3699,6 +3868,29 @@ class _Info extends StatelessWidget {
   /// ★ 在线页恒为 true（那几枚按钮本来就要打网络，——“能不能用”
   ///   在那里由点了发不出来说）；只有本地页才会变 false。
   final bool showActions;
+
+  /// ★★★ OPS-9：**这一集在磁盘上已经有可播文件** ⇒ 不画「换源」
+  ///
+  /// # Owner 原话（逐字）
+  /// ```text
+  /// > 这个好像是概率性的,**缓存到本地就不要显示换源按钮了**
+  /// ```
+  /// 换源要干的事是「换一条线路，去**网上**把这一集拉下来播」。
+  /// 而这一集磁盘上已经有了（[DetailPage.localEpisodes] 里就躺着它）⇒
+  /// 换源**无处可落**：点了也只是把播放源换成一个同样要联网的地址。
+  ///
+  /// ⚠️ 与 [showActions] 是**两件不同的事**，别合并：
+  /// ```text
+  /// showActions   = 整条操作行画不画（离线时整行不画）
+  /// hasLocalFile  = 只把那**一枚**「换源」摘掉（收藏/追更/下载照旧）
+  /// ```
+  /// ⇒ 所以**不能**改 [showActions] 来达到这个效果：那会把另外三枚一起藏掉。
+  ///
+  /// ★ 判据本身**复用仓库既有**的「这一集本地文件在不在」口径
+  /// （[DetailPage.currentEpisodeId] + [DetailPage.localEpisodes] 的
+  ///  `e.fileName == currentEpisodeId` —— 与 `_DetailPageState._activeLocalPath`
+  ///  逐字同源），**不**在 UI 层自己拼磁盘路径。
+  final bool hasLocalFile;
 
   /// 线路总数（顶层 + 嵌套，展平后）—— 用于「N 个播放源」角标
   final int sourceCount;
@@ -4018,11 +4210,24 @@ class _Info extends StatelessWidget {
              * 原版的位置是**头部操作行**（与播放/收藏/追更并排），
              * 我们原先放在选集区下方，有剧集时要滚下去才看得到 —— 已挪回这里。
              */
-            OutlinedButton.icon(
-              onPressed: onSwitchSource,
-              icon: const Icon(Icons.swap_horiz, size: 16),
-              label: const Text('换源'),
-            ),
+            /*
+             * ★★★ OPS-9：**这一集磁盘上已经有可播文件 ⇒ 这一枚不画**
+             *
+             * Owner 原话（逐字）：
+             * > 这个好像是概率性的,**缓存到本地就不要显示换源按钮了**
+             *
+             * ⚠️ 只摘**这一枚** —— 收藏 / 追更 / 下载三枚照旧画。
+             *    判据见 [_DetailPageState._hasLocalPlayable]；
+             *    与"整条行画不画"的 [showActions] 是**两件事**，
+             *    别把它并进上面那个 `if (showActions)`（那样三枚会一起消失）。
+             */
+            if (!hasLocalFile) ...[
+              OutlinedButton.icon(
+                onPressed: onSwitchSource,
+                icon: const Icon(Icons.swap_horiz, size: 16),
+                label: const Text('换源'),
+              ),
+            ],
 
             /*
              * ══════════════════════════════════════════════════════════

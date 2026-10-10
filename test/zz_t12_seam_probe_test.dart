@@ -26,10 +26,20 @@ import 'package:sourin_spike/ui/media_session.dart';
 
 void main() {
   test('A/B 接缝：补字段逻辑必须**不覆盖**已带的 localPath（先后位置是隐性契约）', () {
+    // ★ CR-25 / OPS-18：本探针原先把 Windows 路径**写死**（反斜杠）。
+    //    在 POSIX 上反斜杠只是普通字符，而 `buildLocalPlayRequest`（判据 ④）用的是
+    //    `Platform.pathSeparator` ⇒ 两侧拼出的串不一致 ⇒ 判据 ④ 在 macOS 上必红。
+    //
+    // ★ 修法：根目录**按平台取形**（不是把断言跳掉）——
+    //    Windows 用 `C:` + 分隔符 + `v`，POSIX 用 `/v`。
+    //    两边都是**合法的该平台绝对路径**，且都真的走同一条生产代码
+    //    ⇒ 在 macOS 上照样断言，不是空跑。
+    final sep = Platform.pathSeparator;
+    final root = Platform.isWindows ? ('C:' + sep + 'v') : (sep + 'v');
     // ── 判据 ①：已带 ⇒ 原样用 ──────────────────────────────
     // 右侧面板从磁盘选的第 N 集走的就是这条（media_page.dart:906）
-    const diskPick = 'C:\\v\\无职转生\\e2.mp4';
-    var req = const PlayRequestData(
+    final diskPick = '$root' + sep + '无职转生' + sep + 'e2.mp4';
+    var req = PlayRequestData(
       provider: 'local',
       id: 'c:/v/无职转生/e2.mp4',
       title: '无职转生',
@@ -37,7 +47,7 @@ void main() {
       localPath: diskPick,
     );
     // 模拟 _onDetailPlay 入口的那段（逐字重放，见 media_page.dart:516）
-    const widgetLocalPath = 'C:\\v\\无职转生\\e1.mp4'; // 进入页面时那一集
+    final widgetLocalPath = '$root' + sep + '无职转生' + sep + 'e1.mp4'; // 进入页面时那一集
     if (req.localPath == null && widgetLocalPath != null) {
       req = PlayRequestData(
         provider: req.provider,
@@ -59,7 +69,7 @@ void main() {
     expect(req.localPath, isNot(widgetLocalPath));
 
     // ── 判据 ②：没带 + 本地会话 ⇒ 兜到 widget 值 ─────────────
-    var req2 = const PlayRequestData(
+    var req2 = PlayRequestData(
       provider: 'local',
       id: 'c:/v/无职转生/e1.mp4',
       title: '无职转生',
@@ -85,7 +95,7 @@ void main() {
 
     // ── 判据 ③：没带 + 在线会话 ⇒ 保持 null（不许硬编码）────────
     const onlineWidgetLocalPath = null; // 在线会话：构造参数就是 null
-    var req3 = const PlayRequestData(
+    var req3 = PlayRequestData(
       provider: 'cctv',
       id: 'cctv1',
       title: '在线剧',
@@ -102,7 +112,7 @@ void main() {
     // 磁盘选集的绝对路径**必须**等于「目录路径 + 文件名」（生产那个函数算出来的）
     final w = CachedWork(
       dirName: '无职转生',
-      path: r'C:\v\无职转生',
+      path: root + sep + '无职转生',
       episodes: <CachedEpisode>[
         const CachedEpisode(
           fileName: 'e2.mp4',

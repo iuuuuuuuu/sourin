@@ -679,6 +679,15 @@ class DownloadQueue {
   /// 而读侧（`cache_page._readSidecar`）解析失败会静默降级成"没封面"
   /// ⇒ 用户看到的是"我明明下过，怎么封面没了"，而文件明明就在那儿。
   /// rename 在同一卷上是原子的 ⇒ 要么完整的新文件，要么完整的老文件。
+  ///
+  /// ★★★ OPS-16 ①：rename **会撞锁**（目标已存在且被别的句柄开着）⇒
+  ///   改前那一行 `await tmp.rename(f.path)` + 一个只记日志的 catch，
+  ///   在 Windows 上会把**整份新旁文件**静默丢掉。现在统一走
+  ///   [_atomicReplaceWith]（重试 + 兜底 + 失败如实记），见那里的长注释。
+  ///
+  /// ★★★ OPS-16 ②：本函数必须在**发布 done 之前** await 完 ——
+  ///   理由见 `_run` 里调用点上方那段（cache_page 的 _onQueueChanged
+  ///   按 id 集合去重，第二次 publish **不会**再触发重扫 ⇒ 只能靠顺序保证）。
   static Future<void> _writeSidecarFor(DownloadTask t, String dir) async {
     try {
       /*
@@ -702,10 +711,122 @@ class DownloadQueue {
         'kind': t.kind,
         'badges': t.badges,
       }), flush: true);
-      await tmp.rename(f.path);
+      await _atomicReplaceWith(tmp, f, what: '旁文件');
     } catch (e) {
-      // 旁文件丢了是小事，把下载本身搞失败是大事
-      AppLog.write('DL', '旁文件写入被忽略：$e');
+      /*
+       * 旁文件丢了是小事，把下载本身搞失败是大事 —— 但**不许再静默**
+       * （改前这里写的是「旁文件写入被忽略」，连目标路径都没有）。
+       */
+      AppLog.write(
+        'DL',
+        '旁文件写入失败（不阻断下载）：'
+        '目标=$dir${Platform.pathSeparator}$kSidecarName  $e',
+      );
+    }
+  }
+
+  /// 原子替换的退避序列（毫秒）：立即试一次 + 退避 4 次，合计 ≈ 440 ms
+  ///
+  /// 依据：真实占用者都是**短命**的 —— 读一个小 JSON 是微秒级、杀软扫几 KB
+  /// 是几十毫秒级、并发收尾的另一集只是一次 rename 的瞬间。
+  /// 440 ms 足够覆盖这些，又不会让收尾肉眼可感地卡顿。
+  static const List<int> _replaceBackoffMs = <int>[20, 50, 120, 250];
+
+  /// ★★★ OPS-16 ①：把 [tmp] 换成 [target] —— 撞锁时**重试 + 兜底 + 如实记**
+  ///
+  /// # 缺陷（改前）
+  /// ```text
+  /// await tmp.rename(f.path);          // 一行：没有重试、没有兜底
+  /// catch (e) { AppLog.write('DL', '旁文件写入被忽略：$e'); }   // 静默吞掉
+  /// ```
+  /// Windows 上 rename 到**已存在且被别的句柄打开**的目标会抛（实测）：
+  /// ```text
+  /// PathAccessException: Cannot rename file to '…\_sourin-cache.json',
+  ///   path = '…\_sourin-cache.json.tmp' (OS Error: 拒绝访问。, errno = 5)
+  /// ```
+  /// 占用者全是**我们自己的代码或系统**，而且都是常态：
+  /// · `cache_page._readSidecar` 正在读同一个文件（扫盘 / 详情页）；
+  /// · 杀软实时扫描刚写出的文件；
+  /// · **同一部剧并发下载多集**（并发 2/3 是正式功能）⇒ 两集同时收尾。
+  /// ⇒ 概率性丢封面/来源，且被 catch 吞成一行日志 ⇒ 用户永远不知道。
+  ///
+  /// # 三级处理
+  /// ```text
+  /// ① rename（同卷原子 ⇒ 读侧要么完整旧文件、要么完整新文件）：
+  ///    立即试一次，失败后退避重试（见 _replaceBackoffMs）。
+  /// ② 兜底「原地覆盖写」：把 tmp 的字节写进目标、截断、flush、删 tmp。
+  ///    ⚠️ 为什么不是 copy：实测 File.copy 到**已存在**的目标会抛
+  ///       PathExistsException (OS Error: 当文件已存在时…, errno = 183)；
+  ///       「先 delete 再 rename」也不行 —— 删被占文件抛 errno = 32。
+  ///       只有"打开目标自己写"能成功（探针实测：目标被 FileMode.append
+  ///       句柄持住时 open(FileMode.write) + write + flush 成功，
+  ///       且**长度被正确截断**，不留旧尾巴）。
+  ///    ⚠️ 代价：这一步放弃了 ① 的原子性（读侧可能撞见半截 JSON）——
+  ///       但读侧解析失败本来就降级成"没封面"，而**丢掉整份新旁文件**
+  ///       （改前的行为）是永久且不可自愈的。两害相权取轻。
+  /// ③ 两级都失败 ⇒ 如实记日志（目标路径 + 两次异常原文），绝不再静默；
+  ///    并尽力清掉 tmp，不在用户目录里留垃圾。
+  /// ```
+  static Future<bool> _atomicReplaceWith(
+    File tmp,
+    File target, {
+    required String what,
+  }) async {
+    Object? renameErr;
+    for (var attempt = 0; attempt <= _replaceBackoffMs.length; attempt++) {
+      try {
+        await tmp.rename(target.path);
+        if (attempt > 0) {
+          AppLog.write('DL',
+              '$what原子替换成功（rename 第 ${attempt + 1} 次）：${target.path}');
+        }
+        return true;
+      } catch (e) {
+        renameErr = e;
+        if (attempt < _replaceBackoffMs.length) {
+          await Future<void>.delayed(
+              Duration(milliseconds: _replaceBackoffMs[attempt]));
+        }
+      }
+    }
+
+    Object? fallbackErr;
+    try {
+      final bytes = await tmp.readAsBytes();
+      final raf = await target.open(mode: FileMode.write);
+      try {
+        await raf.writeFrom(bytes);
+        await raf.flush();
+      } finally {
+        await raf.close();
+      }
+      await _tryDelete(tmp);
+      AppLog.write(
+        'DL',
+        '$what原子替换退化为原地写（rename 重试 '
+        '${_replaceBackoffMs.length + 1} 次仍被占用）：${target.path}'
+        '  原因：$renameErr',
+      );
+      return true;
+    } catch (e) {
+      fallbackErr = e;
+    }
+
+    await _tryDelete(tmp);
+    AppLog.write(
+      'DL',
+      '★ $what原子替换彻底失败（重试 + 兜底都没成）：目标=${target.path}'
+      '  rename=$renameErr  兜底=$fallbackErr',
+    );
+    return false;
+  }
+
+  /// 尽力删掉一个临时文件：失败只记日志，绝不抛（收尾路径上不许有异常）
+  static Future<void> _tryDelete(File f) async {
+    try {
+      if (await f.exists()) await f.delete();
+    } catch (e) {
+      AppLog.write('DL', '清理临时文件失败：${f.path}  $e');
     }
   }
 
@@ -752,7 +873,14 @@ class DownloadQueue {
       final f = File('$dir${Platform.pathSeparator}$name');
       final tmp = File('${f.path}.tmp');
       await tmp.writeAsBytes(bytes, flush: true);
-      await tmp.rename(f.path);
+      /*
+       * ★★★ OPS-16 ①：封面与旁文件是**同一个撞锁窗口**（同一部剧并发收尾、
+       *   cache_page 扫盘、杀软），改前同样是「一行 rename + 静默 catch」
+       *   ⇒ 概率性丢原封面（Owner：「已缓存的也要显示原封面」）。
+       *   ⇒ 走与旁文件同一套重试 + 兜底（见 _atomicReplaceWith）。
+       */
+      final ok = await _atomicReplaceWith(tmp, f, what: '封面');
+      if (!ok) return null;
       return name;
     } catch (e) {
       AppLog.write('DL', '封面缓存失败（不阻断下载）：$e');
@@ -872,16 +1000,45 @@ class DownloadQueue {
             );
   }
 
-  /// 跑第 i 个任务（**调用方必须已经把它标成 running**，见 _markRunning）
+  /// ★★★ CR-14：跑**第 i 个任务**（**调用方必须已经把它标成 running**，见 _markRunning）
   ///
   /// ⚠️ 这里**不再**自己置 running：置位是并发槽位的**占用动作**，
   ///   必须与 _pump 里选任务**同步**发生，否则两次 _pump 迭代会挑到同一个
   ///   queued 任务（并发重复下载同一集）。所以置位统一收在 _markRunning。
+  ///
+  /// ★★★ CR-14：i 只是**入口**下标，函数内**全程按任务 id 定位**。
+  ///
+  /// # 为什么不能用 i 定位（缺陷链，探针实测见 test/zz_cr_dl_c14_index_identity_test.dart）
+  /// ```text
+  /// 并发 >= 2 时，只要 _list 在本轮 await 期间被摘掉**前面**任何一个任务，
+  /// 后面所有任务的下标就左移 —— 而 _run 还拿着旧 i：
+  ///   · 自己的收尾（state=done / path / 失败原因）写到**邻居**身上 ⇒
+  ///     自己永远停在 running，邻居被冒名顶替（实测 ep1 卡 running、ep2 被写成 done）；
+  ///   · 任务被 remove() 摘掉之后，catch 里 _list[i] 直接 RangeError。
+  /// ⇒ 下面所有读写都现查 indexOfId()：找不到 = 这条任务已经没了，
+  ///   它的收尾结论没有落点，直接跳过，绝不能写邻居。
+  /// ```
   static Future<void> _run(int i) async {
+    // ★★★ CR-14：i 只在**入口**用一次（_pump 刚把它标成 running，这一刻它是对的）。
     final t = _list[i];
-    /// ★★★ task-11 ③：本轮是不是**因为暂停**而收尾的。
-    /// true ⇒ 不标 done（保持 paused），.part 保留，等用户点继续。
+    /// ★★★ CR-14：这条任务**当下**所在的下标（-1 = 已被移除）。
+    ///   _list 是可变的静态列表，下标随时会因 remove/clearFinished 左移，
+    ///   所以每次读写都必须现查，绝不能缓存。
+    int indexOfId() => _list.indexWhere((x) => x.id == t.id);
+    /// ★★★ CR-15：本轮是不是**因为暂停**而收尾的。
     var pausedOut = false;
+    /// ★★★ CR-15：暂停时**下载器回报的真实分片数**（= .part 里落盘的片数）。
+    ///
+    /// ★ 为什么必须单独存：onProg 有两道门 ——
+    ///   ① 节流（每 8 片才写一次 done）；
+    ///   ② `if (cur.state != DownloadState.running) return;`（暂停后状态已是 paused）。
+    /// ⇒ 暂停那一刻，任务上的 done 停在**最后一个节流点**（实测 16），
+    ///   而 .part 里其实已经写进了更多片（实测 20/21）。
+    /// ⇒ 继续时 `initialDone: t.done` 偏小 ⇒ 下载器把已落盘的片**又拉一遍并追加**
+    ///   ⇒ 成品重复拼接（实测 184320 字节 vs 应有 163840，服务器被拉 45 次 vs 40）。
+    ///
+    /// ⇒ 暂停收尾时必须用**下载器的回报值**覆盖 done（见下面的 pausedOut 分支）。
+    var pausedSegments = 0;
     try {
       /*
        * ① 轮到它了才解析流（见文件头的说明）——
@@ -899,13 +1056,21 @@ class DownloadQueue {
          *   最后一片必报（done == total）⇒ 进度条一定走到 100%。
          */
         if (done != total && done % 8 != 0) return;
-        final cur = _list[i];
+        // ★★★ CR-14：按 id 现查，而不是拿入口下标 i（它会因并发下标左移而指错人）。
+        final at = indexOfId();
+        if (at < 0) return;
+        final cur = _list[at];
         if (cur.state != DownloadState.running) return;
-        _list[i] = cur.copyWith(done: done, total: total);
+        _list[at] = cur.copyWith(done: done, total: total);
         _publish();
       }
 
-      bool cancelled() => _list[i].state == DownloadState.failed;
+      // ★★★ CR-14：按 id 现查；任务已被 remove() 摘掉时 indexOfId() == -1
+      //   ⇒ 它的下载已经没有落点了，当成「已取消」处理（下载器会清掉 .part）。
+      bool cancelled() {
+        final at = indexOfId();
+        return at < 0 || _list[at].state == DownloadState.failed;
+      }
 
       /*
        * ★★★ task-11 ③：暂停判据 —— 由 HlsDownloader 在每个**分片边界**问。
@@ -917,7 +1082,11 @@ class DownloadQueue {
        * ```
        * ⇒ 两个回调必须分开传，**不能**用一个「该不该停」的 bool 混过去。
        */
-      bool paused() => _list[i].state == DownloadState.paused;
+      // ★★★ CR-14：同上，按 id 现查（任务没了就没有暂停可言）。
+      bool paused() {
+        final at = indexOfId();
+        return at >= 0 && _list[at].state == DownloadState.paused;
+      }
 
       /*
        * ② 先按 HLS 试。
@@ -957,6 +1126,8 @@ class DownloadQueue {
                 '${(r.bytes / 1048576).toStringAsFixed(1)} MB（.part 保留）',
           );
           pausedOut = true;
+          // ★★★ CR-15：把下载器回报的真实分片数留下来（见 pausedSegments 的注释）
+          pausedSegments = r.segments;
           path = r.path;
           bytes = r.bytes;
         } else {
@@ -976,35 +1147,89 @@ class DownloadQueue {
       }
 
       /*
-       * ★★★ task-11 ③：暂停时**不**标 done。
-       *   状态已是 paused（由 pause() 置），这里只需把已下进度写进去，
-       *   让 UI 显示「已暂停 · 已下 N 片」。
+       * ★★★ task-11 ③ + CR-14 + CR-15：收尾**必须按 id 写回自己**，
+       *   绝不能再用入口下标 i —— 并发时它会指向邻居（实测：ep1 卡 running、
+       *   ep2 被冒名顶替成 done）；任务被 remove() 摘掉时 write() 返回 false，
+       *   此时它的结论没有落点，直接放弃，绝不写邻居（catch 同理，见下）。
+       *
+       * 暂停分支另外还带着 CR-15 的修复：done 要用**下载器回报的分片数**，
+       * 因为 onProg 有两道门（每 8 片节流 + 暂停后不再写），
+       * 任务上的 done 会停在最后一个节流点（实测 16）而 .part 里已有 20/21 片。
        */
       if (pausedOut) {
-        _list[i] = _list[i].copyWith(path: path);
+        final at = indexOfId();
+        if (at >= 0) {
+          _list[at] = _list[at].copyWith(path: path, done: pausedSegments);
+          _publish();
+        }
       } else {
-        _list[i] = _list[i].copyWith(
-          state: DownloadState.done,
-          done: _list[i].total,
-          path: path,
-        );
+        /*
+         * ★★★ OPS-16 ②：**这里的顺序是有意义的** —— 旁文件落地之后才发布 done。
+         *
+         * # 缺陷（改前）
+         * ```text
+         * _publish();                       // ① 先宣布「完成」
+         * AppLog.write('DL', '队列完成 …');
+         * …
+         * await _writeSidecarFor(t, dir);   // ② 之后才写旁文件
+         * ```
+         * 「已缓存」页 _onQueueChanged（cache_page.dart:1143）收到 ① 就立刻
+         * load() 扫盘；而 ② 里还夹着一次**网络 IO**（抓封面，几百毫秒到数秒）
+         * ⇒ 扫到的是「有视频、没旁文件」⇒ 封面/来源缺失，用户看到的是
+         * 「我明明下过，怎么封面没了」。
+         *
+         * # 为什么不是「写完再 publish 一次」（方案 b）
+         * ```text
+         * cache_page.dart:1145-1151
+         *   final doneIds = {… state == done …};
+         *   final fresh = doneIds.difference(_seenDoneIds);
+         *   _seenDoneIds = doneIds;
+         *   if (fresh.isEmpty) return;      // ★ 同一条任务第二次 done 被吃掉
+         * ```
+         * 它按 **id 集合**去重 ⇒ 第二次 publish **不会**再触发 load() ⇒ 不自愈。
+         * （已读代码确认，不是假设。）
+         *
+         * # 代价（评估过）
+         * 发布推迟到封面抓取完成之后：下载面板会多停在「下载中 6/6」几百毫秒。
+         * 但 ① 那条 publish 从来就不是「文件已落盘」的信号（成品早在
+         * HlsDownloader 里就 rename 好了），而 ② 的收益是**消灭不可自愈的
+         * 缺封面状态** —— 业主反馈的「概率性丢封面」正是它。
+         */
+        /*
+         * ★ CR-14 的同一条纪律：任务已被 remove() 摘掉（indexOfId() < 0）时
+         *   它的成品已经被 deleteTaskFiles 删了 ⇒ 不要再给它写旁文件，
+         *   免得在盘上留一个指向不存在的视频的孤儿 JSON。
+         */
+        if (indexOfId() >= 0) {
+          /*
+           * ★★★ task-11 ④：下载成功后写缓存旁文件（封面/标题/来源）。
+           *   它的写出目录规则与「已缓存」页的扫盘规则 (`_scanWork`) 完全对齐
+           *   ⇒ 写完这里，「已缓存」页立刻能显示封面。
+           *   ⚠️ 只在**成功**时写（暂停/失败留下的是半截文件，不该进已缓存列表）。
+           */
+          await _writeSidecarFor(t, dir);
+        }
+        final at = indexOfId();
+        if (at >= 0) {
+          _list[at] = _list[at].copyWith(
+            state: DownloadState.done,
+            done: _list[at].total,
+            path: path,
+          );
+          _publish();
+        }
         AppLog.write(
           'DL',
           '队列完成 ${t.fileName}  ${(bytes / 1048576).toStringAsFixed(1)} MB',
         );
       }
-      /*
-       * ★★★ task-11 ④：下载成功后写缓存旁文件（封面/标题/来源）。
-       *   `writeCacheSidecar` 是 cache_page.dart 里**已有但全仓零调用**的函数，
-       *   它的写出目录规则与「已缓存」页的扫盘规则 (`_scanWork`) 完全对齐
-       *   ⇒ 写完这里，「已缓存」页立刻能显示封面。
-       *   ⚠️ 只在**成功**时写（暂停/失败留下的是半截文件，不该进已缓存列表）。
-       */
-      if (!pausedOut) {
-        await _writeSidecarFor(t, dir);
-      }
     } catch (e) {
-      _list[i] = _list[i].copyWith(state: DownloadState.failed, error: '$e');
+      // ★★★ CR-14：失败也只写回**自己**；任务已被 remove() 摘掉时 at<0，
+      //   旧代码这里会 _list[i] 直接 RangeError（实测栈迹：download_queue.dart:1025）。
+      final at = indexOfId();
+      if (at >= 0) {
+        _list[at] = _list[at].copyWith(state: DownloadState.failed, error: '$e');
+      }
       AppLog.write('DL', '队列失败 ${t.fileName}  $e');
     }
     _publish();

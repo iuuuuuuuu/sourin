@@ -324,11 +324,35 @@ class HlsDownloader {
        *   见 download() 的 initialDone 参数：调用方从任务状态里带来。
        * ```
        */
-      final append = part.existsSync() && part.lengthSync() > 0;
+      // ★★★ CR-24：**按 [initialDone] 决定打开模式，不看盘上有没有 .part**
+      //
+      // # 判据（这条判据在真机上能红，见 test/zz_cr_dl_c24_hls_part_test.dart）
+      // ```text
+      // 旧实现：只要盘上有非空 .part 就 append —— 哪怕这次是全新下载。
+      // .part 遗留的常见成因是**进程被杀 / 断电** ⇒ 那次的 catch 根本没跑 ⇒
+      // 盘上留着一段半截文件。用户重试（initialDone = 0）时：
+      //     旧半截 1 MB + 新完整 48 KB ⇒ 成品在拼接点损坏。
+      // 实测（未修）：成品 1097728 = 1048576 + 49152，正是「叠在一起」。
+      // ```
+      //
+      // # 两个条件缺一不可
+      // · `initialDone > 0` = 调用方**确实是在续传**（否则要的是覆盖）；
+      // · `.part` 非空       = 前面那几片**真的在盘上**。
+      // 只看后者的旧行为，在 `initialDone > 0 但 .part 已被清理` 时会
+      // 跳过从未写入的前 N 片 ⇒ 成品**缺片**（实测少 5 片 = 20480 字节）。
+      final wantResume = (initialDone ?? 0) > 0;
+      final partBytes =
+          part.existsSync() ? part.lengthSync() : 0;
+      final append = wantResume && partBytes > 0;
+      //
+      // ★ 要 append 却发现 .part 已经没了/空了 ⇒ skip 必须跟着归零：
+      //   前面那几片从来没落过盘，跳过它们 = 成品缺片（比重复拼接更隐蔽，
+      //   因为文件长度看着「差不多」，只有播到缺口才会卡住）。
+      final staleSkip = wantResume && !append;
       final sink = append
           ? part.openWrite(mode: FileMode.append)
           : part.openWrite();
-      var bytes = append ? part.lengthSync() : 0;
+      var bytes = append ? partBytes : 0;
       try {
         final ordered = <HlsSegment>[
           if (pl.initUri != null) HlsSegment(uri: pl.initUri!),
@@ -342,7 +366,12 @@ class HlsDownloader {
          * ⚠️ 为什么必须**跳过而不是重下**：重下会让 .part 里出现重复分片
          *    ⇒ 拼出来的文件在拼接点坏掉（播放器会卡在那个时间点）。
          */
-        final skip = (initialDone ?? 0).clamp(0, total);
+        // ★ [staleSkip] = 调用方说"已经下过 N 片"，但盘上的 .part 已经
+        final skip = staleSkip ? 0 : (initialDone ?? 0).clamp(0, total);
+        if (staleSkip && (initialDone ?? 0) > 0) {
+          AppLog.write('DL',
+              '续传标记 $initialDone 片但 .part 已丢失 ⇒ 从头重下 $fileName');
+        }
         for (var i = 0; i < ordered.length; i++) {
           if (i < skip) continue; // ★ 续传：这一片已在 .part 里了
           if (isCancelled?.call() ?? false) {

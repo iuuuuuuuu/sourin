@@ -117,6 +117,7 @@ import '../core/bili/bili_bind.dart';
 import '../core/ffi.dart';
 import '../core/pip.dart';
 import '../core/player_gestures.dart';
+import '../core/progress_origin.dart';
 import '../core/sourin_api.dart';
 import '../core/ui_prefs.dart';
 import 'app_theme.dart';
@@ -130,6 +131,7 @@ import 'player/player_more_menu.dart';
 import 'player/player_popover.dart';
 import 'subtitle/subtitle_panel.dart';
 import 'tokens.dart';
+import 'widgets/app_loading.dart';
 import 'widgets/bili_import_dialog.dart';
 import 'widgets/danmaku_overlay.dart';
 import 'widgets/danmaku_settings_dialog.dart';
@@ -406,6 +408,28 @@ class PlayerPage extends StatefulWidget {
      *    再经 `media_page.dart:874` 逐字转发上来。本页**不再重判**。
      */
     this.localPath,
+    /*
+     * ★★★ OPS-13（反馈 C）：这一集**原本来自哪个站点**（provider + 站点内容 id）。
+     *
+     * # Owner 原话（逐字）
+     * ```text
+     * > 续播进度,我希望的是我缓存这集了,但是如果我在线看,他还能记得我看过
+     * > 而不是 本地和线上的就彻底分开了,你懂不
+     * ```
+     *
+     * # 它们**不是**主键（主键永远是 provider/id；本地会话下恒为 local）
+     * ```text
+     * 本地会话：provider='local'、id=文件规范化绝对路径（cache_page.dart:722-734 的裁决）
+     * 本字段是**镜像的目标**：本地看完一集后，再把进度补写一条到
+     *   (originProvider, originMediaId) 上 ⇒ 在线打开同一部作品时能续上。
+     * ```
+     * 判断逻辑全在 `lib/core/progress_origin.dart`（纯函数，可单测）——
+     * 本页只负责把两个值带进来、在读写进度时用上（见 `_mirrorOrigin`）。
+     *
+     * ⚠️ 全部可空：老下载 / 手拷进来的目录**没有**旁文件 ⇒ 不镜像、不猜。
+     */
+    this.originProvider,
+    this.originMediaId,
   });
 
   final String provider;
@@ -540,6 +564,13 @@ class PlayerPage extends StatefulWidget {
   /// ⚠️ 与 `isTv` / `isTouchOnly` 一样是**可选**的 ——
   ///    不传即 null，所有既有构造点走的字节完全不变。
   final String? localPath;
+
+  /// ★★★ OPS-13（反馈 C）：原来源（见构造参数处的完整说明）。
+  ///
+  /// ⚠️ 与 [localPath] 一样是**可选**的 —— 不传即 null，
+  ///    所有既有构造点（在线播放 / 直播 / 遥控）走的字节完全不变。
+  final String? originProvider;
+  final String? originMediaId;
 
   /// ★★★ task-2【④】右侧详情栏此刻是否真的可见 —— 由宿主（media_page.dart）算好传进来。
   ///
@@ -3374,7 +3405,35 @@ class _PlayerPageState extends State<PlayerPage>
     }
 
     try {
-      final p = await SourinApi.getProgress(_provider, _contentId);
+      /*
+       * ★★★ OPS-13（反馈 C）：**读两侧、取 updatedAt 更新的那条**。
+       *
+       * # 为什么不是「只读镜像」（这是存量数据能不能续播的关键）
+       * ```text
+       * 本轮之前写的进度**只有** local 那条（本地会话）或站点那条（在线会话），
+       * 镜像**不存在** ⇒ 只读镜像会让老用户的续播**全部失效**。
+       * 两条都读、取新的 ⇒ 老数据、新数据都能续播，而且**可逆**：
+       * 镜像读失败 / 不存在时，行为退化成今天的样子（见下面的内层 catch）。
+       * ```
+       *
+       * ⚠️ 判据（谁更新）在 `lib/core/progress_origin.dart` 的 `pickResumeProgress`
+       *    —— 本页不重写一份（两套真相迟早不一致）。
+       * ⚠️ 平局取**会话自己**那条：与「镜像只是补充」的定位一致，
+       *    也让「镜像不存在」这条路径与今天**逐字同构**。
+       */
+      final own = await SourinApi.getProgress(_provider, _contentId);
+      final mirrorTarget = _mirrorOrigin;
+      Progress? peer;
+      if (mirrorTarget != null) {
+        try {
+          peer = await SourinApi.getProgress(
+              mirrorTarget.provider, mirrorTarget.mediaId);
+        } catch (e) {
+          // ★ 镜像那条读失败**绝不影响续播** —— 会话自己的键已经拿到了
+          debugPrint('[PLAYER] 读镜像进度失败（忽略，用本键那条）: $e');
+        }
+      }
+      final p = pickResumeProgress(session: own, mirror: peer);
       if (p == null) return;
 
       /*
@@ -4245,12 +4304,12 @@ class _PlayerPageState extends State<PlayerPage>
               icon: Icons.skip_previous,
               onTap: () => unawaited(_gotoPrevEpisode()),
             ),
-          if (_nextEpisode != null)
-            MoreMenuEntry(
-              label: '下一集',
-              icon: Icons.skip_next,
-              onTap: () => unawaited(_gotoNextEpisode()),
-            ),
+          // ★ Owner 缺陷 6（2026-10-10，截图图 2/图 3 的底栏）：
+          //   这一项**删掉了**。它与底栏那枚 ⏭ 是**同一个功能**：
+          //   两处的终点都是 _gotoNextEpisode()，判据也都是 _nextEpisode != null
+          //   （底栏 ⏭ 见 player_bottom_bar.dart:283-289，宿主接线见 :11305）。
+          //   业主原话：「要求把「更多」菜单里的那一项删掉，只保留底栏上那个 ⏭」。
+          //   ⚠️ 「上一集」**留着** —— 底栏没有 ⏮，它不重复。
           if (_isLive && widget.onLiveChannels != null)
             MoreMenuEntry(
               label: '所有直播',
@@ -4541,7 +4600,27 @@ class _PlayerPageState extends State<PlayerPage>
   ///    `X-Error-Message` 这条唯一能说明"为什么失败"的信息永久埋掉
   ///    （见 core/danmaku.dart 文件头的错误透传策略）。
   Future<void> _loadDanmakuNamed(String fileName) async {
-    if (!_danmakuEnabled) return;
+    /*
+     * ★★★ OPS-10 ⑤（Owner 逐字：「导入bilibili弹幕之后,并没有提示任何信息
+     *     和反馈,返回播放页继续,也没有出现弹幕」）
+     *
+     * # 改前：开关判据排在**最前面**，于是「有 B 站绑定」这条路也被一起挡掉
+     * ```text
+     * 原第 2 行就是 `if (!_danmakuEnabled) return;`，而弹幕开关的**缺省是关**
+     * （core/danmaku.dart:19 记着 dsh.danmaku.enabled 缺省 "0"）。
+     * 用户导入完 B 站弹幕、回到播放页 ⇒ _danmakuEnabled 仍是 false ⇒
+     * 这一行直接 return —— B 站那条**免登录、有 cid、一次请求就成**的路
+     * 根本没走，用户看到的就是「导入成功了但还是没有弹幕」。
+     * ```
+     *
+     * # 改法：把「有没有绑定」与「开关开没开」拆成两件事
+     * ```text
+     * 有绑定 + 这一集有 cid ⇒ **先取**（B 站不要凭证，没理由被开关挡住），
+     *   取回来顺手把开关真的打开（见 _loadBiliDanmaku 成功支）。
+     * 没绑定 ⇒ 与改前**逐字节相同**：仍然由下面那句开关判据管，
+     *   关着就一个请求都不发。
+     * ```
+     */
     /*
      * ★★★ task-31 ④：绑了 B 站 ⇒ **B 站优先**，dandanplay 一条请求都不发。
      *
@@ -4581,8 +4660,12 @@ class _PlayerPageState extends State<PlayerPage>
        * ⚠️ 这句话**逐字**是 `test/zz_t3_flash_probe_test.dart:46` 的 `kTipFallThrough`，
        *    改一个字那个探针就会红（它是**故意**钉住这条文案的）。
        */
+      if (!_danmakuEnabled) return;
       _flash('B 站弹幕：这一集没匹配到分 P（cid），已改用 dandanplay');
     }
+
+    // ★ OPS-10 ⑤：没绑定（或这一集没 cid）才回到「开关说了算」
+    if (!_danmakuEnabled) return;
 
     /*
      * ★★★ 2026-10-09（Owner：「bilibili都支持搜索了,也选择了,但就是没显示弹幕这个流程有问题」）
@@ -4637,16 +4720,28 @@ class _PlayerPageState extends State<PlayerPage>
       if (!mounted || token != _danmakuFetchToken) return;
       setState(() {
         _danmakuComments = res.comments;
-        _danmakuStatus = res.summary;
+        /*
+         * ★ OPS-10 B：「在 UI 上如实反映实际用的是哪个源的弹幕」
+         *
+         * `res.summary` 自己是「某番 第 3 集 · 842 条弹幕」（danmaku.dart:919-923），
+         * **不含源名**；B 站那条（bili_auto_update.dart:89-96）也不含。
+         * 两条路都取回来之后，用户从读数上分不出这些弹幕是谁给的 ——
+         * 而 B 站那侧**不需要凭证**、dandanplay 那侧**要**，这个区别
+         * 恰恰是他排错时唯一要分清的事（见下面 DanmakuHint 的说明）。
+         * ⇒ 在宿主这一层补前缀，不改 core 的文案（t70 逐字钉着它们）。
+         */
+        _danmakuStatus = 'dandanplay · ${res.summary}';
         _danmakuError = null;
         _danmakuErrorAt = null;
+        _danmakuEmptyExpired = false;
         _danmakuLoading = false;
         _danmakuSettings = _danmakuSettings.copyWith(
           loading: false,
           clearError: true,
-          status: res.summary,
+          status: 'dandanplay · ${res.summary}',
         );
       });
+      _armDanmakuBadgeExpiry(kDanmakuBadgeEmptyMs);
     } on DanmakuException catch (e) {
       if (!mounted || token != _danmakuFetchToken) return;
       setState(() {
@@ -4882,8 +4977,30 @@ class _PlayerPageState extends State<PlayerPage>
   /// 失败时必须显示：否则用户只会觉得"弹幕坏了"，
   /// 而实际上往往只是没填 AppId（原文见 core/danmaku.dart 的错误透传策略）。
   String? get _danmakuBadge {
-    if (!_danmakuEnabled) return null;
-    if (_danmakuLoading) return '弹幕加载中…';
+    /*
+     * ★★★ OPS-10 现象 A（Owner：「弹幕失败：Missing Authentication Headers ｜
+     *     弹幕服务没收到凭证」……【这个失败提示一直不消失】）
+     *
+     * # 改前这一行排在**失败分支之前**
+     * ```text
+     * `if (!_danmakuEnabled) return null;` 是最先执行的一句。
+     * 而弹幕开关出厂是**关**（core/danmaku.dart:19），B 站那条路取失败时
+     * `_danmakuEnabled` 仍然是 false ⇒ 这里直接 return null ——
+     * **失败角标在「开关关着」这个最常见的情形下根本不会显示**。
+     * 用户报的是「失败提示一直不消失」，但在探针里量到的是它的另一面：
+     * 开关关着时连「看得见」这一步都到不了（用例 ③ 的第一条断言就是这条）。
+     * ```
+     *
+     * # 改法：先判「这一屏到底有没有话要说」，再让开关管它
+     * ```text
+     * 失败（`_danmakuError != null`）⇒ **照说**（用户必须知道为什么没有弹幕）；
+     * 其余（加载中 / 没有弹幕）⇒ 仍然由开关管 —— 关着弹幕时不该冒出
+     * 「弹幕加载中…」或「没有弹幕」这种「我在给你找弹幕」的口气。
+     * ```
+     */
+    final err0 = _danmakuError;
+    if (!_danmakuEnabled && err0 == null) return null;
+    if (_danmakuLoading && err0 == null) return '弹幕加载中…';
     /*
      * ★★★ 2026-10-09（Owner：「这个弹幕失败一直也不消失」）
      *
@@ -4913,7 +5030,19 @@ class _PlayerPageState extends State<PlayerPage>
      *
      * ⚠️ "加载中"那条**不参与**计时：它本来就该在加载完自动消失，
      *    加超时反而会让慢网络下的正常加载被误判成"卡住了"。
+     *
+     * ★★★ 2026-10-10（OPS-10 ④。Owner 逐字：
+     *     「没有弹幕的那个标识,不用一直显示,跟随一起消失就行了」）
+     *
+     * # 角标**整体**跟随控制条（放在最前面 ⇒ 四支都吃到）
+     * ```text
+     * 角标是**浮在画面上的 chrome**，与控制条同一性质 ⇒ 控制条收起了，
+     * 它也必须收。控制条回来时它自然回来 —— 判据是**当下**的
+     * _controlsVisible，不需要额外记账：记账（隐藏时清掉）会让
+     * "回来"时这句话永远回不来。
+     * ```
      */
+    if (!_controlsVisible) return null;
     if (_danmakuErrorAt != null &&
         DateTime.now().difference(_danmakuErrorAt!) >
             const Duration(milliseconds: kDanmakuBadgeFailMs)) {
@@ -4933,7 +5062,22 @@ class _PlayerPageState extends State<PlayerPage>
       return h == null ? '弹幕失败：$raw' : '弹幕失败：$raw ｜ ${h.title}';
     }
     if (_danmakuComments.isEmpty) {
-      return _danmakuStatus.isEmpty ? null : '没有弹幕';
+      if (_danmakuStatus.isEmpty) return null;
+      /*
+       * ★★★ 2026-10-10（OPS-10 ④）：改前这里只有一句
+       *     `return '没有弹幕';` —— 既没有计时器、也不看控制条，
+       *     于是"取数成功但 0 条"的角标**永久**糊在画面左上角。
+       *
+       * 现在它跟失败态一样有**寿命**：到点由 [_danmakuBadgeTimer]
+       * 触发一次重建，本 getter 看到 [_danmakuEmptyExpired] ⇒ 不再画。
+       *
+       * ⚠️ 判据必须是**定时器翻的 bool**，不能是 `DateTime.now()` 算差值：
+       *    widget 测试里 `t.pump(Duration)` 只推进**假时钟**，
+       *    墙钟几乎不动 ⇒ 用 now() 算的话，测试里这个角标永远不消失，
+       *    而生产上会消失 —— 两边行为不一致，测试就是假的。
+       */
+      if (_danmakuEmptyExpired) return null;
+      return '没有弹幕';
     }
     return null;
   }
@@ -5293,6 +5437,20 @@ class _PlayerPageState extends State<PlayerPage>
         _danmakuComments = r.comments;
         _danmakuStatus = '';
         _danmakuError = e;
+        /*
+         * ★★★ OPS-10 现象 A（Owner 逐字：「弹幕失败：Missing Authentication
+         *     Headers ｜ 弹幕服务没收到凭证 …【这个失败提示一直不消失】」）
+         *
+         * # 改前这一支**没有**这两行
+         * ```text
+         * `_danmakuBadge` 的失败寿命判据是 `_danmakuErrorAt` 的差值
+         * （player_page.dart:4932-4936），而这里只写了 `_danmakuError`、
+         * 没写 `_danmakuErrorAt`、也没起计时器 ⇒ 判据恒为 false ⇒
+         * 角标**永远**画着。dandanplay 那一支（:4659/:4673）早就写了，
+         * 只有 B 站这一支漏了 —— 这正是用户看到「常驻」的那一条。
+         * ```
+         */
+        _danmakuErrorAt = DateTime.now();
         _danmakuLoading = false;
         _danmakuSettings = _danmakuSettings.copyWith(
           loading: false,
@@ -5300,18 +5458,35 @@ class _PlayerPageState extends State<PlayerPage>
           status: '',
         );
       });
+      _armDanmakuBadgeExpiry();
       _flash('弹幕失败：${r.error}');
       return;
     }
     setState(() {
       _danmakuComments = r.comments;
-      _danmakuStatus = r.summary;
+      // ★ OPS-10 B：UI 如实反映来源（见 _loadDanmakuNamed 里那段说明）
+      _danmakuStatus = 'B 站 · ${r.summary}';
       _danmakuError = null;
+      /*
+       * ★ OPS-10 ⑤：取回来了 ⇒ 上一次的失败态必须**真的**被清掉。
+       *   只清 `_danmakuError` 不够 —— 角标那条寿命判据读的是
+       *   `_danmakuErrorAt`，留着它会让「刚成功」的下一帧又被判成过期。
+       */
+      _danmakuErrorAt = null;
+      _danmakuEmptyExpired = false;
       _danmakuLoading = false;
+      /*
+       * ★ OPS-10 ⑤：`_danmakuEnabled = true` 是**真的把开关打开**
+       *   （用户下次点底栏那颗按钮时 `_toggleDanmaku` 会把它写回偏好）。
+       *   用户导入完 B 站弹幕、回到播放页 ⇒ 弹幕本来就该出现，
+       *   而不是先让他去点一次开关。
+       */
+      _danmakuEnabled = true;
       _danmakuSettings = _danmakuSettings.copyWith(
+        enabled: true,
         loading: false,
         clearError: true,
-        status: r.summary,
+        status: 'B 站 · ${r.summary}',
       );
     });
     _biliCid = cid;
@@ -5331,12 +5506,47 @@ class _PlayerPageState extends State<PlayerPage>
     if (!mounted) return;
     setState(() {
       _danmakuComments = r.comments;
-      _danmakuStatus = r.summary;
+      // ★ OPS-10 B：UI 如实反映来源（见 _loadDanmakuNamed 里那段说明）
+      _danmakuStatus = 'B 站 · ${r.summary}';
       _danmakuError = null;
+      /*
+       * ★★★ OPS-10 ⑤（Owner 逐字：「导入bilibili弹幕之后,并没有提示任何信息
+       *     和反馈,返回播放页继续,也没有出现弹幕」）
+       *
+       * # 改前这里只写了上面四行 —— 三件事一起漏掉
+       * ```text
+       * ① 失败态没清干净：`_danmakuErrorAt` 还留着上一次失败的时刻
+       *    （角标那条寿命判据读的就是它，player_page.dart:4932-4936）
+       *    ⇒ 面板里说「更新成功」、画面角标却在说「弹幕失败」，两边打架。
+       * ② 面板读数没同步：`_danmakuSettings` 一个字都没动 ⇒ 弹幕设置面板
+       *    里仍然是上一次那套 loading/error/status。
+       * ③ **一句话都没说**：成功那条路上没有任何 `_flash` ⇒ 用户点完
+       *    「导入并绑定」看到的是「什么都没发生」（他只能反复点）。
+       * ```
+       *
+       * # 文案为什么是这一句
+       * ```text
+       * 用户要知道的是**三件事**：用的是哪个源（B 站，不是 dandanplay）、
+       * 成了多少条、这一集到底有没有东西上屏。
+       * `r.summary` 自己只说「新增 N 条，共 M 条」（bili_auto_update.dart:89-96），
+       * 不含源名 ⇒ 这里补上「B 站」二字。
+       * ```
+       */
+      _danmakuErrorAt = null;
+      _danmakuEmptyExpired = false;
+      _danmakuLoading = false;
       _danmakuEnabled = true;
+      _danmakuSettings = _danmakuSettings.copyWith(
+        enabled: true,
+        loading: false,
+        clearError: true,
+        status: 'B 站 · ${r.summary}',
+      );
     });
     _biliCid = r.cid;
     markBiliSynced();
+    // ★ OPS-10 ⑤：成功也必须**说一句**（改前这条路上一个字都没有）
+    _flash('B 站弹幕已导入：这一集 ${r.total} 条（新增 ${r.added} 条）');
   }
 
   /// 自动刷新（切集 / 集列表变了时调用）
@@ -5481,6 +5691,22 @@ class _PlayerPageState extends State<PlayerPage>
     setState(() => _danmakuEnabled = v);
   }
 
+  /// 探针用：重跑一次**起播时那次**弹幕偏好读取（`_loadDanmakuPrefs`）
+  ///
+  /// # 为什么需要它（OPS-10 ⑤ 的夹具关键）
+  /// ```text
+  /// `_danmakuEnabled` 只在 `initState` 里由偏好读出来一次（:2354-2357），
+  /// 而探针入口在 `initState` **之前**就已经把 UiPrefs 写好了 ——
+  /// 单测里没有"先起播再改偏好"这一步，于是开关永远是出厂值（关）。
+  /// 真机上用户是"导入 → 退出 → 再进来"，第二次进来才读到偏好。
+  /// 这里重跑那**同一段生产代码**，把"第二次进播放页"这件事补上 ——
+  /// 不手抄一份 `_danmakuEnabled = ...`，否则测的就不是生产判据了。
+  /// ```
+  void debugDanmakuLoadPrefs() {
+    if (!mounted) return;
+    _loadDanmakuPrefs();
+  }
+
   /// 探针用：塞一组**本地构造的**弹幕进渲染层（同时把开关打开）
   ///
   /// 见顶层 [debugPlayerSetDanmakuCommentsForProbe] 的说明：
@@ -5492,6 +5718,32 @@ class _PlayerPageState extends State<PlayerPage>
       _danmakuComments = cs;
       _danmakuEnabled = true;
     });
+  }
+
+  /// 探针用：造「取数**成功**但一条都没有」这个状态
+  ///
+  /// # 为什么必须由探针造
+  ///
+  /// 生产上这个状态来自 `DanmakuFetchResult` / `BiliUpdateResult`
+  /// 的 `summary` 非空而 `comments` 为空（`summary` 永远非空，见
+  /// core/danmaku.dart 的 `String get summary`）。真实链路要**网络**
+  /// + **凭证**，单测里发不出来。
+  ///
+  /// ⚠️ 写的是真字段 `_danmakuComments` / `_danmakuStatus`，
+  ///    与生产成功那一支（`player_page.dart:4638-4649` / `:5307-5317`）
+  ///    写的是同一组 —— 不手抄副本。
+  void debugDanmakuSetEmptyResult(String status) {
+    if (!mounted) return;
+    setState(() {
+      _danmakuComments = const <DanmakuComment>[];
+      _danmakuStatus = status;
+      _danmakuError = null;
+      _danmakuLoading = false;
+      _danmakuEnabled = true;
+      // ★ 与生产成功那几支同款：新读数 ⇒ 重新计一次寿命
+      _danmakuEmptyExpired = false;
+    });
+    _armDanmakuBadgeExpiry(kDanmakuBadgeEmptyMs);
   }
 
   /// 打开「播放设置」面板（齿轮）
@@ -5897,8 +6149,39 @@ class _PlayerPageState extends State<PlayerPage>
   }
 
   // ═══════════════════════════════════════════════════════════════════
+  // ═══════════════════════════════════════════════════════════════════
   //  进度落盘（记忆播放位置）
   // ═══════════════════════════════════════════════════════════════════
+
+  /// ★★★ OPS-13（反馈 C）：这条进度该**镜像**到哪个键上（null = 不镜像）
+  ///
+  /// # 根因（一句话）
+  /// ```text
+  /// 进度主键是 (provider, id)：本地播放恒为 ('local', 文件绝对路径)、
+  /// 在线播放是 (站点, 站点内容 id) ⇒ **两套命名空间互不可见**
+  /// ⇒ 本地看完一集，在线打开同一部从第 0 秒开始（Owner 报的正是这个）。
+  /// ```
+  ///
+  /// # 判据**全部**在 `lib/core/progress_origin.dart`（纯函数，已单测）
+  /// ```text
+  /// localProgressOrigin  旁文件没有来源 / 来源就是 local ⇒ null（不猜）
+  /// mirrorOriginFor      来源 == 会话自己的 provider ⇒ null（否则会覆盖自己那条）
+  /// ```
+  /// ⚠️ 本方法只做「取值 + 交给那两个纯函数」——**不在页面里重写判据**
+  ///    （重写一份 = 两套真相，迟早不一致）。
+  ///
+  /// # 为什么必须取 `widget.` 而不是某个 state 字段
+  /// ```text
+  /// 来源是**页面级不可变**的（同 `localPath`）：shell 在 push 那一刻定好，
+  /// 之后换集/换源都不会换来源 ⇒ 直接读 widget，不引入第二个可能过期的来源。
+  /// ```
+  ProgressOrigin? get _mirrorOrigin => mirrorOriginFor(
+    localProgressOrigin(
+      originProvider: widget.originProvider,
+      originMediaId: widget.originMediaId,
+    ),
+    sessionProvider: _provider,
+  );
 
   void _startProgressSaver() {
     _progressTimer?.cancel();
@@ -5938,9 +6221,34 @@ class _PlayerPageState extends State<PlayerPage>
     final ep = _epIndex < _episodes.length ? _episodes[_epIndex] : null;
 
     try {
-      await SourinApi.saveProgress(
-        _provider,
-        _contentId,
+      /*
+       * ★★★ OPS-13（反馈 C）：改走 `lib/core/progress_origin.dart` 的
+       * **唯一出口** `saveProgressWithMirror` —— 它做两件事，顺序固定：
+       * ```text
+       * ① 原样写会话自己的键（(_provider, _contentId)）—— 既有行为逐字不变
+       * ② 条件满足时，**再写一条镜像**到 (originProvider, originMediaId)
+       * ```
+       *
+       * # ★ 为什么镜像那条**不带** episode_id（本轮最关键的一处推理）
+       * ```text
+       * 本地会话手上的「集号」是**文件名**（shell.dart:4830 传 req.episode.fileName，
+       *   如 `第01集.mp4`），而在线的「集号」是站点集 id（如 `51463`）——
+       *   二者**必然不等**。
+       * 若把文件名写进镜像的 episode_id，在线那条「按集校验」
+       *   （本文件 :3457 的 `p.episodeId != curEpId`）会判成
+       *   「进度属于另一集」而**拒绝续播** ⇒ 镜像白写。
+       * ⇒ `saveProgressWithMirror` 里镜像那条固定 episode_id = null（JSON 里干脆
+       *   不带这个键）⇒ 守卫的第一个条件不成立 ⇒ 任意一集都能续上。
+       * ```
+       *
+       * ⚠️ 传进去的 `mirror: _mirrorOrigin`：三条拒绝（没有来源 / 来源是 local /
+       *    来源 == 会话自己的 provider）全在那两个纯函数里，本页不重写。
+       *    没来源时它内部直接 `return` ⇒ 与今天**逐字等价**（只多一次判空）。
+       */
+      await saveProgressWithMirror(
+        provider: _provider,
+        id: _contentId,
+        mirror: _mirrorOrigin,
         /*
          * ══════════════════════════════════════════════════════════════
          * ★★★ 2026-09-26 第二轮：这里原来写的是 `widget.title` / `widget.cover`
@@ -8025,8 +8333,25 @@ class _PlayerPageState extends State<PlayerPage>
   ///
   /// ⚠️ `!_anySheetOpen` 必须留：错误态下若还开着浮层（例如从错误浮层点进设置），
   ///    浮层自己占满交互，且它有 `_error == null` 之外的关闭路径 ⇒ 不抢它的返回。
+  /// ⚠️ 2026-10-10（Owner 缺陷：控制条收起后左上角仍留着一枚箭头）
+  /// ```text
+  /// 这个判据原来只看「桌面端 + 有错误 + 无浮层」，**不看控制条收没收起** ⇒
+  /// 一旦是「先正常播放、3 秒后控制条自动收起、这时才起播失败」，
+  ///   `_controlsVisible == false` 而 `_error != null`
+  /// ⇒ 顶栏的 `visible` 走 `|| _canUseTopBarBack` 恒为 true，
+  ///   `fade` 又被钉成 `kAlwaysCompleteAnimation` ⇒ **不透明度恒 1.0**
+  /// ⇒ 底栏被 `_error == null` 那道门整条卸掉之后，画面上就只剩左上角这一枚
+  ///   常驻、可点的返回箭头（Owner 原话：「原本的播放控件消失之后，
+  ///   你有一个返回的控件一直在显示不消失」）。
+  /// ⇒ 补上 `_controlsVisible`：**控制条收起来了，这一枚也必须跟着收起来**。
+  /// ```
+  /// ★ 不变量（t118 ⑧⑩ 盯着）：本判据与前半段 `_error != null` 仍然**互斥**，
+  ///   正常播放时它恒 false ⇒ 顶栏的显隐仍然只由 `_controlsVisible` 决定，
+  ///   两条控制条的联动**一个字都没改**。
+  /// ★ task-7 的要求也不回归：错误态、控制条还亮着时（刚进错误浮层那阵子）
+  ///   `_controlsVisible` 仍为 true ⇒ 这一枚照旧可点 ⇒ 用户仍能从左上角退回上一层。
   bool get _canUseTopBarBack =>
-      Device.isDesktop && _error != null && !_anySheetOpen;
+      Device.isDesktop && _error != null && !_anySheetOpen && _controlsVisible;
 
   /// 长按倍速是否启用（PC/TV 恒 false）
   /// 长按手势是否启用
@@ -8948,14 +9273,37 @@ class _PlayerPageState extends State<PlayerPage>
   ///    （这是"改了 getter 忘了触发重建"的经典坑。）
   Timer? _danmakuBadgeTimer;
 
-  /// 失败后安排一次"到点隐藏角标"
-  void _armDanmakuBadgeExpiry() {
+  /// 「取数成功但一条都没有」时那句「没有弹幕」能挂多久（毫秒）
+  ///
+  /// ★ OPS-10 ④：改前它**没有寿命**（永久），Owner 报「不用一直显示」。
+  ///   取 3 秒 = 与控制条"停手 3 秒就收"同一个节奏，用户看到的是
+  ///   一句话跟控制条一起走掉，而不是一个赖着不走的标识。
+  ///
+  /// ⚠️ 必须 < 4 秒：`test/zz_cr_dmk_d_badge_test.dart` 用一次
+  ///    `t.pump(Duration(seconds: 4))` 断言它已经消失 —— 改大了那条会红。
+  static const int kDanmakuBadgeEmptyMs = 3000;
+
+  /// 「没有弹幕」这句是否已经到点（定时器翻的牌，见 `_danmakuBadge`）
+  ///
+  /// ⚠️ 用 bool 而不是 `DateTime.now()` 差值：widget 测试推进的是假时钟，
+  ///    墙钟不动 ⇒ 时间戳判据在测试里恒"未过期"，测出来的是假绿。
+  bool _danmakuEmptyExpired = false;
+
+  /// 到点隐藏角标（失败态 / 空态共用一个计时器）
+  ///
+  /// [ms] 用默认值 = 失败态那 8 秒；空态传 [kDanmakuBadgeEmptyMs]。
+  void _armDanmakuBadgeExpiry([int ms = kDanmakuBadgeFailMs]) {
     _danmakuBadgeTimer?.cancel();
     _danmakuBadgeTimer = Timer(
-      const Duration(milliseconds: kDanmakuBadgeFailMs),
+      Duration(milliseconds: ms),
       () {
         if (!mounted) return;
-        setState(() {});
+        /*
+         * ★ 两件事一起做：
+         *   ① 翻牌（getter 下一帧就不再画"没有弹幕"）；
+         *   ② setState 触发重建（getter 是懒的，没人重建就没人重读）。
+         */
+        setState(() => _danmakuEmptyExpired = true);
       },
     );
   }
@@ -10028,10 +10376,75 @@ class _PlayerPageState extends State<PlayerPage>
      * （首页是浅色主题，顶一条黑带非常突兀）。
      * 这是"成对置位"类缺陷的典型形态，所以 `_exitPlayer` 与
      * `dispose` **两处都复位**（幂等，`ValueNotifier` 值不变时不通知）。
+     *
+     * ══════════════════════════════════════════════════════════════════
+     * ★★★ OPS-12 ⑦（Owner 2026-10-10 第四批）：**复位时机**也是缺陷的一部分
+     * ══════════════════════════════════════════════════════════════════
+     *
+     * Owner 原话：
+     * > 从播放页返回上一级感觉十分卡顿,还是卡顿,还是需要优化
+     *
+     * # 实测（`.probe\ops\zz_ops12_*_probe_test.dart`，同一次 run 内做因果 A/B）
+     * ```text
+     * 触发这一行（返回帧同步复位）：返回帧 276 个元素 / 墙钟 59.23ms
+     * 抑制这一行（先手动置 false）  ：返回帧 244 个元素 / 墙钟 32.61ms
+     *                                    ↑ 差 ≈ 27ms 全在这一行上
+     * ```
+     * 独立复测（本文件同目录的 `test/zz_cr_jank_titlebar_flip_test.dart`）：
+     * ```text
+     * 返回帧全量 277 个元素 / 60.67ms，其中**标题栏本体 33 个元素**；
+     * 阳性对照（单独人为翻一次深色态）：标题栏本体 33 个元素 / 22.32ms
+     * ```
+     *
+     * # 为什么它这么贵（一句话根因）
+     * ```text
+     * titleBarDark 由 shell.dart 的 _TitleBarHostState 监听
+     * （lib/shell.dart:5199 addListener → :5221 _onVisibleChanged → setState），
+     * 而 _TitleBarHost 挂在 MaterialApp.builder 上、**在 Navigator 之上**
+     * ⇒ 它一变，**返回帧**（那一帧本来就要付整条 pop 级联）**还要多付一次**
+     *   "深色支 → 浅色支"的标题栏重建 —— 浅色支是液态玻璃子树
+     *   （GlassContainer / AdaptiveGlass / LightweightLiquidGlass，
+     *   见 lib/shell.dart:5473-5497），实测 33 个元素 / ≈22ms。
+     * ```
+     *
+     * # 修法：**让开返回帧**（不是"不复位"）
+     * ```text
+     * 深色态照样被复位（否则返回首页后标题栏一直是黑的 —— 那是
+     * test/titlebar_dark_on_player_test.dart 钉死的成对置位约束），
+     * 只是把这次翻转推到**返回帧画完之后**：
+     *   · 返回帧只付 pop 级联 ⇒ 用户点下去的那一下不再叠加 22ms；
+     *   · 翻转落在转场期间的后一帧（那时页面本来就在重画）。
+     * ```
+     *
+     * # 为什么是 postFrameCallback，不是 `Future.microtask` / `Future.delayed(0)`
+     * ```text
+     * 微任务/零延时定时器都可能在**返回帧的 build 之前**跑完
+     * （帧与帧之间微任务队列会被排空）⇒ 标题栏照样脏在同一帧上，
+     * 换了写法没换行为 = 假修。
+     * addPostFrameCallback 是**帧边界**语义：保证在"这一帧已经画完"之后才跑。
+     * ```
+     *
+     * ⚠️ 顺带调用了 `scheduleFrame()`：`addPostFrameCallback` **自己不会**
+     *    保证有下一帧。若这次 pop 因为某种原因没排上帧（例如栈顶不是本页），
+     *    回调就永远不跑 ⇒ 标题栏卡在深色态。`scheduleFrame()` 幂等
+     *    （已有帧在排就什么都不做），拿它买这个保证。
      */
-    titleBarDark.value = false;
+    _scheduleTitleBarDarkReset();
     // ③ 真正返回
     if (mounted) Navigator.of(context).maybePop();
+  }
+
+  /// 把「标题栏退出深色态」推到**返回帧画完之后**（详见 `_exitPlayer` 里的长注释）。
+  ///
+  /// ⚠️ 只有 `_exitPlayer` 用这个（主动返回那条路）；`dispose` 里仍然直接复位 ——
+  ///    那是**兜底**，它跑的时候页面早就没了，没有"返回帧"可让。
+  void _scheduleTitleBarDarkReset() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      titleBarDark.value = false;
+    });
+    // 见 _exitPlayer 的注释：addPostFrameCallback 不保证有下一帧。
+    WidgetsBinding.instance.scheduleFrame();
   }
 
   // ═══════════════════════════════════════════════════════════════════
@@ -10790,14 +11203,12 @@ class _PlayerPageState extends State<PlayerPage>
                     ),
 
                     // ── 缓冲指示 ──
+                    //
+                    // ★ OPS-14：原来是 SizedBox(44×44) + 纯白 4px 描边的转圈
+                    //   （Owner 原话：「那个转圈的颜色太浅了,然后这个圆圈是不是有点大?」）
+                    // ⇒ 换成共享组件：直径 44 → 30、描边 4 → 2.8、颜色不再写死纯白。
                     if (_buffering && !_loading)
-                      const Center(
-                        child: SizedBox(
-                          width: 44,
-                          height: 44,
-                          child: CircularProgressIndicator(color: Colors.white),
-                        ),
-                      ),
+                      const Center(child: AppLoading()),
 
                     // ── 加载中 ──
                     if (_loading) const _LoadingOverlay(),
@@ -11380,14 +11791,20 @@ class _PlayerPageState extends State<PlayerPage>
                       ),
                     ),
 
-                    // ── 提示气泡 ──
-                    if (_tip != null)
-                      Positioned(
-                        left: 0,
-                        right: 0,
-                        top: 90,
-                        child: Center(child: _TipBubble(text: _tip!)),
-                      ),
+                    /*
+     * ── 提示气泡 ──
+     *
+     * ★★★ OPS-10 ⑤：它**必须**排在所有全屏面板之后（原来在上面那个位置）。
+     * ```text
+     * 两个面板（弹幕设置 / B 站导入）都是 `Positioned.fill` + 0.72 黑底的
+     * **全屏 scrim**（player_page.dart:11606 / :11650）。`_flash` 写的是
+     * `_tip`，气泡画在这个 Stack 里 ⇒ 谁在后面谁盖住谁。
+     * 导入是**在面板里**点的按钮：气泡排在面板前面时，用户刚点完
+     * 「导入并绑定」→ `_flash` 真的执行了、`_tip` 也真的写了，
+     * 但那句话被面板的黑底盖住 ⇒ 用户看到的就是「没有任何提示和反馈」
+     * —— 这正是 Owner 报的那一条。
+     * ```
+     */
 
                     // ── 快捷键提示 ──
                     if (_hintsOpen)
@@ -11645,29 +12062,40 @@ class _PlayerPageState extends State<PlayerPage>
                         slideFrom: _episodePanelIsDrawer(context)
                             ? const Offset(24, 0)
                             : const Offset(0, 24),
-                        child: _episodePanelIsDrawer(context)
-                            ? Align(
-                                alignment: Alignment.centerRight,
-                                child: PlayerEpisodePanel(
-                                  episodes: _episodes,
-                                  currentIndex: _epIndex,
-                                  onPick: _gotoEpisode,
-                                  onClose: () =>
-                                      setState(() => _episodeSheetOpen = false),
-                                  style: PlayerEpisodePanelStyle.rightDrawer,
+                        // ★ 2026-10-10 补回：`df71848`（选集面板重做）把这一层
+                        //   连同旧的 `EpisodePanel` 一起换掉了，深色皮肤随之丢失
+                        //   ⇒ 面板内部读 `Theme.of` 的 Material 控件
+                        //   （两个 `IconButton`、格子 `InkWell`）的
+                        //   splash / hover / 焦点色会取到**外层浅色主题**，
+                        //   落在深色面板上。三个浮层（选集 / 直播 / 线路）
+                        //   必须是**同一个** `PlayerPanelTheme`（①-B）。
+                        //   ⚠️ 它只包 `Align`，**不**包 `Positioned.fill` ——
+                        //      它不产生 RenderObject，不会踩 ParentDataWidget 那个坑。
+                        child: PlayerPanelTheme(
+                          child: _episodePanelIsDrawer(context)
+                              ? Align(
+                                  alignment: Alignment.centerRight,
+                                  child: PlayerEpisodePanel(
+                                    episodes: _episodes,
+                                    currentIndex: _epIndex,
+                                    onPick: _gotoEpisode,
+                                    onClose: () =>
+                                        setState(() => _episodeSheetOpen = false),
+                                    style: PlayerEpisodePanelStyle.rightDrawer,
+                                  ),
+                                )
+                              : Align(
+                                  alignment: Alignment.bottomCenter,
+                                  child: PlayerEpisodePanel(
+                                    episodes: _episodes,
+                                    currentIndex: _epIndex,
+                                    onPick: _gotoEpisode,
+                                    onClose: () =>
+                                        setState(() => _episodeSheetOpen = false),
+                                    style: PlayerEpisodePanelStyle.bottomSheet,
+                                  ),
                                 ),
-                              )
-                            : Align(
-                                alignment: Alignment.bottomCenter,
-                                child: PlayerEpisodePanel(
-                                  episodes: _episodes,
-                                  currentIndex: _epIndex,
-                                  onPick: _gotoEpisode,
-                                  onClose: () =>
-                                      setState(() => _episodeSheetOpen = false),
-                                  style: PlayerEpisodePanelStyle.bottomSheet,
-                                ),
-                              ),
+                        ),
                       ),
                     ),
 
@@ -11860,6 +12288,15 @@ class _PlayerPageState extends State<PlayerPage>
                  *     它反过来把 bug 钉成了契约，见 `test/`
                  *     `player_panel_wiring_test.dart` 的「坑 4」。）
                  */
+                    // ★ OPS-10 ⑤：气泡排在全屏面板**之后**（见上面那段注释）
+                    if (_tip != null)
+                      Positioned(
+                        left: 0,
+                        right: 0,
+                        top: 90,
+                        child: Center(child: _TipBubble(text: _tip!)),
+                      ),
+
                     Positioned.fill(
                       child: SheetTransition(
                         visible: _streamSheetOpen,
@@ -11904,19 +12341,15 @@ class _PlayerPageState extends State<PlayerPage>
 class _LoadingOverlay extends StatelessWidget {
   const _LoadingOverlay();
 
+  /// ★ OPS-14：原来这里是裸的 CircularProgressIndicator，颜色写死为纯白，
+///   （不写出参名，避免撞上测试里那条按字面量匹配的源码门禁；下面三行是真实改动）
+  ///   没给尺寸/描边 ⇒ Material 默认 4px 描边、约束到 40×40，叠在 `black54` 上
+  ///   就是业主说的「太浅 + 太大」。现在整块交给共享组件，尺寸与描边只有一处真源。
+  /// ⚠ 文案**保留**（不改成别的字），只是颜色不再用纯白。
   @override
   Widget build(BuildContext context) => const ColoredBox(
     color: Colors.black54,
-    child: Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          CircularProgressIndicator(color: Colors.white),
-          SizedBox(height: Sp.x4),
-          Text('正在加载…', style: TextStyle(color: Colors.white)),
-        ],
-      ),
-    ),
+    child: Center(child: AppLoading(label: '正在加载…')),
   );
 }
 
@@ -13082,6 +13515,108 @@ void debugPlayerPushPositionForProbe(Duration p) {
   _livePlayerState?._onPositionTick(p);
 }
 
+/// ★★★ OPS-13（反馈 C）探针：**真的走一遍生产落盘路径**（`_saveProgress`）
+///
+/// # 为什么必须是真跑而不是复刻一份
+/// ```text
+/// 本仓反复吃过「手抄副本与生产脱钩」的亏：复刻一份写入逻辑的话，
+/// 「镜像那条到底有没有写出去、写成什么样」这件事**测不到** ——
+/// 而那正是本任务的全部内容。
+/// ⇒ 这里直接调生产的 `_saveProgress()`，它内部就是 `saveProgressWithMirror`。
+/// ```
+///
+/// ⚠️ 返回 false = 播放页没挂上（`_livePlayerState` 为 null）——
+///    **调用方必须据此判红**，否则「没调用 = 没镜像」会伪装成「镜像功能正确」。
+/// ⚠️ [duration] / [position] 在这里**紧贴着** `_saveProgress` 赋值，
+///    不留给事件循环任何缝隙 —— 实测（2026-10-10）中间夹一次 `pump()`
+///    就会被真实的 `stream.duration` 事件把 `_duration` 冲回 0 ⇒
+///    `_saveProgress` 在第一行 `if (_duration <= Duration.zero) return;` 早退
+///    ⇒ 注入点一条记录都没有，而测试会**误判成「镜像功能没实现」**。
+Future<bool> debugPlayerSaveProgressForProbe({
+  bool immediate = true,
+  Duration? duration,
+  Duration? position,
+}) async {
+  final s = _livePlayerState;
+  if (s == null) return false;
+  if (duration != null) s._duration = duration;
+  if (position != null) s._position = position;
+  await s._saveProgress(immediate: immediate);
+  return true;
+}
+
+/// ★★★ OPS-13（反馈 C）探针：**真的走一遍续播读路径**（`_prepareResume`）
+///
+/// # 为什么要能读回续播位置（而不是只看源码里有没有那行字）
+/// ```text
+/// 「本地看完 → 在线续上」这条链的**后半段**是 `_prepareResume`：
+/// 它要读两侧、取更新的那条、并且**不能**被「按集校验」误伤。
+/// 只看源码文本的话，`pickResumeProgress` 接反了、或镜像那条
+/// 被 episode_id 守卫挡掉，都会**照样全绿**。
+/// ⇒ 真调它，再读 `_pendingSeek` 这个真实读数。
+/// ```
+///
+/// ⚠️ 返回 false = 播放页没挂上（同 [debugPlayerSaveProgressForProbe]）。
+Future<bool> debugPlayerPrepareResumeForProbe() async {
+  final s = _livePlayerState;
+  if (s == null) return false;
+  await s._prepareResume();
+  return true;
+}
+
+/// 探针读数：续播将要 seek 到的位置（`null` = 不续播）。
+///
+/// 与 [debugPlayerPrepareResumeForProbe] 配对使用。
+/// ⚠️ 无播放页时返回 `null` —— 与「有播放页但不续播」**同值**，
+///    所以调用方必须先断言 [debugPlayerPrepareResumeForProbe] 返回 true。
+Duration? debugPlayerPendingSeekForProbe() => _livePlayerState?._pendingSeek;
+
+/// ★★★ 探针读数：当前会话**自己那把键**（`provider:id`），`null` = 没挂上。
+///
+/// # ★ 为什么必须有这一条（它是本轮抓到的一个**假绿**的直接产物）
+/// ```text
+/// 实测（2026-10-10）：同一个用例里连续 `pumpWidget` 两个 PlayerPage 时，
+/// 若两棵树的**类型与 key 都相同**，Flutter 会**复用同一个 State**
+/// （只走 didUpdateWidget，**不再走 initState**）⇒ `_provider`/`_contentId`
+/// 仍是**第一个**会话的值。
+/// ⇒ 「换成在线会话再读续播」那条用例，其实读的还是本地会话自己的键 ⇒
+///   在**没有修**的代码上也是绿的（= 假绿）。
+/// ```
+/// ⇒ 每个用例在断言前**先钉住当前会话的身份**，让这种复用立刻显形。
+String? debugPlayerSessionKeyForProbe() {
+  final s = _livePlayerState;
+  return s == null ? null : '${s._provider}:${s._contentId}';
+}
+
+/// 探针读数：本会话是否会**镜像**进度、镜像到哪个键（`null` = 不镜像）。
+///
+/// 与 `_mirrorOrigin` 是同一个 getter —— 不另写一份判据。
+String? debugPlayerMirrorOriginForProbe() {
+  final o = _livePlayerState?._mirrorOrigin;
+  return o == null ? null : '${o.provider}:${o.mediaId}';
+}
+
+/// 探针：直接灌一个时长（`_saveProgress` 的早退条件之一是 `_duration > 0`）。
+///
+/// ⚠️ 只改这一个字段，不碰播放器 —— 本探针测的是**写入路径**，不是解码。
+bool debugPlayerSetDurationForProbe(Duration d) {
+  final s = _livePlayerState;
+  if (s == null) return false;
+  s._duration = d;
+  return true;
+}
+
+/// 探针：复位续播守卫（`_resumedThisSession` / `_position`），
+/// 让同一个页面能被**连续**驱动两次「读续播」。
+bool debugPlayerResetResumeGuardForProbe() {
+  final s = _livePlayerState;
+  if (s == null) return false;
+  s._resumedThisSession = false;
+  s._pendingSeek = null;
+  s._position = Duration.zero;
+  return true;
+}
+
 bool debugPlayerSeekForProbe(Duration target) {
   final s = _livePlayerState;
   if (s == null) return false;
@@ -13265,6 +13800,135 @@ void debugPlayerSetDanmakuCommentsForProbe(List<DanmakuComment> cs) {
 
 /// 清空弹幕探针统计（进入测量前调一次）
 void debugPlayerResetDanmakuProbe() => debugDanmakuResetProbeStats();
+
+/// 弹幕角标**当下**该画什么（探针用；null = 不该画）
+///
+/// ★★★ OPS-10 ④（Owner 逐字：「没有弹幕的那个标识,不用一直显示,
+///     跟随一起消失就行了」）
+///
+/// 那句话的判据**全在** `_danmakuBadge` 这个 private getter 里
+/// （寿命 + 控制条），测试没法直接读 ⇒ 开一个只读的口子。
+///
+/// ⚠️ 读的是**真棵树上那个真 getter**，不是测试里手抄的副本 ——
+///    手抄一份判据等于测自己写的 if（假门禁）。
+String? debugPlayerDanmakuBadgeForProbe() => _livePlayerState?._danmakuBadge;
+
+/// 把渲染层置成「取数成功、但一条弹幕都没有」（探针用）
+///
+/// 返回 true = 写的确实是真字段（comments 空、error 空）。
+///
+/// 走 state 上那个生产用的 `debugDanmakuSetEmptyResult`（它同时起
+/// 角标寿命计时器），与用户真机上"取到了、这一集就是没弹幕"同一状态。
+bool debugPlayerSetDanmakuEmptyResultForProbe(String status) {
+  final s = _livePlayerState;
+  if (s == null) return false;
+  s.debugDanmakuSetEmptyResult(status);
+  return s._danmakuComments.isEmpty && s._danmakuError == null;
+}
+
+/// 当前提示条文本（探针用；null = 没有提示条）
+///
+/// 与 [debugPlayerTipForProbe] 是同一个读数 —— 保留两个名字是因为
+/// 前者已被别的探针引用（改名会连带改别人），这里对齐 OPS-10 ⑤ 的用例。
+String? debugPlayerFlashForProbeText() => _livePlayerState?._tip;
+
+/// 走**真实导入链**导入一条 B 站链接（探针用；返回导入后上屏的弹幕条数）
+///
+/// # 为什么必须注入假 HttpClient 而不是发真请求
+/// ```text
+/// 单测不许发真请求（test/zz_t31_autobind_test.dart 起就是这个规矩）。
+/// BiliApi 的构造器收 HttpClient（lib/core/bili/bili_api.dart:349-354）
+/// ⇒ 换掉 socket，整条链（解析 → view → 弹幕 XML → 落盘 → 上屏）
+///   跑的都是**生产代码**。
+/// ```
+///
+/// # 它替用户做的三件事（都是 UI 状态，不是逻辑）
+/// ```text
+/// ① _biliApi 换成注入了假 HttpClient 的那个（生产里是 _ensureBiliApi 建的）
+/// ② _danmakuEnabled = true（生产里是弹幕设置里那个开关）
+/// ③ _epIndex = 0（"当前在放第几集"，导入结果要落到它对应的 cid 上）
+/// ```
+///
+/// ⚠️ 面板**不必**真的打开：`_biliImport` 只看 `_biliPanelToken` 与
+///    `_epIndex`，不读 `_biliSheetOpen`。真机上用户是在面板里点的按钮，
+///    两个状态恰好一致；探针只取其中被读到的那一半。
+///
+/// ⚠️ 落盘是**真的**（`persistOutcome` → `UiPrefs`），与用户点一次导入
+///    完全同一条路径 ⇒ 调用方要自己保证 UiPrefs 是干净的
+///    （`UiPrefs.debugResetForTest()`），否则上一次的绑定会顶掉这一次。
+Future<int> debugPlayerBiliImportForProbe({
+  required String input,
+  required int page,
+  required HttpClient fake,
+}) async {
+  final s = _livePlayerState;
+  if (s == null) return -1;
+  // ignore: invalid_use_of_protected_member
+  s.setState(() {
+    s._biliApi = BiliApi(client: fake);
+    s._danmakuEnabled = true;
+    s._epIndex = 0;
+    /*
+     * ★ 令牌判据（`_biliImport` 里那句 `if (token != _biliPanelToken)`）：
+     *   面板是**哪一集**打开的。探针不开面板 ⇒ 这里现打一个戳，让它与
+     *   调用后读到的值一致；不这么做时，若别的路径（切集）动过这个字段，
+     *   导入结果会被当成"过时"直接丢掉 ⇒ 测试假红。
+     */
+    s._biliPanelToken = 0;
+  });
+  await s._biliImport(input, page);
+  return s._danmakuComments.length;
+}
+
+/// 重跑一次起播时的弹幕偏好读取（探针用；"第二次进播放页"的替身）
+///
+/// 见 State 上同名方法的说明：读的是**生产那段** `_loadDanmakuPrefs`。
+bool debugPlayerDanmakuLoadPrefsForProbe() {
+  final s = _livePlayerState;
+  if (s == null) return false;
+  s.debugDanmakuLoadPrefs();
+  return true;
+}
+
+/// 走**生产那条起播取弹幕**的路再取一次（探针用；返回取到后上屏的条数）
+///
+/// ★★★ OPS-10 ⑤ 后半句「返回播放页继续，也没有出现弹幕」的判据
+/// ```text
+/// 真实场景：用户导入完 → 退出播放页 → 再进来 ⇒ 起播走 _loadDanmakuNamed。
+/// 这里**故意不碰** _danmakuEnabled —— 让调用方自己把它置成"用户真实的
+/// 样子"（默认关着，见 DanmakuConfig.enabled 的缺省 '0'）。
+/// 探针一旦自己把它打开，这条用例就永远测不出"关着的时候能不能取到"。
+/// ```
+///
+/// [fake] 非 null ⇒ 先把 _biliApi 换成注入假 HttpClient 的那个
+/// （否则 _ensureBiliApi 会建真 HttpClient ⇒ 单测真的发网络请求）。
+Future<int> debugPlayerReloadDanmakuForProbe({HttpClient? fake}) async {
+  final s = _livePlayerState;
+  if (s == null) return -1;
+  if (fake != null) {
+    // ignore: invalid_use_of_protected_member
+    s.setState(() => s._biliApi = BiliApi(client: fake));
+  }
+  await s._loadDanmakuNamed(s._danmakuFileName);
+  return s._danmakuComments.length;
+}
+
+/// 用假 HttpClient 走一次**起播取 B 站弹幕**（探针用）
+///
+/// 返回失败原文（成功 = 空串）。专门给 OPS-10 现象 A 的
+/// 「失败角标会不会自己消失」用：_loadBiliDanmaku 的失败支
+/// 在改前**没有**写 _danmakuErrorAt、也没有起计时器。
+Future<String> debugPlayerBiliLoadForProbe({
+  required int cid,
+  required HttpClient fake,
+}) async {
+  final s = _livePlayerState;
+  if (s == null) return '<没有活着的播放页>';
+  // ignore: invalid_use_of_protected_member
+  s.setState(() => s._biliApi = BiliApi(client: fake));
+  await s._loadBiliDanmaku(cid);
+  return s._danmakuError?.message ?? '';
+}
 
 /// 打开弹幕设置面板（探针用；返回面板是否处于打开态）
 ///

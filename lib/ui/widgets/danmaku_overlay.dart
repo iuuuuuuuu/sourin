@@ -560,6 +560,18 @@ class _DanmakuOverlayState extends State<DanmakuOverlay>
       widget.area,
       widget.comments.length,
       identityHashCode(widget.comments),
+      // ★ 屏蔽规则也必须进 key（下面紧接着就是拿规则过滤 comments）。
+      //   少了这几项，用户勾掉"顶部弹幕"或加一条屏蔽词之后 _sameKey 会命中
+      //   旧 key 直接 return ⇒ 该消失的弹幕还留在屏幕上（"改了没反应"）。
+      //   规则读的是全局偏好，只能靠"值进 key"让重排发生。
+      DanmakuConfig.showScroll,
+      DanmakuConfig.showTop,
+      DanmakuConfig.showBottom,
+      DanmakuConfig.blockScroll,
+      DanmakuConfig.blockTop,
+      DanmakuConfig.blockBottom,
+      DanmakuConfig.blockRegex,
+      DanmakuConfig.blockWords.join('\u0001'),
     ];
     final old = _layoutKey;
     if (old != null && _sameKey(old, key)) return;

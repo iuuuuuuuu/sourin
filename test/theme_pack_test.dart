@@ -2,7 +2,7 @@
 //  主题包测试 —— 格式、容错、内置主题的对比度
 // ═══════════════════════════════════════════════════════════════════════
 //
-// # 这个文件最要紧的一条是「**坏主题包不能���应用搞崩**」
+// # 这个文件最要紧的一条是「**坏主题包不能让应用搞崩**」
 //
 // Owner 要的是「外部插件式主题」，也就是用户会自己写 JSON、自己从网上
 // 抄一个。那么「JSON 写错了」不是异常情况，是**常规情况**。
@@ -135,6 +135,76 @@ void main() {
     });
   });
 
+  group('⑥ 字段**类型**错：不许抛，必须降级 + 点名警告（CR-09）', () {
+    // ★ 为什么单开一组：①~⑤ 覆盖的全是「语法错 / 值非法」，
+    //   一条都没覆盖「字段类型不对」—— 而 `root['radius'] as num?` 这种强转
+    //   遇到 `{"radius":"10"}` 会直接抛 TypeError，顺着 loadAll() / current()
+    //   冒到 SourinApp.build ⇒ **整个应用起不来**（CodeRabbit CR-09）。
+    test('★ CR-09 判据原文：{"radius":"10","colors":[1]} 不抛，且 warnings 非空', () {
+      late ThemePackResult r;
+      expect(
+        () => r = ThemePackStore.importFromString('{"radius":"10","colors":[1]}'),
+        returnsNormally,
+        reason: '一份坏主题包不许让 parse 抛 —— 它会把 loadAll / current / '
+            'SourinApp.build 整条链带下去',
+      );
+      expect(r.warnings, isNotEmpty, reason: '降级了就必须让调用方看得见，不许静默吞掉');
+      expect(r.pack.palette, isNotNull, reason: '降级后仍必须是一份可用的主题包');
+    });
+
+    test('每个字段类型错都点名降级（逐字段）', () {
+      final cases = <String, String>{
+        '{"version":"2"}': 'version',
+        '{"brightness":123}': 'brightness',
+        '{"colors":[1,2]}': 'colors',
+        '{"radius":"10"}': 'radius',
+        '{"buttonPadding":"nope"}': 'buttonPadding',
+        '{"id":5}': 'id',
+        '{"name":[]}': 'name',
+      };
+      cases.forEach((json, key) {
+        late ThemePackResult r;
+        expect(() => r = ThemePackStore.importFromString(json), returnsNormally,
+            reason: '$json 抛异常了');
+        expect(r.warnings.where((w) => w.contains(key)), isNotEmpty,
+            reason: '$json 必须点名 $key 降级了');
+      });
+    });
+
+    test('类型错 = 回落默认值，不是 null、也不是抛', () {
+      final r = ThemePackStore.importFromString('{"id":5,"name":[],"brightness":7,'
+          '"radius":"10","buttonPadding":3,"colors":"x","version":"9"}');
+      expect(r.pack.id, 'imported', reason: 'id 类型错 ⇒ 用 idHint 兜底');
+      expect(r.pack.name, '导入的主题');
+      expect(r.pack.radius, isNull);
+      expect(r.pack.buttonPadding, isNull);
+      expect(r.pack.brightness, Brightness.dark);
+      expect(r.pack.palette, isNotNull);
+      expect(r.warnings.where((w) => w.contains('比本应用新')), isEmpty,
+          reason: 'version 类型错 ⇒ 按当前版本处理，不该报「比本应用新」');
+    });
+
+    test('一个字段类型错，其余照常生效（不许「一个坏全盘丢」）', () {
+      final r = ThemePackStore.importFromString(jsonEncode({
+        'name': '半坏',
+        'brightness': 'dark',
+        'radius': '10', // 类型错
+        'colors': {'background': '#101010', 'primary': '#123456'},
+      }));
+      expect(r.pack.palette.background, const Color(0xFF101010));
+      expect(r.pack.palette.primary, const Color(0xFF123456));
+      expect(r.pack.name, '半坏');
+      expect(r.pack.radius, isNull);
+      expect(r.warnings.where((w) => w.contains('radius')), isNotEmpty);
+    });
+
+    test('colors 是 Map 但里面的值类型全错 ⇒ 回落默认色，不抛', () {
+      final r = ThemePackStore.importFromString(
+          '{"brightness":"dark","colors":{"background":123,"primary":[]}}');
+      expect(r.pack.palette, isNotNull);
+      expect(r.warnings, isNotEmpty);
+    });
+  });
   group('② 往返：导出的 JSON 必须能被自己读回来', () {
     test('每套内置主题 round-trip 后逐色一致', () {
       for (final p in ThemePackStore.builtins) {
@@ -201,7 +271,7 @@ void main() {
           reason: '★ 默认必须是深色 —— Owner 深夜用，且交付实测的截图都是深色');
     });
 
-    test('id 唯一（重复 id 会让选择落在错误的���一套上）', () {
+    test('id 唯一（重复 id 会让选择落在错误的那一套上）', () {
       final ids = ThemePackStore.builtins.map((p) => p.id).toSet();
       expect(ids.length, ThemePackStore.builtins.length);
     });
@@ -273,7 +343,7 @@ void main() {
 
     test('★ 目录不可写 / 不可枚举 ⇒ 降级成「只有内置主题」，不抛异常', () {
       // polish agent 在合并前提出的一个真问题：主题页是**保活 tab**，
-      // 可能��数据目录解析完成前就被打开，而 `loadAll()` 是同步的。
+      // 可能在数据目录解析完成前就被打开，而 `loadAll()` 是同步的。
       // 那条路径没有覆盖 —— 而它恰好是最容易崩的地方。
       //
       // 期望行为（已写进实现，这里把它钉住）：

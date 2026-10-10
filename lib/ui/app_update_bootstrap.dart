@@ -12,6 +12,7 @@ import 'dart:async';
 
 import 'package:material_ui/material_ui.dart';
 
+import '../../core/app_tray.dart';
 import '../../core/app_update/app_update_controller.dart';
 import '../../core/app_update/client.dart';
 import '../../core/app_update/install.dart';
@@ -63,21 +64,28 @@ abstract final class AppUpdateBootstrap {
 
   /// 一个「能弹 dialog」的 context
   ///
-  /// ⚠️ `WidgetsBinding.rootElement` 是根 Element —— 它**本身就是**
-  ///   BuildContext，位于 MaterialApp **之上**；`Navigator.of` 会向下找到
-  ///   真正的 Navigator ⇒ 弹窗挂在正确的层里，且不需要本仓提供全局 key。
-  ///   拿不到时（例如首帧前）返回 null —— 那时安静跳过即可。
+  /// ⚠️ 不要再用 `WidgetsBinding.instance.rootElement`（CR-22）：根 Element 位于
+  ///   `MaterialApp` **之上**，而 `Navigator.of` 只向上找祖先 —— 它上面没有
+  ///   Navigator，必然抛
+  ///   `Navigator operation requested with a context that does not include a Navigator`，
+  ///   于是 catch 返回 null，`run()` 在 `if (ctx == null) return;` 静默退出，
+  ///   启动更新弹窗**永远不出现**，而 `_lastCheckAt` 已经写进去了。
+  ///
+  /// 现在用 `AppTray.navigatorKey`：shell.dart 已经把它挂在 `MaterialApp` 上，
+  ///   `key.currentContext` 位于真正的 Navigator **之下**，弹窗挂在正确的那一层，
+  ///   并且不需要本仓再提供第二个全局 key（见 app_tray.dart:75-88 的同类教训）。
+  /// 首帧之前拿不到时返回 null —— 那时安静跳过即可。
   static BuildContext? get _dialogContext {
-    final root = WidgetsBinding.instance.rootElement;
-    if (root == null || !root.mounted) return null;
-    try {
-      Navigator.of(root, rootNavigator: true);
-      return root;
-    } catch (_) {
-      return null; // 还没有 Navigator（例如初始化失败）
-    }
+    final ctx = AppTray.navigatorKey.currentContext;
+    if (ctx == null || !ctx.mounted) return null;
+    if (Navigator.maybeOf(ctx, rootNavigator: true) == null) return null;
+    return ctx;
   }
 
   /// 测试用：允许重跑
   static void debugReset() => _done = false;
+
+  /// 测试用：暴露当前"能不能拿到可弹窗的 context"。
+  @visibleForTesting
+  static BuildContext? debugDialogContext() => _dialogContext;
 }

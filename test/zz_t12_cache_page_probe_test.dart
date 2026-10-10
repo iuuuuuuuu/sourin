@@ -641,9 +641,39 @@ void main() {
     final sidecar = File(
       '$workDir${Platform.pathSeparator}${DownloadQueue.kSidecarName}',
     );
-    debugPrint('E2E 旁文件 = ${sidecar.path} 存在=${sidecar.existsSync()}');
+    /*
+     * ★★★ 2026-10-10 Lead 修：这里**不能**在 done 之后立刻断言旁文件存在。
+     * ```text
+     * `DownloadQueue._run` 的顺序是「**先发布 done、后写旁文件**」：
+     *   download_queue.dart:1038-1046  copyWith(state: done) + _publish()  ← 任务变 done
+     *   download_queue.dart:1059-1061  await _writeSidecarFor(t, dir)     ← 之后才写
+     *                                    └─ 内含 cacheCoverImage 的 8s 连接 / 20s 读取
+     * 而上面那个循环一看到 state==done 就 break ⇒ 立刻同步读盘必然**读不到**
+     * （实测：Expected: true / Actual: false，00:17 +6 -1）。
+     *
+     * ⇒ 这不是产品缺陷，是**观察者比被观察的写入早了一步**：
+     *   产品契约是「下载成功 ⇒ 旁文件最终会落盘」，不是「done 的那一刻它已在盘上」。
+     *   （把旁文件挪到 _publish 之前反而更糟：封面抓取最长 28s，
+     *     会让下载在 100% 处卡住不动，那才是真的用户可见问题。）
+     * ⇒ 这里改成**等它出现**（有超时，不是死等），判据本身一个字没变：
+     *   仍然是在**磁盘上**验证生产写侧写过什么。
+     * ```
+     */
+    var sidecarSeen = false;
+    await t.runAsync(() async {
+      for (var i = 0; i < 400; i++) {
+        if (sidecar.existsSync()) {
+          sidecarSeen = true;
+          break;
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+      }
+    });
+    debugPrint('E2E 旁文件 = ${sidecar.path} 存在=${sidecar.existsSync()}'
+        ' 等到了=$sidecarSeen');
     expect(sidecar.existsSync(), isTrue,
-        reason: '★★★ 下载成功后生产写侧必须写出 _sourin-cache.json');
+        reason: '★★★ 下载成功后生产写侧必须写出 _sourin-cache.json'
+            '（旁文件在 done **之后**才写，故这里最多等 20s —— 见上方注释）');
     final raw = sidecar.readAsStringSync();
     debugPrint('E2E 旁文件内容 = $raw');
     expect(raw.contains('e2e-cover.jpg'), isTrue,

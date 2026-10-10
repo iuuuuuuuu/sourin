@@ -769,70 +769,248 @@ class SettingsEntryRow extends StatelessWidget {
         child: InkWell(
           onTap: onTap,
           borderRadius: Radii.rLg,
-          child: Container(
-            padding: const EdgeInsets.symmetric(
-              horizontal: Sp.x4,
-              vertical: Sp.x3,
-            ),
-            decoration: BoxDecoration(
-              color: colors.surfaceContainerHighest.withValues(alpha: 0.3),
-              borderRadius: Radii.rLg,
-              border: Border.all(color: colors.outlineVariant),
-            ),
-            child: Row(
-              children: [
-                if (icon != null) ...[
-                  Container(
-                    width: _iconPlate,
-                    height: _iconPlate,
-                    decoration: BoxDecoration(
-                      color: colors.onSurface.withValues(alpha: 0.06),
-                      borderRadius: BorderRadius.circular(_iconPlate / 3),
-                    ),
-                    child: Icon(
-                      icon,
-                      size: 18,
-                      color: colors.onSurfaceVariant,
-                    ),
-                  ),
-                  const SizedBox(width: Sp.x3),
-                ],
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        title,
-                        style: TextStyle(
-                          fontSize: FontSizes.base,
-                          fontWeight: FontWeights.regular,
-                          color: colors.onSurface,
+          /*
+           * ★★★ 业主反馈 ⑧：焦点高亮**不能**画成整行填充
+           *
+           * # 缺陷现场（业主原话）
+           *
+           * > 设置页,点击这个js插件,返回之后,这里也还是选中状态
+           *
+           * 逐像素量业主截图（1444x805 浅色）：
+           *   页面底色            238,240,246   (= LightTokens.bgBase)
+           *   「JS 插件」那一行   220,222,226   ← 他说的「还是选中」
+           *   下面「Emby」那一行  240,242,247   ← 正常
+           *
+           * 行的填充 = surfaceContainerHighest(#F5F7FA) x 0.3 叠在底色上：
+           *   245,247,250 x 0.3 + 238,240,246 x 0.7 = 240,242,247  ✓ 正常行
+           * 再叠一层**纯黑 12%**（墨层画在填充**下面** —— 见 material.dart
+           * 的 _RenderInkFeatures.paint，它先画 ink 再 super.paint(child)）：
+           *   238,240,246 x 0.88 = 209.4,211.2,216.5
+           *   245,247,250 x 0.3 + 209.4,211.2,216.5 x 0.7 = 220.1,221.9,226.5
+           *   ^^^ 逐通道命中 220,222,226 ✓
+           *
+           * 那层「纯黑 12%」就是 **ThemeData.focusColor**
+           * （theme_data.dart:467  focusColor ??= 浅色 black 12%）。
+           * ⇒ 业主看到的**不是** selected 标志位（本组件根本没有 selected
+           *   参数，settings_page.dart 里也搜不到任何选中态字段），
+           *   而是 **InkWell 的焦点高亮填充**。
+           *
+           * # 为什么返回之后它还在
+           *
+           * 焦点落在这一行的 InkWell 上（遥控方向键 / 桌面 Tab 都会落到）。
+           * 二级页 pop 回来时焦点**回到原来那个 FocusNode**（Flutter 的
+           * focus 恢复语义）⇒ 高亮重新亮起；而指针没动过（鼠标还停在原行）
+           * ⇒ 用户看到的正是「点进去、返回，这行还是灰的」。
+           *
+           * # 为什么是「填充」而不是「焦点环」
+           *
+           * 本项目对「焦点可见」的既有约定是**描边环**，不是整块填色：
+           *   episode_strip.dart:1012  AnimatedContainer(foregroundDecoration:
+           *       Border.all(color: _focused ? primary : transparent,
+           *                  width: _kFocusRingWidth = 2))
+           *   poster_card.dart:184      ringed = focused || (_focused && needsFocusRing)
+           * 而整块填色与「悬停遮罩」在视觉上**无法区分** —— 这正是业主
+           * 把它读成「选中状态」的原因（一行灰底看着就像被选中了）。
+           *
+           * ⇒ 这里把 InkWell 的填充类 overlay 全部显式置 null（透明），
+           *   焦点态改用与上面两处**同一个零件**（primary 描边环）。
+           *   ⚠️ 环的显隐由 highlightMode 决定，见 _SettingsFocusRing。
+           *
+           * ⚠️ **只关 focusColor 这一个。** 另外三个是合法反馈，
+           *   不能顺手一起关 —— 那是超出缺陷范围的改动：
+           *
+           *   · hoverColor（theme_data.dart:468 浅色 black 4%）：
+           *     指针**真的停在行上**才亮，指针一走就灭，是「这里可以点」
+           *     的正常提示。而且它**不持久** ⇒ 与本次缺陷无关。
+           *     判据（不是推测）：业主量到的 220,222,226 是**纯焦点**色。
+           *     若 hover 也叠着，会是 214,216,221（两轮自检实测）。
+           *   · highlightColor / splashColor：按压反馈，松手即散，
+           *     返回后不会留下任何东西（实测 ⑥b = 220,222,226，纯焦点）。
+           *     关掉它们 = 这一行「点了没反应」，那是**新**缺陷。
+           *
+           * ⇒ focusColor 是这三者里唯一一个**会自己回来并一直挂着**的层
+           *   （焦点在 pop 之后被 Flutter 恢复到原来那个节点）。
+           */
+          focusColor: Colors.transparent,
+          /*
+           * ★ Builder 不是装饰：它把 context 挪到 InkWell 的 Focus **下面**。
+           *
+           * `InkWell` 内部是 `Focus(child: MouseRegion(child: ... child:
+           * widget.child))`（ink_well.dart:1386-1421）⇒ 在它的 child 子树里
+           * `Focus.of(ctx)` 拿到的**正是 InkWell 自己那个 FocusNode**，
+           * 也就是焦点高亮原来挂着的那个节点。
+           *
+           * ⚠️ 不能在本方法顶部（InkWell 外面）取 —— 那里 `Focus.of` 拿到的是
+           *   祖先的焦点作用域，永远不是这一行的。
+           */
+          child: Builder(
+            builder: (ctx) => _SettingsFocusRing(
+              node: Focus.of(ctx),
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: Sp.x4,
+                  vertical: Sp.x3,
+                ),
+                decoration: BoxDecoration(
+                  color: colors.surfaceContainerHighest.withValues(alpha: 0.3),
+                  borderRadius: Radii.rLg,
+                  border: Border.all(color: colors.outlineVariant),
+                ),
+                child: Row(
+                  children: [
+                    if (icon != null) ...[
+                      Container(
+                        width: _iconPlate,
+                        height: _iconPlate,
+                        decoration: BoxDecoration(
+                          color: colors.onSurface.withValues(alpha: 0.06),
+                          borderRadius: BorderRadius.circular(_iconPlate / 3),
                         ),
-                      ),
-                      const SizedBox(height: 2),
-                      Text(
-                        subtitle,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontSize: FontSizes.cap,
+                        child: Icon(
+                          icon,
+                          size: 18,
                           color: colors.onSurfaceVariant,
                         ),
                       ),
+                      const SizedBox(width: Sp.x3),
                     ],
-                  ),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            title,
+                            style: TextStyle(
+                              fontSize: FontSizes.base,
+                              fontWeight: FontWeights.regular,
+                              color: colors.onSurface,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            subtitle,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: FontSizes.cap,
+                              color: colors.onSurfaceVariant,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: Sp.x2),
+                    Icon(
+                      Icons.chevron_right,
+                      size: 20,
+                      color: colors.onSurfaceVariant,
+                    ),
+                  ],
                 ),
-                const SizedBox(width: Sp.x2),
-                Icon(
-                  Icons.chevron_right,
-                  size: 20,
-                  color: colors.onSurfaceVariant,
-                ),
-              ],
+              ),
             ),
           ),
         ),
       ),
+    );
+  }
+}
+
+/// 入口行的**焦点环** —— 焦点可见性的唯一来源（替代 InkWell 的填充类高亮）
+///
+/// # 为什么需要它（而不是直接用 InkWell 的 focusColor）
+///
+/// `ThemeData.focusColor` 在浅色下是**纯黑 12%**，InkWell 把它画成
+/// **整行填充** —— 而整行灰底与「悬停遮罩」在视觉上无法区分，
+/// 业主正是把它读成「选中状态」（反馈 ⑧）。详见 `SettingsEntryRow`
+/// 里那段注释（含逐像素推导）。
+///
+/// ⇒ 填充全部关掉，焦点态改成**描边环**，与本项目既有约定一致：
+/// ```text
+/// episode_strip.dart:1012  foregroundDecoration + Border.all(primary, 2)
+/// poster_card.dart:184     ringed = focused || (_focused && needsFocusRing)
+/// ```
+///
+/// # ⚠️ 为什么环不能无条件画（必须看 highlightMode）
+///
+/// 焦点**存在**与焦点**该被看见**是两件事。桌面鼠标用户点一下行，
+/// 焦点会留在那一行上（InkWell 的 Focus 节点），若此时画环，
+/// 用户会看到「我没用键盘，怎么有个蓝框」—— 那是新的视觉噪声。
+/// Flutter 已经把这件事算好了：`FocusManager.instance.highlightMode`
+/// 在「最近一次输入是键盘/遥控」时才是 `traditional`，鼠标/触摸之后
+/// 会切到 `touch`（见 `FocusHighlightStrategy.automatic` 的语义）。
+///
+/// ⚠️ 所以这里读的是 **highlightMode**，不是 `Device.needsFocusRing`：
+///   后者只说明「这台设备是 TV」，而 TV 上用户也可能插着鼠标。
+///   按输入方式判，比按设备判更准（`InkWell` 自己也是这么判的，
+///   见 `ink_well.dart:1142 _shouldShowFocus`）。
+///
+/// ⚠️ 必须 `addHighlightModeListener` 并在 dispose 里摘掉：
+///   highlightMode 变化**不会**重建这棵树（它不是 InheritedWidget），
+///   不监听就会出现「按了 Tab 环不出现 / 动了鼠标环不消失」。
+class _SettingsFocusRing extends StatefulWidget {
+  const _SettingsFocusRing({required this.node, required this.child});
+
+  /// 被观察的焦点节点（= 那个 InkWell 的 Focus）
+  final FocusNode node;
+
+  final Widget child;
+
+  @override
+  State<_SettingsFocusRing> createState() => _SettingsFocusRingState();
+}
+
+class _SettingsFocusRingState extends State<_SettingsFocusRing> {
+  /// 与 episode_strip.dart:128 的 `_kFocusRingWidth` 同一档
+  static const double _ringWidth = 2;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.node.addListener(_onFocusChanged);
+    FocusManager.instance.addHighlightModeListener(_onHighlightModeChanged);
+  }
+
+  @override
+  void didUpdateWidget(_SettingsFocusRing old) {
+    super.didUpdateWidget(old);
+    if (old.node != widget.node) {
+      old.node.removeListener(_onFocusChanged);
+      widget.node.addListener(_onFocusChanged);
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.node.removeListener(_onFocusChanged);
+    FocusManager.instance.removeHighlightModeListener(_onHighlightModeChanged);
+    super.dispose();
+  }
+
+  void _onFocusChanged() {
+    if (mounted) setState(() {});
+  }
+
+  void _onHighlightModeChanged(FocusHighlightMode mode) {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final show = widget.node.hasFocus &&
+        FocusManager.instance.highlightMode == FocusHighlightMode.traditional;
+    return Container(
+      // ⚠️ 环画在**前景**：行自己那层 outlineVariant 描边仍在背景层，
+      //   两层叠在一起时环必须在上，否则被行描边盖掉半圈。
+      foregroundDecoration: BoxDecoration(
+        borderRadius: Radii.rLg,
+        border: Border.all(
+          color: show ? colors.primary : Colors.transparent,
+          width: _ringWidth,
+        ),
+      ),
+      child: widget.child,
     );
   }
 }

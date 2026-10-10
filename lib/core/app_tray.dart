@@ -439,11 +439,36 @@ class AppTray with TrayListener, WindowListener {
   /// 彻底退出（托盘菜单「退出」与关闭确认都走这里）
   Future<void> quitNow() async {
     _quitting = true;
+    await _flushPrefsBeforeExit();
     await dispose();
     await _destroyAndClose();
   }
 
+  /// 退出前把偏好落盘 —— ★ 必须**等它写完**再往下走
+  ///
+  /// 为什么：`UiPrefs.set()` 只改内存，真正写盘的是
+  /// `lib/core/ui_prefs.dart:107-113` 那个 300ms 去抖定时器。
+  /// 用户「拨一下开关 / 刚选完关闭行为」然后立刻退出，进程比定时器先走
+  /// ⇒ 这一次偏好永远丢了（下次打开还是旧值）。
+  ///
+  /// 为什么必须 await：退出是一次性的，不像 `lib/core/window_bounds.dart:116-126`
+  /// 的拖窗口场景（那里后面还有很长的会话，`unawaited` 足够）；
+  /// 这里 `destroy()` 之后进程就没了，必须真的等到写完。
+  ///
+  /// 为什么不会卡住退出：`flush()` 自己吞异常只留日志，且没有脏数据时
+  /// 立即返回；外面再兜一层 try/catch，落盘失败也照常退。
+  static Future<void> _flushPrefsBeforeExit() async {
+    try {
+      await UiPrefs.flush();
+    } catch (e) {
+      debugPrint('[TRAY] 退出前偏好落盘失败: $e');
+    }
+  }
+
   Future<void> _destroyAndClose() async {
+    // 退出前的最后一班岗：`_quitting` 重入分支（onWindowClose）直接跳到这里，
+    // 不经过 quitNow()，所以这里再兜一次。flush() 幂等：没有脏数据立即返回。
+    await _flushPrefsBeforeExit();
     try {
       await windowManager.setPreventClose(false);
       await windowManager.destroy();

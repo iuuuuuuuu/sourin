@@ -29,7 +29,9 @@ import '../../core/app_update/install.dart';
 import '../../core/app_update/release.dart';
 import '../../core/app_update/route.dart';
 import '../../core/sourin_api.dart';
+import '../../core/ui_prefs.dart';
 import '../tokens.dart';
+import '../widgets/app_loading.dart';
 import '../widgets/app_toast.dart';
 import '../widgets/settings_kit.dart';
 import '../widgets/settings_sub_page.dart';
@@ -123,7 +125,40 @@ class AboutSettingsPageState extends State<AboutSettingsPage> {
       showAppToast(context, msg);
     } else if (Platform.isWindows) {
       // 安装向导已拉起 ⇒ 退出，让安装程序接管
+      await AboutSettingsPageState.flushPrefsBeforeNonGracefulExit();
       exit(0);
+    }
+  }
+
+  /// ★ 非优雅退出（`exit(0)`）之前把偏好落盘 —— **必须等它写完**再退。
+  ///
+  /// # 为什么（OPS-17 的超范围遗留项）
+  /// `UiPrefs.set()` 只改内存，真正写盘的是
+  /// `lib/core/ui_prefs.dart:107-113` 那个 300ms 去抖定时器。用户完全可能
+  /// 「刚在设置页拨完开关 → 300ms 内点『立即更新』→ 安装器成功拉起」——
+  /// `exit(0)` 立刻终止进程（它**不展开 finally**、也不等任何 Future），
+  /// 这一次偏好就**永久丢失**（下次打开还是旧值）。
+  ///
+  /// # 为什么必须真的 await（不能 unawaited）
+  /// 与 `lib/core/app_tray.dart:460-466 _flushPrefsBeforeExit()` 同一条纪律：
+  /// 退出是一次性的，`exit(0)` 之后进程就没了，没有「稍后顺手写完」这回事。
+  /// （对比 `lib/core/window_bounds.dart` 的拖窗口场景 —— 那里后面还有很长的
+  ///   会话，`unawaited` 足够；这里不够。）
+  ///
+  /// # 为什么不会卡住退出
+  /// `flush()` 自己吞异常只留日志（`lib/core/ui_prefs.dart:119-124`），
+  /// 且没有脏数据时立即返回；外面再兜一层 try/catch ⇒ 落盘失败也照常退出。
+  ///
+  /// ⚠️ 抽成 `static`（而不是私有实例方法）是**为了可测**：`exit(0)` 会真的
+  ///    杀掉进程，测试没法跑到它，只能直接调用「exit 之前的那一步」并断言
+  ///    `ui-prefs.json` 里**盘上**已有值
+  ///    （见 `test/zz_cr_prefs_about_exit_flush_test.dart`）。
+  @visibleForTesting
+  static Future<void> flushPrefsBeforeNonGracefulExit() async {
+    try {
+      await UiPrefs.flush();
+    } catch (e) {
+      debugPrint('[ABOUT] 退出前偏好落盘失败（不影响退出）: $e');
     }
   }
 
@@ -208,8 +243,8 @@ class AboutSettingsPageState extends State<AboutSettingsPage> {
   }
 }
 
-// ═══════════════��═══════════════════════════════════════════════════════
-//  下���方式编辑器
+// ═══════════════════════════════════════════════════════════════════════
+//  下载方式编辑器
 // ═══════════════════════════════════════════════════════════════════════
 
 class UpdateRouteEditor extends StatefulWidget {
@@ -385,10 +420,13 @@ class _PrimaryButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (busy) {
+      // ★ OPS-14：共享组件 + **显式传 16**。
+      //   按钮只有 40px 高，默认直径 30 会把按钮顶高 ⇒ 高度跳变。
+      //   描边也从 2 提到 2.8（低于 2.5 就是 Owner 说的那根发丝）。
       return const SizedBox(
         height: 40,
         width: 40,
-        child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
+        child: Center(child: AppLoading(size: 16)),
       );
     }
     return FilledButton(

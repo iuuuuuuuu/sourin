@@ -53,7 +53,7 @@ int _serverPeak = 0;
 /// ⚠️ 绝不允许退化成相对路径：相对路径会解析到**仓库根**（已出过一次事）。
 Directory _sandboxRoot() {
   final base = Directory.systemTemp.absolute.path;
-  final p = '$base\\t3_20_conc';
+  final p = '$base${Platform.pathSeparator}t3_20_conc';
   final d = Directory(p);
   if (!d.isAbsolute) {
     fail('★ 探针沙盒必须是绝对路径，实际 = $p —— 绝不允许落回仓库根');
@@ -124,7 +124,7 @@ void main() {
      *   删之前**再断言一次**绝对路径 —— 一旦有人把它改回相对路径，
      *   这里就会红，而不是默默去删仓库里的东西。
      */
-    final d = Directory('${Directory.systemTemp.absolute.path}\\t3_20_conc');
+    final d = Directory('${Directory.systemTemp.absolute.path}${Platform.pathSeparator}t3_20_conc');
     if (!d.isAbsolute) {
       fail('★ 清理路径必须是绝对路径，实际 = ${d.path}');
     }
@@ -136,7 +136,7 @@ void main() {
     final srv = await _startUpstream();
     DownloadQueue.debugSetResolver((t) async =>
         StreamCandidate(url: 'http://127.0.0.1:${srv.port}/seg'));
-    final dir = Directory('${_sandboxRoot().path}\\c1')
+    final dir = Directory('${_sandboxRoot().path}${Platform.pathSeparator}c1')
       ..createSync(recursive: true);
     DownloadDir.setConfiguredDir(dir.path);
     for (var k = 0; k < 4; k++) {
@@ -156,7 +156,7 @@ void main() {
     final srv = await _startUpstream();
     DownloadQueue.debugSetResolver((t) async =>
         StreamCandidate(url: 'http://127.0.0.1:${srv.port}/seg'));
-    final dir = Directory('${_sandboxRoot().path}\\c3')
+    final dir = Directory('${_sandboxRoot().path}${Platform.pathSeparator}c3')
       ..createSync(recursive: true);
     DownloadDir.setConfiguredDir(dir.path);
     DownloadQueue.setConcurrency(3);

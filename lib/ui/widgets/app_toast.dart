@@ -45,7 +45,7 @@ class ToastHost extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) =>
-      ToastDismissShortcut(child: AppToaster(child: child));
+      AppToaster(child: ToastDismissShortcut(child: child));
 }
 
 /// 一条 toast 的外观参数
@@ -175,6 +175,9 @@ class _AppToasterState extends State<AppToaster> {
     });
     _startClock();
   }
+
+  /// 现在有没有 toast（Esc 的 Action 用它决定 enabled，见 [ToastDismissShortcut]）
+  bool get hasToasts => _entries.isNotEmpty;
 
   /// 手动关掉最上面那条（Esc 键）
   void dismissTop() {
@@ -338,29 +341,56 @@ AppToastStyle errToastStyle() =>
     AppToastStyle(icon: Icons.error_outline, accent: Colors.redAccent);
 
 /// Esc 关掉最上面那条（TV 遥控器上比鼠标 hover 更靠谱）
+///
+/// ★ 两个关键点（都是修出来的 bug，勿回退）：
+///
+/// 1. **必须挂在 AppToaster 里面**。反过来（Shortcuts 在外）时
+///    `AppToaster.maybeOf(context)` 是 `findAncestorStateOfType`，
+///    只会往**父**里找，找不到自己的子节点 ⇒ `dismissTop()` 是死代码，
+///    Esc 按了没反应。
+/// 2. **Action 必须"没 toast 时 disabled"**。`CallbackAction` 不覆写
+///    `isEnabled`，恒为 true ⇒ 即使一条 toast 都没有，这个 Focus 也会
+///    返回 `KeyEventResult.handled`，把 Esc 吃掉 ⇒ 全应用的
+///    `Esc → DismissIntent`（关弹窗/关抽屉）彻底失效。
+///    `ActionDispatcher` 只会调用 enabled 的 action，所以这里覆写
+///    `isEnabled` 就够了，`consumesKey` 不用管。
 class ToastDismissShortcut extends StatelessWidget {
   const ToastDismissShortcut({required this.child, super.key});
 
   final Widget child;
 
   @override
-  Widget build(BuildContext context) => Shortcuts(
-    shortcuts: <ShortcutActivator, Intent>{
-      const SingleActivator(LogicalKeyboardKey.escape):
-          const _DismissToastIntent(),
-    },
-    child: Actions(
-      actions: <Type, Action<Intent>>{
-        _DismissToastIntent: CallbackAction<_DismissToastIntent>(
-          onInvoke: (_) {
-            AppToaster.maybeOf(context)?.dismissTop();
-            return null;
-          },
-        ),
+  Widget build(BuildContext context) {
+    final toaster = AppToaster.maybeOf(context);
+    return Shortcuts(
+      shortcuts: <ShortcutActivator, Intent>{
+        const SingleActivator(LogicalKeyboardKey.escape):
+            const _DismissToastIntent(),
       },
-      child: child,
-    ),
-  );
+      child: Actions(
+        actions: <Type, Action<Intent>>{
+          _DismissToastIntent: _DismissTopToastAction(toaster),
+        },
+        child: child,
+      ),
+    );
+  }
+}
+
+/// 只在**确实有 toast 要关**时才 enabled；enabled 才允许 invoke。
+class _DismissTopToastAction extends Action<_DismissToastIntent> {
+  _DismissTopToastAction(this._toaster);
+
+  final _AppToasterState? _toaster;
+
+  @override
+  bool isEnabled(_DismissToastIntent intent) => _toaster?.hasToasts ?? false;
+
+  @override
+  Object? invoke(_DismissToastIntent intent) {
+    _toaster?.dismissTop();
+    return null;
+  }
 }
 
 class _DismissToastIntent extends Intent {

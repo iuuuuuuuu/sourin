@@ -69,7 +69,7 @@ class Heartbeat {
 
 Directory _sandboxRoot() {
   final base = Directory.systemTemp.absolute.path;
-  final p = '$base\\t11_block';
+  final p = '$base${Platform.pathSeparator}t11_block';
   final d = Directory(p);
   if (!d.isAbsolute) {
     fail('★ 探针沙盒必须是绝对路径，实际 = $p');
@@ -173,7 +173,7 @@ void _hypotheses() {
     await ups.start();
     DownloadQueue.debugSetResolver((t) async =>
         StreamCandidate(url: 'http://127.0.0.1:${ups.port}/master.m3u8'));
-    final dir = Directory('${_sandboxRoot().path}\\h4')..createSync(recursive: true);
+    final dir = Directory('${_sandboxRoot().path}${Platform.pathSeparator}h4')..createSync(recursive: true);
     DownloadDir.setConfiguredDir(dir.path);
     var rebuilds = 0;
     var itemsSeen = 0;
@@ -199,7 +199,7 @@ void _hypotheses() {
     await ups.start();
     DownloadQueue.debugSetResolver((t) async =>
         StreamCandidate(url: 'http://127.0.0.1:${ups.port}/master.m3u8'));
-    final dir = Directory('${_sandboxRoot().path}\\big')..createSync(recursive: true);
+    final dir = Directory('${_sandboxRoot().path}${Platform.pathSeparator}big')..createSync(recursive: true);
     DownloadDir.setConfiguredDir(dir.path);
     final hb = Heartbeat(const Duration(milliseconds: 4))..start();
     DownloadQueue.enqueue(_task('big'));
@@ -233,7 +233,7 @@ void main() {
     await ups.start();
     DownloadQueue.debugSetResolver((t) async =>
         StreamCandidate(url: 'http://127.0.0.1:${ups.port}/master.m3u8'));
-    final dir = Directory('${_sandboxRoot().path}\\hls')..createSync(recursive: true);
+    final dir = Directory('${_sandboxRoot().path}${Platform.pathSeparator}hls')..createSync(recursive: true);
     DownloadDir.setConfiguredDir(dir.path);
 
     // 打开日志（H2：debugPrint 在写出）
@@ -261,8 +261,8 @@ void main() {
     final hb = Heartbeat(const Duration(milliseconds: 4))..start();
     final sw = Stopwatch()..start();
     // 做等量的「写文件」但不走下载路径：手工 openWrite + sink.add
-    final dir = Directory('${_sandboxRoot().path}\\baseline')..createSync(recursive: true);
-    final f = File('${dir.path}\\b.ts');
+    final dir = Directory('${_sandboxRoot().path}${Platform.pathSeparator}baseline')..createSync(recursive: true);
+    final f = File('${dir.path}${Platform.pathSeparator}b.ts');
     final sink = f.openWrite();
     final buf = List<int>.filled(256 * 1024, 0xAB);
     for (var i = 0; i < 300; i++) {

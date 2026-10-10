@@ -130,6 +130,7 @@ import 'package:material_ui/material_ui.dart';
 
 import 'package:sourin_spike/core/device.dart';
 import 'package:sourin_spike/core/models.dart';
+import 'package:sourin_spike/ui/player/episode_panel.dart';
 import 'package:sourin_spike/ui/player_page.dart';
 import 'package:sourin_spike/ui/remote_bridge.dart';
 import 'package:sourin_spike/ui/widgets/episode_strip.dart';
@@ -226,9 +227,16 @@ Future<void> openEpisodeSheet(WidgetTester t) async {
 }
 
 /// 读**生产代码真正传给**「选集」面板的 `slideFrom`
+///
+/// ★ 2026-10-10 修：锚点从 `EpisodePanel` 换成 `PlayerEpisodePanel`。
+///   `df71848`（选集面板重做）把播放页那一层换成了
+///   `lib/ui/player/episode_panel.dart` 的 `PlayerEpisodePanel`，
+///   旧的 `EpisodePanel`（`widgets/episode_strip.dart`）只被**详情页**复用，
+///   播放页里**一个都不挂** ⇒ 这里恒读到空。
+///   ⚠️ 不要改回 `EpisodePanel`：那会让本读取器静默失效。
 Offset readEpisodeSlideFrom(WidgetTester t) {
   final f = find.ancestor(
-    of: find.byType(EpisodePanel),
+    of: find.byType(PlayerEpisodePanel),
     matching: find.byType(SheetTransition),
   );
   final ws = t.widgetList<SheetTransition>(f).toList();
@@ -236,7 +244,7 @@ Offset readEpisodeSlideFrom(WidgetTester t) {
   //    写成 `expect(ws, isNotEmpty, isTrue, ...)` 会编译错
   //    （3 个位置参数，WidgetTester.expect 只收 2 个）。
   expect(ws, isNotEmpty,
-      reason: '必须找到包着 EpisodePanel 的 SheetTransition —— '
+      reason: '必须找到包着 PlayerEpisodePanel 的 SheetTransition —— '
           '若为空，检查是不是忘了先打开面板');
   return ws.first.slideFrom;
 }
@@ -321,8 +329,9 @@ void main() {
           got,
           const Offset(24, 0),
           reason: '★ 桌面端「选集」是**右侧**抽屉 ⇒ 必须往右滑出。'
-              '接线在 player_page.dart：'
-              '`slideFrom: Device.isDesktop ? const Offset(24, 0) : const Offset(0, 24)`',
+              '接线在 player_page.dart（2026-10-09 Owner 第 12 条改成按**几何**分流）：'
+              '`slideFrom: _episodePanelIsDrawer(context) ? const Offset(24, 0) '
+              ': const Offset(0, 24)`',
         );
       }
       await drainTimers(t);
@@ -392,12 +401,25 @@ void main() {
        *   这是**测试环境的限制**，不是代码的问题 —— 如实标注。
        */
       final src = File('lib/ui/player_page.dart').readAsStringSync();
-      final idx = src.indexOf('slideFrom: Device.isDesktop');
+      /*
+       * ★ 2026-10-10 修：锚点字符串跟着生产改。
+       *   原锚点 `'slideFrom: Device.isDesktop'` 在 HEAD 生产里 indexOf = -1：
+       *   2026-10-09（Owner 第 12 条）把分流判据从**设备类型**换成**面板几何** ——
+       *   `slideFrom: _episodePanelIsDrawer(context)`（player_page.dart:11883），
+       *   判据是「宽 ≥ 高」（横屏=右侧侧栏 / 竖屏=底部面板）。
+       *   ⇒ 锚点换成 `'slideFrom: _episodePanelIsDrawer'`，
+       *     下面那两条「两个分支都必须存在」的断言**一字未动**：
+       *     它钉的仍然是「必须分流，不许写成常量」这个不变量。
+       *   ★ 为什么这条只能是静态判据：`Device._detect()` 在 Windows 上
+       *     恒返回 desktop（见本用例开头），而**新的几何判据没有这个限制** ——
+       *     真正的行为验证在组 B（挂真实 PlayerPage 读 widget 树）。
+       */
+      final idx = src.indexOf('slideFrom: _episodePanelIsDrawer');
       expect(
         idx,
         greaterThan(0),
-        reason: '★ 选集面板的 slideFrom 必须按端分流 —— '
-            '若被改成常量，手机端就会「从下面进来、往右边出去」',
+        reason: '★ 选集面板的 slideFrom 必须按**面板几何**分流 —— '
+            '若被改成常量，竖屏端就会「从下面进来、往右边出去」',
       );
 
       // ⚠️ 取到**行边界**为止（下一个 `slideFrom:` 或 400 字符封顶）——

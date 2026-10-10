@@ -650,7 +650,9 @@ void main() {
         '画面缩放', // 改前：底栏缩放按钮 / 紧凑档「更多」菜单项
         '字幕搜索', // 改前：设置面板里的入口，仍然可达
         '上一集', // 改前：底栏上一集按钮
-        '下一集', // 改前：底栏下一集按钮
+        // ★ 2026-10-10（Owner 第 6 条）「下一集」从这份清单里移除：
+        //   底栏 ⎓ 常驻就是它的全部入口，「更多」里再放一个就是重复。
+        //   能力没删（底栏仍可点、仍接 _gotoNextEpisode），删的是重复项。
       ]) {
         expect(
           body.contains("'$label'"),
@@ -660,6 +662,19 @@ void main() {
               '本轮**只允许换入口、不许删功能**',
         );
       }
+      // ★ 对应 Owner 第 6 条的反向门禁：下一集的入口必须唯一。
+      expect(
+        body.contains("label: '下一集'"),
+        isFalse,
+        reason: '★★「更多」里不得再有「下一集」——它与底栏 ⎓ 重复'
+            '（两处都调 _gotoNextEpisode）',
+      );
+      // ★ 底栏那一枚在 `lib/ui/player/player_bottom_bar.dart`里（本测试不引用它，直接读文件）。
+      expect(
+        stripComments(File(_barPath).readAsStringSync()).contains('Icons.skip_next'),
+        isTrue,
+        reason: '★★ 底栏 ⎓ 仍须在（入口唯一 ≠ 功能没了）',
+      );
       // ★ 投屏那一项由 `castEntry` 这个 getter 提供（它要放**真的 CastButton**，
       //   那个控件自己管代理与电视扫描，见 cast_button.dart 的类文档），
       //   所以它在 `_moreMenuGroups` 外面 —— 判据也跟着分开写。

@@ -27,6 +27,7 @@
 //   A  MaterialApp 裸壳（无 theme / 无 builder）        ← 引擎能不能画 MaterialApp
 //   B  A + 产品 theme:materialTheme                    ← 产品 ThemeData 有没有问题
 //   C  B + 产品 builder: FTheme→FToaster→WindowFrame→ColoredBox
+//   （C2 段同构复刻 FToaster 内部那一层 Overlay，见 :390-414）
 //                                                      ← 外壳那一串
 //   D  C + home: ShellPage（产品首页整棵树）             ← 真正的产品内容
 //   E  runApp(SourinApp(...))                          ← 与 t421 段 6 逐字相同
@@ -101,7 +102,8 @@ String _workDir = '';
 /// 2   B   + 产品 theme:materialTheme
 /// ── 以下五段把产品 builder 链（lib\shell.dart:1174-1458）**逐层**加上 ──
 /// 3   C1  + builder: AppThemeHost
-/// 4   C2  + FToaster                ← Overlay.wrap ⇒ Clip.hardEdge
+/// 4   C2  + Overlay(Clip.hardEdge)  ← 同构复刻 FToaster 那一层
+///     ↑ CR-26（2026-10-10）：原 builder 与 C1 逐字相同，这组对照已失效
 /// 5   C2n 机制探针：同构 Overlay，Clip.none（与 C2 是**最小对**）
 /// 6   C3  + WindowFrame             （Android 上 :562 直接 return child）
 /// 7   C4  + ColoredBox(floorColor)  ← **t423 段 3 就是这一层**
@@ -121,7 +123,7 @@ const List<int> kStageColors = <int>[
   0xFFE8001E, // 1  红     A MaterialApp 裸壳
   0xFF1EC863, // 2  绿     B + 产品 theme
   0xFFC81EC8, // 3  洋红   C1 + builder:AppThemeHost
-  0xFFE8C81E, // 4  黄     C2 + FToaster（Overlay.wrap ⇒ Clip.hardEdge）
+  0xFFE8C81E, // 4  黄     C2 Overlay Clip.hardEdge
   0xFF1EC8C8, // 5  青     C2n 机制探针：同构 Overlay，Clip.none
   0xFFC81E63, // 6  玫红   C3 + WindowFrame
   0xFF63C81E, // 7  草绿   C4 + ColoredBox（== t423 段 3，必须复现黑）
@@ -135,7 +137,7 @@ const List<String> kStageNames = <String>[
   'A_MaterialApp_bare',
   'B_plus_product_theme',
   'C1_plus_FTheme',
-  'C2_plus_FToaster',
+  'C2_plus_overlay_hardEdge',
   'C2n_overlay_clip_none',
   'C3_plus_WindowFrame',
   'C4_plus_ColoredBox',
@@ -387,13 +389,20 @@ Future<void> main() async {
   ));
   await _holdStage(3, 'C1 = B + builder:FTheme（纯 InheritedWidget）');
 
-  // ── C2：C1 + FToaster ───────────────────────────────────────
+  // ── C2：C1 + FToaster 内部那一层 Overlay（同构复刻）──────────
   // ★ 头号嫌疑：FToaster.build() 是
   //     `Overlay.wrap(child: Stack(clipBehavior: .none, fit: .passthrough, ...))`
   //   （forui-0.27.0\lib\src\widgets\toast\toaster.dart:410-412）
   //   而 `Overlay.wrap` 的 `clipBehavior` **默认 Clip.hardEdge**
   //   （flutter\...\widgets\overlay.dart:501-504）⇒ 它会在树里插进
   //   `_RenderTheater` + 一个 `ClipRectLayer`（overlay.dart:1531-1545）。
+  //
+  // ★ CR-26（2026-10-10）：这一段的 builder 原先与 C1 **逐字相同**（一个 Overlay 都没有），
+  //   于是「4 段 vs 5 段」根本不是最小对 —— 5 段比 4 段多一整层 Overlay，
+  //   把「4 黑 5 彩」读成「Clip.hardEdge 无罪」是错的。
+  //   现在 C2 把它声称的那一层 Overlay 真的插进去，与下一段只差 clipBehavior 一个自变量。
+  //   clipBehavior 这里**写死**成 Clip.hardEdge（就是 FToaster 走的那个默认值）：
+  //   写成字面量之后两段才能逐字对得上，Flutter 哪天改了默认值也不会把探针悄悄作废。
   runApp(RepaintBoundary(
     key: _rootKey,
     child: MaterialApp(
@@ -401,12 +410,19 @@ Future<void> main() async {
       theme: materialTheme,
       builder: (context, child) => AppThemeHost(
         data: materialTheme,
-        child: child ?? const SizedBox.shrink(),
+        child: Overlay.wrap(
+          clipBehavior: Clip.hardEdge, // ← 最小对：与 C2n 的**唯一**差别
+          child: Stack(
+            clipBehavior: Clip.none,
+            fit: StackFit.passthrough,
+            children: <Widget>[child ?? const SizedBox.shrink()],
+          ),
+        ),
       ),
-      home: const _Flat(color: Color(0xFFE8C81E), label: 'C2 + FToaster'),
+      home: const _Flat(color: Color(0xFFE8C81E), label: 'C2 Overlay Clip.hardEdge'),
     ),
   ));
-  await _holdStage(4, 'C2 = C1 + FToaster（内部 Overlay.wrap ⇒ Clip.hardEdge）');
+  await _holdStage(4, 'C2 = C1 + Overlay.wrap（clipBehavior: Clip.hardEdge）；与 C2n 只差这一个自变量');
 
   // ── C2n：C2 的**最小对** —— 同构 Overlay，只把 Clip 换成 none ──
   // 这一段的唯一作用是回答：「凶手是不是那一次裁剪？」
@@ -421,7 +437,7 @@ Future<void> main() async {
       builder: (context, child) => AppThemeHost(
         data: materialTheme,
         child: Overlay.wrap(
-          clipBehavior: Clip.none, // ← 与 C2 的**唯一**差别
+          clipBehavior: Clip.none, // ← 最小对：与 C2n 的**唯一**差别
           child: Stack(
             clipBehavior: Clip.none,
             fit: StackFit.passthrough,

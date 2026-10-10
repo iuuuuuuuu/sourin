@@ -31,6 +31,11 @@
 
 import 'dart:async';
 
+// ⚠️ 仓库铁律：lib/ 下**禁止** `package:flutter/material.dart`（test/theme_regression_test.dart
+//   全文本扫描）；`package:flutter/widgets.dart` / `rendering.dart` 是允许的
+//   （material_ui 只 re-export 了 widgets.dart，没有 rendering.dart ⇒ 这里必须显式引）。
+import 'package:flutter/rendering.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:material_ui/material_ui.dart';
 
 import '../tokens.dart';
@@ -77,10 +82,86 @@ class PopoverController extends ChangeNotifier {
   String? _openId;
   Timer? _closeTimer;
 
+  /// 每个 popover 入口的**屏幕矩形**（id → 那枚按钮当前占据的 Rect）
+  ///
+  /// ★★ OPS-5 ②（Owner 2026-10-10 反馈第 2 条）：面板以前只会贴在窗口右下角，
+  ///    因为控制器里**一个几何量都没有**（只有 `_openId`）⇒ 面板无从知道
+  ///    按钮在哪。这里补上「按钮在哪」这一半。
+  ///
+  /// # 为什么是「探针自己写进来」而不是「面板去读按钮的 RenderBox」
+  /// ```text
+  /// 面板与按钮是**兄弟**（都挂在页面那个整屏 Stack 下）。
+  /// 面板布局时去读按钮的 `RenderBox.size` 会撞上框架断言：
+  ///   'sizeAccessAllowed': RenderBox.size accessed beyond the scope of
+  ///   resize, layout, or permitted parent access
+  /// —— 只有父节点才有权读子节点的 size。
+  /// ⇒ 反过来：按钮那侧挂一个零尺寸的**探针**（`PopoverAnchorProbe`），
+  ///   它在**自己的** `performLayout` / `paint` 里算出自己的屏幕矩形并写进这里。
+  ///   底栏在 Stack 里排在面板之前 ⇒ 同一帧内按钮先布局、面板后布局，
+  ///   面板读到的永远是**本帧**的几何。
+  /// ```
+  final Map<String, Rect> _anchorRects = <String, Rect>{};
+
+  /// 谁写的这条矩形（探针的 RenderObject）—— 卸载时用来防止误删新探针的登记
+  final Map<String, Object> _anchorOwners = <String, Object>{};
+
+  /// 面板那一层自己的 key —— 把按钮的**全局**矩形换算成面板层的**局部**矩形
+  ///
+  /// 为什么需要换算：`SingleChildLayoutDelegate` 返回的偏移是相对面板层自己的
+  /// 坐标系，而探针量到的是全局坐标。两者只有在「面板层恰好贴在屏幕左上角」
+  /// 时才相等（播放页有标题栏 / 安全区时就不等）⇒ 老老实实换算。
+  final GlobalKey _layerKey = GlobalKey();
+
+  GlobalKey get layerKey => _layerKey;
+
+  bool _refreshScheduled = false;
+  bool _disposed = false;
+
   /// 当前展开的按钮 id（null = 都没展开）
   String? get openId => _openId;
 
   bool isOpen(String id) => _openId == id;
+
+  /// 探针上报自己的**全局**矩形（由 `_RenderPopoverAnchorProbe` 在自己的 paint 里调用）
+  ///
+  /// ⚠️ 这里**不能同步 notifyListeners()**：paint 之后同帧还有别的事要做，
+  ///    同步唤醒监听者会在帧中途再排一次 build。改成**帧后**通知，
+  ///    且只在矩形**真的变了**时才排（否则每帧都通知 = 每帧都重建）。
+  void reportAnchorRect(String id, Object owner, Rect globalRect) {
+    final layer = _layerBox;
+    final rect = layer == null
+        ? globalRect
+        : layer.globalToLocal(globalRect.topLeft) & globalRect.size;
+    final changed = _anchorRects[id] != rect;
+    _anchorOwners[id] = owner;
+    _anchorRects[id] = rect;
+    if (changed) _scheduleRefresh();
+  }
+
+  RenderBox? get _layerBox {
+    final ro = _layerKey.currentContext?.findRenderObject();
+    return ro is RenderBox && ro.attached ? ro : null;
+  }
+
+  /// 帧后刷新面板位置（窗口缩放 / 横竖屏切换后按钮挪了位，面板要跟着挪）
+  void _scheduleRefresh() {
+    if (_refreshScheduled || _disposed) return;
+    _refreshScheduled = true;
+    SchedulerBinding.instance.addPostFrameCallback((_) {
+      _refreshScheduled = false;
+      if (!_disposed) notifyListeners();
+    });
+  }
+
+  /// 探针卸载时注销（只在自己还是登记人时才删）
+  void forgetAnchorRect(String id, Object owner) {
+    if (!identical(_anchorOwners[id], owner)) return;
+    _anchorOwners.remove(id);
+    _anchorRects.remove(id);
+  }
+
+  /// 当前展开那枚按钮的屏幕矩形（还没上报 / 已卸载 ⇒ null）
+  Rect? anchorRectOf(String? id) => id == null ? null : _anchorRects[id];
 
   void toggle(String id) {
     _closeTimer?.cancel();
@@ -121,6 +202,7 @@ class PopoverController extends ChangeNotifier {
 
   @override
   void dispose() {
+    _disposed = true;
     _closeTimer?.cancel();
     super.dispose();
   }
@@ -352,6 +434,93 @@ class _PopoverKeepAliveState extends State<PopoverKeepAlive> {
 /// `MenuAnchor` 会把菜单挂到 overlay 里（层级与命中测试都另起一套），
 /// 而这里要的是「贴在按钮上方、跟着按钮走」的小卡片；自己挂在一个
 /// `Stack` 里位置更可控、也更容易做交叉淡出。
+/// 锚点探针 —— 把「这枚按钮在屏幕上的矩形」上报给 `PopoverController`。
+///
+/// ★★ OPS-5 ②：面板与按钮是兄弟节点，面板**不能**去读按钮的 `RenderBox`
+///    （框架断言：只有父节点有权读子节点 size —— 实测报错原文：
+///    'sizeAccessAllowed': RenderBox.size accessed beyond the scope of
+///    resize, layout, or permitted parent access）。
+///    反过来让按钮自己上报：探针在**自己的** `paint` 里算 `offset & size`，
+///    这两个量它自己有权读；且 Stack 的子件按顺序布局绘制 ⇒ 按钮先于面板
+///    完成绘制，面板同一帧就能拿到本帧的正确矩形。
+///
+/// 为什么是 `paint` 而不是 `performLayout`：`paint` 时自己的 `size` 已定稿，
+/// 祖先链的布局也全部完成（不会读到半成品）。零尺寸、不拦截命中测试，
+/// 对按钮本身没有任何影响。
+class _PopoverAnchorProbe extends SingleChildRenderObjectWidget {
+  const _PopoverAnchorProbe({
+    required this.controller,
+    required this.id,
+    required super.child,
+  });
+
+  final PopoverController controller;
+  final String id;
+
+  @override
+  RenderObject createRenderObject(BuildContext context) =>
+      _RenderPopoverAnchorProbe(controller: controller, id: id);
+
+  @override
+  void updateRenderObject(
+    BuildContext context,
+    _RenderPopoverAnchorProbe renderObject,
+  ) => renderObject
+    ..controller = controller
+    ..id = id;
+}
+
+class _RenderPopoverAnchorProbe extends RenderProxyBox {
+  _RenderPopoverAnchorProbe({
+    required PopoverController controller,
+    required String id,
+  }) {
+    // ⚠️ 不能写成 `this._controller` 初始化形参：下面有同名 setter，
+    //    初始化形参会和 setter 冲突（analyzer: prefer_initializing_formals
+    //    在这条上无法满足，故在构造函数体里赋值并显式豁免）。
+    // ignore: prefer_initializing_formals
+    _controller = controller;
+    // ignore: prefer_initializing_formals
+    _id = id;
+  }
+
+  late PopoverController _controller;
+  set controller(PopoverController value) {
+    if (identical(_controller, value)) return;
+    _controller.forgetAnchorRect(_id, this);
+    _controller = value;
+  }
+
+  late String _id;
+  set id(String value) {
+    if (_id == value) return;
+    _controller.forgetAnchorRect(_id, this);
+    _id = value;
+  }
+
+  bool _reported = false;
+
+  @override
+  void paint(PaintingContext context, Offset offset) {
+    // 自己的 size + 自己的 offset（= 相对最近的 repaint boundary / 祖先）
+    // ⇒ 换算成**全局**坐标再上报，控制器那边再换算成面板层的局部坐标。
+    if (hasSize && size.width > 0 && size.height > 0) {
+      _controller.reportAnchorRect(
+        _id,
+        this,
+        localToGlobal(Offset.zero) & size,
+      );
+      _reported = true;
+    }
+    super.paint(context, offset);
+  }
+
+  @override
+  void detach() {
+    if (_reported) _controller.forgetAnchorRect(_id, this);
+    super.detach();
+  }
+}
 class PopoverAnchorButton extends StatefulWidget {
   const PopoverAnchorButton({
     super.key,
@@ -417,12 +586,18 @@ class PopoverAnchorButtonState extends State<PopoverAnchorButton> {
     return MouseRegion(
       onEnter: (_) => _armOpen(),
       onExit: (_) => _armClose(),
-      child: Tooltip(
-        message: widget.tooltip ?? '',
-        child: GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTap: _onTap,
-          child: widget.child,
+      // ★ 探针包在**最外层**：上报的矩形 = 按钮本体（含 Tooltip / 内边距），
+      //   面板右缘对齐的就是它。零尺寸，不影响任何布局。
+      child: _PopoverAnchorProbe(
+        controller: widget.controller,
+        id: widget.id,
+        child: Tooltip(
+          message: widget.tooltip ?? '',
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: _onTap,
+            child: widget.child,
+          ),
         ),
       ),
     );

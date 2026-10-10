@@ -101,7 +101,21 @@ class AppUpdateController extends ChangeNotifier {
   static const repoOwner = 'sourin-app';
   static const repoName = 'sourin';
 
+  /// API 根。测试时指向回环服务器（见 [debugSetApiBaseForTest]）。
+  static String get apiBase => _apiBaseOverride ?? _apiBase;
+
   static const _apiBase = 'https://api.github.com';
+
+  static String? _apiBaseOverride;
+
+  /// 测试用：把 API 根指到回环服务器，让 [check] 不出网也能跑通
+  @visibleForTesting
+  // ignore: avoid_setters_without_getters
+  static void debugSetApiBaseForTest(String? base) => _apiBaseOverride = base;
+
+  /// 测试用：把 Release 资产的下载源指到别处（镜像回环服务器用）
+  @visibleForTesting
+  static String assetUrl = 'https://github.com/$repoOwner/$repoName/releases/download';
 
   // ── 状态 ──
   UpdateRouteConfig _route = const UpdateRouteConfig();
@@ -198,15 +212,23 @@ class AppUpdateController extends ChangeNotifier {
           ? await _fetchLatestOfAny()
           : await _fetchLatest();
       final newer = _pickNewer(releases: [rel], current: current);
+      // ⚠️ 检查时间必须在「是否被忽略」判断**之前**落盘（CR-07）：
+      // 旧代码在忽略分支直接 return，_lastCheckAt 从来没被写进去 ⇒
+      // shouldAutoCheck 恒为 true ⇒ 每次启动都重新查、重新弹窗，
+      // 「忽略此版本」等于白按。
+      _lastCheckAt = DateTime.now();
+      UiPrefs.set(_kLastCheck, _lastCheckAt!.toIso8601String());
       if (newer != null && newer.tag == _ignoredVersion) {
+        // 手动检查（「关于」页）仍把 release 交回 UI，用户可以反悔；
+        // 自动检查（启动弹窗）只认 release != null，所以这里必须置空。
+        _available = manual ? newer : null;
+        if (manual) notifyListeners();
         return UpdateCheckResult(
           checked: true,
-          release: newer,
+          release: manual ? newer : null,
           message: '已是最新版本',
         );
       }
-      _lastCheckAt = DateTime.now();
-      UiPrefs.set(_kLastCheck, _lastCheckAt!.toIso8601String());
       _available = newer;
       notifyListeners();
       return UpdateCheckResult(
@@ -257,13 +279,13 @@ class AppUpdateController extends ChangeNotifier {
   }
 
   Future<ReleaseInfo> _fetchLatest() async {
-    final body = await _http.getText(Uri.parse('$_apiBase/repos/$repoOwner/$repoName/releases/latest'),
+    final body = await _http.getText(Uri.parse('$apiBase/repos/$repoOwner/$repoName/releases/latest'),
         headers: {'Accept': 'application/vnd.github+json'});
     return parseReleaseJson(jsonDecode(body) as Map<String, dynamic>);
   }
 
   Future<ReleaseInfo> _fetchLatestOfAny() async {
-    final body = await _http.getText(Uri.parse('$_apiBase/repos/$repoOwner/$repoName/releases?per_page=20'),
+    final body = await _http.getText(Uri.parse('$apiBase/repos/$repoOwner/$repoName/releases?per_page=20'),
         headers: {'Accept': 'application/vnd.github+json'});
     final list = parseReleaseListJson(jsonDecode(body) as List<dynamic>);
     if (list.isEmpty) throw ReleaseParseException('没有可用的发布记录');
@@ -281,8 +303,9 @@ class AppUpdateController extends ChangeNotifier {
   /// 下载某个 Release 的本平台安装包
   ///
   /// - [onDone] 返回可打开的文件路径；null 表示失败（已记进 [download].error）
-  /// 校验：优先下载 Release 里的 `SHA256SUMS.txt`；**取不到就跳过校验并继续**
-  ///（不因为一个校验文件缺失就把用户堵死在"无法更新"）。
+  /// 校验：用 Release 里的 `SHA256SUMS.txt` 对下载到的包做 SHA-256 比对。
+  /// 校验表**一律直连可信源**取（镜像模式下也不走镜像），取不到 / 缺条目 /
+  /// 哈希不符 ⇒ 一律判为失败，删掉安装包并返回 null（见 [verifySha256]）。
   Future<File?> downloadRelease(
     ReleaseInfo rel, {
     void Function(UpdateDownloadState)? onProgress,
@@ -367,21 +390,31 @@ class AppUpdateController extends ChangeNotifier {
 
   /// 用 Release 里的 `SHA256SUMS.txt` 校验一个文件
   ///
-  /// 读不到校验表 ⇒ 返回 true（不阻塞更新）。
-  /// 校验不过 ⇒ 返回 false（调用方负责删掉）。
+  /// # 校验表必须来自可信源（CR-08 / CWE-494）
+  ///
+  /// 旧代码把校验表也按当前路线（镜像）改写，于是被控镜像可以**同时**替换
+  /// `SHA256SUMS.txt` 和安装包 —— 摘要对得上，校验形同虚设。
+  /// 现在：镜像模式下校验表一律**直连**取，不经镜像。
+  ///
+  /// # 失败一律拒绝安装
+  ///
+  /// 取不到校验表 / 表里没有这个资产 ⇒ 无法证明完整性，返回 false 让调用方
+  /// 删掉安装包。CI 每个 Release 都会产出 `SHA256SUMS.txt`
+  /// （见 `.github/workflows/build.yml`），所以「取不到」只意味着网络或上游出
+  /// 了问题，不该拿来放行一个来路不明的可执行文件。
   Future<bool> verifySha256(File file, String assetName, {required String tag}) async {
-    if (tag.isEmpty) return true;
+    if (tag.isEmpty) return false;
+    final viaMirror = _route.route == UpdateRoute.mirror;
+    // 校验表只认直连：镜像模式下换一条 direct 配置去取
+    final verifyHttp =
+        UpdateHttp(viaMirror ? _route.copyWith(route: UpdateRoute.direct) : _route);
+    final sumsUrl = Uri.parse('$assetUrl/$tag/SHA256SUMS.txt');
     try {
-      final sumsUrl =
-          'https://github.com/$repoOwner/$repoName/releases/download/$tag/SHA256SUMS.txt';
-      // ⚠️ 校验表本身也要能下载 ⇒ 同样按当前路线改写
-      final text = await _http.getText(
-        Uri.parse(RouteRewriter(_route).rewriteDownloadUrl(sumsUrl)),
-      );
+      final text = await verifyHttp.getText(sumsUrl);
       final want = expectedSha256(parseSha256Sums(text), assetName);
       if (want == null) {
-        AppLog.write('UPDATE', '校验表里没有 $assetName，跳过校验');
-        return true;
+        AppLog.write('UPDATE', '校验表里没有 $assetName ⇒ 判为校验失败');
+        return false;
       }
       final got = await sha256OfFile(file);
       if (got != want) {
@@ -390,8 +423,8 @@ class AppUpdateController extends ChangeNotifier {
       }
       return true;
     } catch (e) {
-      AppLog.write('UPDATE', '取校验表失败（跳过校验）: $e');
-      return true;
+      AppLog.write('UPDATE', '取校验表失败（判为校验失败，不放行）: $e');
+      return false;
     }
   }
 }

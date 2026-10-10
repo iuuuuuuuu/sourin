@@ -785,8 +785,15 @@ void real() {}
           codeOf('lib/ui/player/player_more_menu.dart');
       expect(src.contains("label: '上一集'"), isTrue,
           reason: '★ 上一集入口必须存在（现在在「更多」浮层的剧集组）');
-      expect(src.contains("label: '下一集'"), isTrue,
-          reason: '★ 下一集入口必须存在（底栏常驻，「更多」里也有）');
+      // ★ 2026-10-10（Owner 第 6 条：「更多」里的下一集与底栏重复，删掉）：
+      //   入口必须**唯一** —— 底栏 ⎓ 常驻那一枚就是「下一集」的全部入口。
+      //   能力没删（底栏仍可点、仍接 _gotoNextEpisode），删的是重复项。
+      expect(src.contains("label: '下一集'"), isFalse,
+          reason: '★「更多」里不该再有「下一集」—— 它与底栏 ⎓ 是同一个功能'
+              '（两处都调 _gotoNextEpisode）');
+      expect(codeOf('lib/ui/player/player_bottom_bar.dart')
+              .contains('Icons.skip_next'), isTrue,
+          reason: '★ 底栏仍必须保留「下一集」按钮（入口唯一 ≠ 功能没了）');
       // 低频项不许消失：它们正是被收进「更多」的东西
       for (final item in ['所有直播', '片头片尾', '画中画', '投屏', '截图']) {
         expect(src.contains(item), isTrue,

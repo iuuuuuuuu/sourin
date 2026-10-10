@@ -26,7 +26,7 @@ import 'package:sourin_spike/core/models.dart';
 import 'package:sourin_spike/core/ui_prefs.dart';
 
 Directory _sandboxRoot() {
-  final p = '${Directory.systemTemp.absolute.path}\\t11_panel';
+  final p = '${Directory.systemTemp.absolute.path}${Platform.pathSeparator}t11_panel';
   final d = Directory(p);
   if (!d.isAbsolute) fail('★ 沙盒必须是绝对路径，实际 = $p');
   if (!d.existsSync()) d.createSync(recursive: true);
@@ -117,6 +117,47 @@ Future<void> _waitTerminal(String id, {int timeoutMs = 120000}) async {
   }
 }
 
+/// ★★ 等目录里的文件**不再变化**（连续 [quietMs] 内两次清点结果相同）
+///
+/// # 为什么需要（Lead 2026-10-10 抓到的一处真竞态）
+/// `DownloadQueue._run` 里 **`state=done` 是先发布、后写旁文件**的：
+/// ```text
+/// download_queue.dart:1038-1046  copyWith(state: done) + _publish()   ← 任务变 done
+/// download_queue.dart:1059-1061  await _writeSidecarFor(t, dir)      ← 之后才写
+///                                    └─ 内含 cacheCoverImage(url) 的
+///                                       8s 连接 / 20s 读取超时
+/// ```
+/// 而探针的 [_waitTerminal] 只看 `state` ⇒ 它一看到 done 就返回，
+/// 此刻 `_sourin-cache.json` **可能还没落盘**（封面 URL 不可达时会卡满超时）。
+/// ⇒ 紧接着手工清点目录就比预览少一个文件 ⇒ ④ 那条断言偶发
+/// `Expected: <6> / Actual: <7>`（差 1 正好是旁文件），**与产品缺陷无关**。
+///
+/// ⇒ 这里显式等「安静」：目录连续两次清点结果相同且间隔 `[quietMs]` 才算稳。
+Future<int> _stableFileCount(Directory dir, {
+  int quietMs = 900,
+  int timeoutMs = 40000,
+}) async {
+  final deadline = DateTime.now().add(Duration(milliseconds: timeoutMs));
+  var last = -1;
+  var sameSince = DateTime.now();
+  while (DateTime.now().isBefore(deadline)) {
+    var n = 0;
+    if (await dir.exists()) {
+      await for (final e in dir.list(followLinks: false)) {
+        if (e is File) n++;
+      }
+    }
+    if (n == last) {
+      if (DateTime.now().difference(sameSince).inMilliseconds >= quietMs) return n;
+    } else {
+      last = n;
+      sameSince = DateTime.now();
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 150));
+  }
+  return last;
+}
+
 Future<void> _waitFor(bool Function() pred, {int timeoutMs = 30000}) async {
   final dl = DateTime.now().add(Duration(milliseconds: timeoutMs));
   while (!pred() && DateTime.now().isBefore(dl)) {
@@ -137,7 +178,7 @@ void main() {
     await ups.start();
     DownloadQueue.debugSetResolver((t) async =>
         StreamCandidate(url: 'http://127.0.0.1:${ups.port}/master.m3u8'));
-    final d = Directory('${_sandboxRoot().path}\\work')..createSync(recursive: true);
+    final d = Directory('${_sandboxRoot().path}${Platform.pathSeparator}work')..createSync(recursive: true);
     DownloadDir.setConfiguredDir(d.path);
     dir = d.path;
   });
@@ -165,8 +206,8 @@ void main() {
         DownloadQueue.tasks.value.first.state == DownloadState.paused,
         timeoutMs: 10000);
     final t1 = DownloadQueue.tasks.value.first;
-    final part = File('$dir\\探针剧\\第01集 探针.ts.part');
-    final partAlt = File('$dir\\探针剧\\第01集 探针.part');
+    final part = File('$dir${Platform.pathSeparator}探针剧${Platform.pathSeparator}第01集 探针.ts.part');
+    final partAlt = File('$dir${Platform.pathSeparator}探针剧${Platform.pathSeparator}第01集 探针.part');
     final exists = part.existsSync() || partAlt.existsSync();
     final len = part.existsSync()
         ? part.lengthSync()
@@ -197,7 +238,7 @@ void main() {
     debugPrint('MEASURE 续传：继续后新增分片=$delta（若重下会是 ${t2.total}）');
     expect(delta, lessThan(t2.total),
         reason: '★ 必须少于总片数 —— 否则就是从头重下了');
-    final finalFile = File('$dir\\探针剧\\第01集 探针.ts');
+    final finalFile = File('$dir${Platform.pathSeparator}探针剧${Platform.pathSeparator}第01集 探针.ts');
     debugPrint('MEASURE 完成后落定文件存在=' +
         '${finalFile.existsSync()} 长度=' +
         '${finalFile.existsSync() ? finalFile.lengthSync() : 0}');
@@ -207,7 +248,7 @@ void main() {
   test('③ 删除单集 ⇒ 文件从盘上消失（真删真读）', () async {
     DownloadQueue.enqueue(_task('探针剧', 1));
     await _waitTerminal('cctv:m1:ep1');
-    final f = File('$dir\\探针剧\\第02集 探针.ts');
+    final f = File('$dir${Platform.pathSeparator}探针剧${Platform.pathSeparator}第02集 探针.ts');
     debugPrint('MEASURE 删除前 成品存在=${f.existsSync()} '
         '长度=${f.existsSync() ? f.lengthSync() : 0}');
     expect(f.existsSync(), isTrue, reason: '前置：应已下完');
@@ -227,12 +268,12 @@ void main() {
     for (var k = 0; k < 3; k++) {
       await _waitTerminal('cctv:m1:ep${k + 2}');
     }
-    final workDir = Directory('$dir\\探针剧');
-    var files = 0;
+    final workDir = Directory('$dir${Platform.pathSeparator}探针剧');
+    // ★ 先等目录安静下来（旁文件在 state=done **之后**才写，见 _stableFileCount 注释）
+    final files = await _stableFileCount(workDir);
     var bytes = 0;
     await for (final e in workDir.list()) {
       if (e is File) {
-        files++;
         bytes += (await e.length()).toInt();
       }
     }

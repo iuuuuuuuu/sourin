@@ -224,8 +224,60 @@ void main() {
     debugPrint('A-3 fileUrl  = ${req.fileUrl}');
     expect(req.provider, kLocalProvider);
     expect(req.mediaId, canonicalLocalPath(req.episodeAbsolutePath));
-    expect(req.mediaId, isNot(equals(req.episodeAbsolutePath)),
-        reason: '★ mediaId 是**规范化后**的 key（小写、正斜杠），与原始路径不同');
+    /*
+     * ★★ OPS-18（macOS CI 红）：原判据是
+     *   expect(req.mediaId, isNot(equals(req.episodeAbsolutePath)));
+     * 它**不是**平台无关的契约 —— 只在 Windows 上成立：
+     *   · Windows：canonicalLocalPath 走 canonicalLocalPathAs(windows: true)
+     *     ⇒ 折小写 ⇒ mediaId（小写）必然 != 原始路径
+     *   · POSIX：大小写敏感 ⇒ **不许**折小写（见 cache_page.dart:924-928：折了会把
+     *     /movies/E1.mp4 与 /movies/e1.mp4 两个**不同文件**算成同一个续播 key）
+     *     ⇒ mediaId **等于**原始路径 ⇒ 这条在 macOS 上必红。
+     *
+     * ⇒ 这里改成**参数化**断言，把「平台差异」这件事本身钉死：
+     *   同一条 workDir 同时按 Windows 与 POSIX 两种语义规范化，逐条断言
+     *   两边各自**应该**算出什么。这样在 Windows 机器上也能确定性地证明
+     *   POSIX 语义（不需要真 macOS），而不是用 Platform.isWindows 把断言跳掉
+     *   （跳过 = 在 macOS 上什么都没测 = 另一种假门禁）。
+     */
+    final raw = req.episodeAbsolutePath;
+    final asWin = canonicalLocalPathAs(raw, windows: true);
+    final asPosix = canonicalLocalPathAs(raw, windows: false);
+    debugPrint('A-3 规范化(win)   = ' + asWin);
+    debugPrint('A-3 规范化(posix) = ' + asPosix);
+    expect(asWin, req.mediaId,
+        reason: '★ Windows 语义下 mediaId 就是规范化后的 key');
+    expect(asWin.toLowerCase(), asWin,
+        reason: '★ Windows 规范化必须整体折小写（NTFS 大小写不敏感）');
+    expect(asWin, isNot(equals(raw)),
+        reason: '★ Windows：折小写后与原始路径不同 —— 这正是原判据要钉的那条');
+    expect(asPosix, raw.replaceAll(Platform.pathSeparator, '/'),
+        reason: '★ POSIX 语义：除了分隔符统一（那条全平台无条件执行），'
+            '其余**逐字保留**：不折大小写（POSIX 大小写敏感）');
+    expect(asPosix, isNot(equals(asWin)),
+        reason: '★ 两种平台语义必须真的不同 —— 否则上面的参数化断言是空的');
+
+    /*
+     * ★★★ 直接复现「macOS 上原判据必红」的机制：
+     * POSIX 形状的绝对路径上，规范化是**恒等**的
+     *   ⇒ mediaId == episodeAbsolutePath ⇒ isNot(equals(...)) 必红。
+     * 这条在 Windows 上也一样成立（纯函数 + 显式 windows:），
+     * 所以它在本机就能证明 macOS 的语义 —— 不靠平台跳过。
+     */
+    const posixEp = '/Users/runner/Movies/MyShow/E1.mp4';
+    expect(canonicalLocalPathAs(posixEp, windows: false), posixEp,
+        reason: '★★ POSIX 上规范化是恒等的 ⇒ 原判据 isNot(equals(episodeAbsolutePath))'
+            '在 macOS 上必红（这就是 CI 红的根因）');
+    expect(canonicalLocalPathAs(posixEp, windows: true), isNot(posixEp),
+        reason: '★ 反向自检：同一条路径在 Windows 语义下**必须**不等（折小写）'
+            '—— 否则上面那条 POSIX 断言就是空的（两边都一样）');
+    // ★ 大小写敏感的直接证据：只差大小写的两条 POSIX 路径不许折成同一个 key
+    expect(canonicalLocalPathAs('/Users/a/Movies/E1.mp4', windows: false),
+        isNot(canonicalLocalPathAs('/Users/a/Movies/e1.mp4', windows: false)),
+        reason: '★ POSIX 大小写敏感 ⇒ 两个**不同文件**不能共用一个续播 key');
+    expect(canonicalLocalPathAs('/Users/a/Movies/E1.mp4', windows: true),
+        canonicalLocalPathAs('/Users/a/Movies/e1.mp4', windows: true),
+        reason: '★ Windows 大小写不敏感 ⇒ 同一个文件必须同一个 key');
     expect(req.episodeAbsolutePath.startsWith(workDir), isTrue);
   });
 

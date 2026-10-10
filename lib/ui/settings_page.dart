@@ -51,9 +51,11 @@ import 'package:flutter/services.dart';
 import '../core/device.dart';
 import '../core/player_gestures.dart';
 import '../core/sourin_api.dart';
+import '../core/ui_prefs.dart';
 import 'app_theme.dart';
 import 'remote_bridge.dart';
 import 'tokens.dart';
+import 'widgets/app_loading.dart';
 import 'widgets/qr_view.dart';
 /*
  * ═══════════════════════════════════════════════════════════════════════
@@ -862,7 +864,11 @@ class SettingsPageState extends State<SettingsPage> {
   /// ⚠️ 与 `_OrderDialog._move` 的边界处理**必须一致** ——
   ///    那边也是 `if (j < 0 || j >= len) return;`。
   Future<void> _moveProviderBy(String id, int delta) async {
-    final ids = _providers.map((p) => p.id).toList();
+    // ★ 位置必须算在「JS 插件」tab 渲染的那个子序列里（`list` 就是它），
+    //   再用 [reorderSubsetIds] 把换位落到**新的全局顺序**上。
+    //   旧代码拿 `_providers` 的全局下标切表 ⇒ 移走的是别的源。
+    final subset = _nonLiveProviders;
+    final ids = subset.map((p) => p.id).toList();
     final i = ids.indexOf(id);
     // id 不在列表里（列表过期）→ 如实提示，不静默
     if (i < 0) {
@@ -871,9 +877,14 @@ class SettingsPageState extends State<SettingsPage> {
     }
     final j = i + delta;
     if (j < 0 || j >= ids.length) return; // 边界：静默不动
-    ids.removeAt(i);
-    ids.insert(j, id);
-    await _persistOrder(ids, '顺序已保存（{} 个源）');
+    final next = reorderSubsetIds(
+      allIds: _providers.map((p) => p.id).toList(),
+      subsetIds: ids,
+      oldIndex: i,
+      newIndex: j,
+    );
+    if (next == null) return;
+    await _persistOrder(next, '顺序已保存（{} 个源）');
   }
 
   /// ★ 拖动排序（`ReorderableListView.onReorderItem`）
@@ -910,10 +921,18 @@ class SettingsPageState extends State<SettingsPage> {
     // 原地放下 → 直接返回，避免白写一次盘（拖动时轻微抖动就会触发）
     if (newIndex == oldIndex) return;
 
-    final ids = _providers.map((p) => p.id).toList();
-    final moved = ids.removeAt(oldIndex);
-    ids.insert(newIndex, moved);
-    await _persistOrder(ids, '顺序已保存（{} 个源）');
+    // ★ oldIndex / newIndex 都是**「JS 插件」tab 内**的下标
+    //   （那个 tab 画的是 `_nonLiveProviders`，见 `_pluginsBlock`），
+    //   拿它们去切全局 `_providers` 会移走**别的源** ——
+    //   换位只发生在子序列内部，落盘的仍是新的全局顺序，见 [reorderSubsetIds]。
+    final next = reorderSubsetIds(
+      allIds: _providers.map((p) => p.id).toList(),
+      subsetIds: _nonLiveProviders.map((p) => p.id).toList(),
+      oldIndex: oldIndex,
+      newIndex: newIndex,
+    );
+    if (next == null) return;
+    await _persistOrder(next, '顺序已保存（{} 个源）');
   }
 
   // ═══════════════════════════════════════════════════════════════════
@@ -1776,7 +1795,10 @@ class SettingsPageState extends State<SettingsPage> {
      * 并同步更新上面那条测试的匹配串。两件事**必须一起做**。
      */
     if (_loading) {
-      return const Center(child: CircularProgressIndicator());
+      // ★ OPS-14：换成共享组件（原来没给尺寸 ⇒ Material 默认 40×40、描边 4px）。
+      // ⚠ 判据本身（`_loading`）一个字没动 —— 上面那段关于
+      //   `orchestrator_scroll_fix_verified_test.dart` 的防御性记录仍然成立。
+      return const Center(child: AppLoading());
     }
 
     return Stack(
@@ -2419,13 +2441,13 @@ class SettingsPageState extends State<SettingsPage> {
   List<ProviderManifest> get _nonLiveProviders =>
       _providers.where((p) => !p.capabilities.live).toList(growable: false);
 
-  /// 直播源子序列的换位 —— **纯函数**（不碰 FFI / 不碰状态，可直接单测）
+  /// ★ 子序列换位的**通用**纯函数（不碰 FFI / 不碰状态，可直接单测）
   ///
-  /// # 为什么需要它（而不是直接用 `_onReorderProviders`）
+  /// # 为什么需要它
   ///
-  /// 「直播源」tab 只显示 `_liveSources`（`_providers` 的子序列），
-  /// 而 `_onReorderProviders` / `_moveProviderBy` 收的是 **`_providers`
-  /// 的全局下标** ⇒ 把 tab 里的下标直接传进去会**移错人**：
+  /// 两个 tab 各自只画 `_providers` 的**一个子序列**（`_nonLiveProviders` /
+  /// `_liveSources`），但 `ReorderableCardGrid` 交回来的下标是
+  /// "**tab 内**的第几格"。若直接拿它去切全局 `_providers`，就会**移错人**：
   /// ```text
   /// 全 26 个源里 2 个直播（下标 0 和 5）：
   ///   用户在第 1 张卡上点「下移」→ 传 (0, 1) 给全局路径
@@ -2433,25 +2455,25 @@ class SettingsPageState extends State<SettingsPage> {
   ///   → 直播 tab 里两张卡的顺序**一点没变**（看着像"按钮坏了"）
   /// ```
   ///
-  /// ⇒ 这里只在**直播子序列内部**换位，返回一份**新的全局顺序**：
-  ///   把 `liveIds[oldIndex]` 摘出来，插到 `liveIds[newIndex]` 的
-  ///   前/后（按移动方向决定），非直播源的相对顺序**一个都不动**。
+  /// ⇒ 只在**子序列内部**换位，返回一份**新的全局顺序**：
+  /// 把 `subsetIds[oldIndex]` 摘出来，插到 `subsetIds[newIndex]` 的
+  /// 前/后（按移动方向决定），**不在子集里的源相对顺序一个都不动**。
   ///
   /// 返回 `null` = 无需改动（越界 / 原地放下 / 找不到锚点）——
   /// 调用方据此**跳过落盘**，避免白写一次盘。
-  static List<String>? reorderLiveIds({
+  static List<String>? reorderSubsetIds({
     required List<String> allIds,
-    required List<String> liveIds,
+    required List<String> subsetIds,
     required int oldIndex,
     required int newIndex,
   }) {
-    if (oldIndex < 0 || oldIndex >= liveIds.length) return null;
+    if (oldIndex < 0 || oldIndex >= subsetIds.length) return null;
     if (newIndex < 0) newIndex = 0;
-    if (newIndex >= liveIds.length) newIndex = liveIds.length - 1;
+    if (newIndex >= subsetIds.length) newIndex = subsetIds.length - 1;
     if (newIndex == oldIndex) return null;
 
-    final moved = liveIds[oldIndex];
-    final anchor = liveIds[newIndex];
+    final moved = subsetIds[oldIndex];
+    final anchor = subsetIds[newIndex];
 
     final out = List<String>.of(allIds);
     if (!out.remove(moved)) return null;
@@ -2463,6 +2485,23 @@ class SettingsPageState extends State<SettingsPage> {
     return out;
   }
 
+  /// 直播源子序列的换位 —— [reorderSubsetIds] 的直播版（保持旧名不破调用方）
+  ///
+  /// 「直播源」tab 只显示 `_liveSources`（`_providers` 的子序列），
+  /// 而排序回调收的是**tab 内下标** ⇒ 必须走子集换位，理由见上面。
+  static List<String>? reorderLiveIds({
+    required List<String> allIds,
+    required List<String> liveIds,
+    required int oldIndex,
+    required int newIndex,
+  }) {
+    return reorderSubsetIds(
+      allIds: allIds,
+      subsetIds: liveIds,
+      oldIndex: oldIndex,
+      newIndex: newIndex,
+    );
+  }
   /// 「直播源」tab 拖动排序
   Future<void> _onReorderLive(int oldIndex, int newIndex) async {
     final live = _liveSources;
@@ -2652,9 +2691,12 @@ class SettingsPageState extends State<SettingsPage> {
      * 而不是回归）。
      * ```
      *
-     * ⚠️ 排序仍然作用于**全局** `_providers`（三条排序路径都没变）——
-     *    只是这里**画**的是子集。若改成对子集排序，
-     *    非直播源与直播源之间的相对顺序会被打乱（那是另一个 bug）。
+     * ★ 排序也只作用于这个子序列（CR-19）：`_onReorderProviders` /
+     *   `_moveProviderBy` 收到的下标是**本 tab 内**的下标，按全局
+     *   `_providers` 切表就会移走**别的源**（直播源在全局表里的位置是
+     *   交错的）。两条路径都改走 [reorderSubsetIds]：换位只发生在
+     *   子序列内部，落盘时返回的仍是**新的全局顺序**，
+     *   直播源之间的相对顺序一个都不动。
      */
     final list = _nonLiveProviders;
     /*
@@ -5316,9 +5358,22 @@ enum _ChipTone { plain, brand, off, danger }
 ///
 /// ```text
 /// ┌ ⌁▾ 局域网遥控  没开启 · 手机浏览器遥控，不用装 App ┐
+/// ┌ ⌁▾ 局域网遥控  运行中 · 手机浏览器遥控，不用装 App ┐  ← ★ OPS-15
 /// ```
 /// 一行说清「是什么 + 现在什么状态」，想配的人点一下就展开 ——
 /// 与本页其它入口行（`SettingsEntryRow`）同一形态。
+///
+/// ★★ OPS-15：那一行的前半句**必须跟 `running` 走**。
+///   改前写死「没开启」，遥控明明在跑也这么说 —— 用户看到自己正在用的
+///   功能被标成「没开启」，比不显示还糟。文案见 `_collapsedSubtitle`。
+///
+/// # ★★ 展开/收起要**记住**（OPS-15）
+///
+/// 收起态是用户主动关掉的，不是页面初始状态 ⇒ 必须落盘。
+/// 判据是**三态**（从没碰过 / 点开了 / 收起了），见 `_RemoteBlockState._userPref`：
+/// 从没碰过时跟随 `running`（否则首次进入本页、遥控正在跑，用户会以为
+/// 功能没了），一旦手动过就只认记忆（否则点「收起」会被 `running` 顶回来，
+/// 这正是 Owner 报的「收齐点击也没效果」）。
 ///
 /// # 展开态
 ///
@@ -5326,6 +5381,7 @@ enum _ChipTone { plain, brand, off, danger }
 /// 末尾多一行「收起」入口 —— 折叠了却没法展开回来是不行的。
 class _RemoteBlock extends StatefulWidget {
   const _RemoteBlock({
+    super.key,
     required this.running,
     required this.autoStart,
     required this.busy,
@@ -5348,14 +5404,54 @@ class _RemoteBlock extends StatefulWidget {
 }
 
 class _RemoteBlockState extends State<_RemoteBlock> {
-  /// ★ 默认收起；一旦**用户自己**展开过就记住（否则每次进设置页
-  ///   都要重新点开，反复配置的用户会觉得这个折叠很烦）。
+  /// ★★ OPS-15：用户**手动**决定的展开态。
   ///
-  /// 「已在运行」时**强制展开** —— 那种情况下用户多半是来改 PIN /
-  /// 停掉它，折叠起来等于把正在用的功能藏了。
-  bool _open = false;
+  ///  # 三态，而不是两态
+  ///
+  ///  ```dart
+  ///  null  = 用户从没手动碰过 ⇒ 跟随 [widget.running]
+  ///  true  = 用户点开了    ⇒ 一直展开（哪怕遥控没在运行）
+  ///  false = 用户收起了    ⇒ 一直收起（**哪怕遥控正在运行**）
+  ///  ```
+  ///
+  ///  ★ 缺陷（改前）只有两态，`_shouldOpen => _open || widget.running`：
+  ///    遥控在跑时 `widget.running` 恒为 true，点「收起」只把 `_open`
+  ///    置 false，`_shouldOpen` 立刻又变回 true ⇒ **点了没反应**
+  ///    （Owner 原话：「这个局域网遥控这里的 收齐点击也没效果」）。
+  ///
+  ///  ★ 三态才能同时满足两条互相拉扯的需求：
+  ///    ① 遥控运行中**也要能收起**（记忆优先于 running）；
+  ///    ② 从没手动碰过时仍**跟随 running** —— 否则首次进入本页
+  ///       遥控明明开着却是收起的，用户会以为功能没了。
+  bool? _userPref;
 
-  bool get _shouldOpen => _open || widget.running;
+  /// 持久化键 —— 走仓库既有 `UiPrefs` 通道（`<数据目录>/ui-prefs.json`），
+  /// 命名与 `dsh.danmaku.*` / `dsh.download.*` 同一套习惯。
+  static const String openPrefKey = 'dsh.settings.remoteBlockOpen';
+
+  @override
+  void initState() {
+    super.initState();
+    // ⚠️ 只在 initState 读一次：这是**用户意图**，不是 widget 状态的镜像。
+    //    在 build 里读会让「遥控中途起来了」把用户收起的区块重新撑开。
+    final raw = UiPrefs.get(openPrefKey);
+    _userPref = raw == null ? null : raw == '1';
+  }
+
+  /// 没记忆过 ⇒ 跟随 running；记忆过 ⇒ 只认记忆。
+  bool get _shouldOpen => _userPref ?? widget.running;
+
+  /// 展开/收起并**记住**（Owner 原话：「这个要持久记忆的,下次重新打开也要记住」）
+  void _setOpen(bool v) {
+    setState(() => _userPref = v);
+    UiPrefs.set(openPrefKey, v ? '1' : '0');
+  }
+
+  /// 收起态那一行的状态文案 —— ★ 跟着 `running` 走（改前写死「没开启」，
+  /// 遥控明明在跑也这么说，等于告诉用户功能没开）
+  String get _collapsedSubtitle => widget.running
+      ? '运行中 · 手机浏览器遥控，不用装 App'
+      : '没开启 · 手机浏览器遥控，不用装 App';
 
   @override
   Widget build(BuildContext context) {
@@ -5366,7 +5462,7 @@ class _RemoteBlockState extends State<_RemoteBlock> {
         type: MaterialType.transparency,
         child: InkWell(
           borderRadius: Radii.rLg,
-          onTap: () => setState(() => _open = true),
+          onTap: () => _setOpen(true),
           child: Container(
             padding: const EdgeInsets.symmetric(
               horizontal: Sp.x4,
@@ -5392,7 +5488,7 @@ class _RemoteBlockState extends State<_RemoteBlock> {
                       ),
                       const SizedBox(height: 2),
                       Text(
-                        '没开启 · 手机浏览器遥控，不用装 App',
+                        _collapsedSubtitle,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
@@ -5419,7 +5515,7 @@ class _RemoteBlockState extends State<_RemoteBlock> {
     return SettingsBlock(
       title: '局域网遥控',
       trailing: TextButton(
-        onPressed: widget.busy ? null : () => setState(() => _open = false),
+        onPressed: widget.busy ? null : () => _setOpen(false),
         child: const Text('收起'),
       ),
       children: [
@@ -5437,6 +5533,18 @@ class _RemoteBlockState extends State<_RemoteBlock> {
     );
   }
 }
+
+/// ★ OPS-15：`_RemoteBlock` 的公开别名（只加名字，**不改任何行为**）
+///
+/// # 为什么需要
+///
+/// 这个区块壳的行为（展开/收起 + 持久记忆）本身就是**产品契约**，
+/// 必须能被测试**真挂载** —— 而 Dart 的私有类跨文件不可见。
+/// 与本文件 :227-231 那 5 个 `typedef`（`SettingsBlock` 等）同一做法。
+///
+/// ⚠️ 别名只是别名：`_RemoteBlockState` 仍是私有类，测试只经公开
+///   widget 驱动，不碰 state 内部字段（那样测的就是实现细节了）。
+typedef RemoteBlock = _RemoteBlock;
 
 Widget _menuRow(IconData icon, String label, {Color? color}) => Row(
       children: [

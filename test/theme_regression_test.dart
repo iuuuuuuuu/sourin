@@ -21,6 +21,7 @@
 // ② 真实树里 Theme.of 拿到深色（而不是兜底亮色）
 // ③ 关键角色的对比度达 WCAG AA 4.5:1
 // ④ forui 没填的角色，buildMaterialTheme 必须补上（不能是"同色"）
+// ⑤ ★ 上面第①组那条断言曾经是**假门禁**（2026-10-10 / CR-28 修正）
 // ```
 //
 // ⚠️ ③ 是**像素级**的：直接算前景/背景的 WCAG 对比度，
@@ -35,6 +36,9 @@ import 'package:material_ui/material_ui.dart';
 import 'package:sourin_spike/ui/app_palette.dart';
 import 'package:sourin_spike/ui/app_scaffold.dart';
 import 'package:sourin_spike/ui/app_theme.dart';
+
+import '_support/strip_comments.dart';
+import 'zz_cr_nit_shell_theme_gate.dart';
 
 /// WCAG 相对亮度
 double _lum(Color c) {
@@ -90,23 +94,33 @@ void main() {
      * 实测证据：把 shell.dart 换回裸调用，上面 10 个断言**全绿** ——
      * 因为它们测的都是桥接函数本身。这类"测了但没测到真实路径"的
      * 假绿比没有测试更危险。
+     *
+     * ── 2026-10-10（CR-28）：它自己**也**变成过假门禁 ──
+     *
+     * 上一版断言是 `src.contains('buildMaterialTheme(')`。裸 contains
+     * 分不出注释和代码，而实测：shell.dart 里这个字面量出现 2 次、
+     * **两次全在注释里**，剥掉注释后 0 次 ——
+     * 也就是说它守的其实是注释文本，shell.dart 早就不调那个函数了。
+     *
+     * 现在改为：剥注释 → 断言主题**真的绑在** MaterialApp.theme 上。
+     * 反向验证（注释诱饵 / 三种真代码变异）见
+     * test/zz_cr_nit_theme_gate_not_false_test.dart。
      */
-    test('★ shell.dart 必须真的用 buildMaterialTheme()（不能只测函数本身）', () {
+    test('★ shell.dart 必须真的用 AppTheme.themeFor() 并绑到 MaterialApp.theme', () {
       final src = File('lib/shell.dart').readAsStringSync();
 
+      // ⚠ 必须先剥注释：裸 contains 会命中注释 ⇒ 假门禁（CR-28 的原教训）。
       expect(
-        src.contains('buildMaterialTheme('),
+        shellThemeBindingHasMatch(src),
         isTrue,
-        reason: 'shell.dart 必须用 buildMaterialTheme() 而不是裸的 '
-            'toApproximateMaterialTheme()，否则卡片底会等于背景色、'
+        reason: '真实入口里必须有 `final materialTheme = AppTheme.themeFor(brightness);`，'
+            '并且 MaterialApp 必须真的用 `theme: materialTheme` —— '
+            '只调桥接函数或只挂主题都不够，否则卡片底会等于背景色、'
             '边框会变成纯白（见 ui/theme_bridge.dart 的坑 ②）',
       );
 
       // 真实入口里不允许再出现裸调用（注释里提到不算）
-      final codeLines = src
-          .split('\n')
-          .where((l) => !l.trimLeft().startsWith('*') && !l.trimLeft().startsWith('//'));
-      final bare = codeLines.where((l) => l.contains('toApproximateMaterialTheme()'));
+      final bare = bareApproximateMaterialThemeLines(src);
       expect(
         bare,
         isEmpty,

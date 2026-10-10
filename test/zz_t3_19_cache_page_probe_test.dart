@@ -25,9 +25,19 @@ import 'package:sourin_spike/ui/app_theme.dart';
 // BottomBarMarker 不在 shell.dart 里，定义在 spatial_nav.dart:1124
 import 'package:sourin_spike/ui/spatial_nav.dart' show BottomBarMarker;
 
+/// ★★ OPS-18：探针里**所有**路径拼接都走 `Platform.pathSeparator`。
+///
+/// # 为什么不能写死反斜杠
+/// ```text
+/// 原探针用硬编码的反斜杠拼路径（`root + 反斜杠 + 我的剧 + 反斜杠 + 第01集.mp4`）。
+/// 在 POSIX 上反斜杠只是**普通文件名字符**，于是盘上出现的是一个
+/// 名字里带反斜杠的**单个文件**（落在根下），压根不是一个剧目录
+/// ⇒ scanCacheWorks 扫到 0 部 ⇒ macOS CI 上整组必红。
+/// 本机（Windows）完全看不见这个缺陷 ⇒ 必须用 Platform.pathSeparator 拼。
+/// ```
 /// ★ 探针沙盒根 —— 必须是绝对路径，且落在系统临时目录下
 Directory _sandboxRoot() {
-  final p = '${Directory.systemTemp.absolute.path}\\t3_19';
+  final p = '${Directory.systemTemp.absolute.path}${Platform.pathSeparator}t3_19';
   final d = Directory(p);
   if (!d.isAbsolute) {
     fail('★ 探针沙盒必须是绝对路径，实际 = $p');
@@ -78,31 +88,31 @@ void main() {
     UiPrefs.remove(DownloadDir.kDirKey);
     DownloadDir.debugReset();
     root = Directory(
-      '${_sandboxRoot().path}\\case-${DateTime.now().microsecondsSinceEpoch}',
+      '${_sandboxRoot().path}${Platform.pathSeparator}case-${DateTime.now().microsecondsSinceEpoch}',
     )..createSync(recursive: true);
   });
 
   tearDownAll(() {
-    final d = Directory('${Directory.systemTemp.absolute.path}\\t3_19');
+    final d = Directory('${Directory.systemTemp.absolute.path}${Platform.pathSeparator}t3_19');
     if (!d.isAbsolute) fail('★ 清理路径必须是绝对路径，实际 = ${d.path}');
     if (d.existsSync()) d.deleteSync(recursive: true);
     debugPrint('CLEANUP 已删除探针沙盒 ${d.path} 存在=${d.existsSync()}');
   });
 
   test('★ 真扫盘：两集 + 一个 .part + 旁文件 + 一个非视频，体积逐项对', () async {
-    _writeBytes('${root.path}\\我的剧\\第01集 开局.mp4', 1024 * 1024);
-    _writeBytes('${root.path}\\我的剧\\第02集 反转.mp4', 512 * 1024);
+    _writeBytes('${root.path}${Platform.pathSeparator}我的剧${Platform.pathSeparator}第01集 开局.mp4', 1024 * 1024);
+    _writeBytes('${root.path}${Platform.pathSeparator}我的剧${Platform.pathSeparator}第02集 反转.mp4', 512 * 1024);
     // 正在下：*.part 必须算体积、但不算「集」
-    _writeBytes('${root.path}\\我的剧\\第03集 收尾.mp4', 256 * 1024, part: true);
+    _writeBytes('${root.path}${Platform.pathSeparator}我的剧${Platform.pathSeparator}第03集 收尾.mp4', 256 * 1024, part: true);
     // 旁文件：带封面 + 剧名
-    File('${root.path}\\我的剧\\$kCacheSidecarName').writeAsStringSync(
+    File('${root.path}${Platform.pathSeparator}我的剧${Platform.pathSeparator}$kCacheSidecarName').writeAsStringSync(
       '{"provider":"cctv","id":"cctv1","title":"我的剧",'
       '"cover":"https://example.com/c.jpg"}',
     );
     // 非视频：不算集
-    File('${root.path}\\我的剧\\readme.txt').writeAsStringSync('x');
+    File('${root.path}${Platform.pathSeparator}我的剧${Platform.pathSeparator}readme.txt').writeAsStringSync('x');
     // 第二部：没有旁文件（模拟老下载）
-    _writeBytes('${root.path}\\没旁文件\\a.mp4', 2 * 1024 * 1024);
+    _writeBytes('${root.path}${Platform.pathSeparator}没旁文件${Platform.pathSeparator}a.mp4', 2 * 1024 * 1024);
 
     final works = await scanCacheWorks(root.path);
     debugPrint('SCAN 扫到 ${works.length} 部');
@@ -141,12 +151,12 @@ void main() {
 
   test('★ 空目录 / 不存在的目录都返回空表（不抛）', () async {
     expect(await scanCacheWorks(root.path), isEmpty);
-    expect(await scanCacheWorks('${root.path}\\不存在'), isEmpty);
+    expect(await scanCacheWorks('${root.path}${Platform.pathSeparator}不存在'), isEmpty);
   });
 
   test('★ 坏旁文件只降级成「无封面」，不让整页失败', () async {
-    _writeBytes('${root.path}\\坏元数据\\e1.mp4', 4096);
-    File('${root.path}\\坏元数据\\$kCacheSidecarName')
+    _writeBytes('${root.path}${Platform.pathSeparator}坏元数据${Platform.pathSeparator}e1.mp4', 4096);
+    File('${root.path}${Platform.pathSeparator}坏元数据${Platform.pathSeparator}$kCacheSidecarName')
         .writeAsStringSync('这不是 JSON{{{');
     final works = await scanCacheWorks(root.path);
     expect(works.length, 1);
@@ -163,8 +173,8 @@ void main() {
     //    ⇒ 这里按项目的真实壳子挂 mui.MaterialApp（本项目 UI 走 material_ui 包，
     //      test/ 下既有用例也是这么挂的）。
     CachePage.debugScanRootOverride = root.path;
-    _writeBytes('${root.path}\\剧A\\第01集 x.mp4', 1024 * 1024);
-    File('${root.path}\\剧A\\$kCacheSidecarName').writeAsStringSync(
+    _writeBytes('${root.path}${Platform.pathSeparator}剧A${Platform.pathSeparator}第01集 x.mp4', 1024 * 1024);
+    File('${root.path}${Platform.pathSeparator}剧A${Platform.pathSeparator}$kCacheSidecarName').writeAsStringSync(
       '{"provider":"cctv","id":"cctv1","title":"剧A","cover":null}',
     );
     DownloadDir.setConfiguredDir(root.path);
@@ -250,8 +260,8 @@ void main() {
   testWidgets('★★ 端到端：挂真 ShellPage → 点底栏「已缓存」→ 真的进页并列出缓存',
       (t) async {
     // 先造一份真缓存（1 MiB），并把扫描根指过去
-    _writeBytes('${root.path}\\剧A\\第01集 x.mp4', 1024 * 1024);
-    File('${root.path}\\剧A\\$kCacheSidecarName').writeAsStringSync(
+    _writeBytes('${root.path}${Platform.pathSeparator}剧A${Platform.pathSeparator}第01集 x.mp4', 1024 * 1024);
+    File('${root.path}${Platform.pathSeparator}剧A${Platform.pathSeparator}$kCacheSidecarName').writeAsStringSync(
       '{"provider":"cctv","id":"cctv1","title":"剧A","cover":null}',
     );
     CachePage.debugScanRootOverride = root.path;

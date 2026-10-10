@@ -42,6 +42,7 @@ import 'package:sourin_spike/ui/cache_page.dart';
 import 'package:sourin_spike/ui/player_page.dart';
 import 'package:sourin_spike/ui/app_scaffold.dart';
 import 'package:sourin_spike/ui/app_theme.dart';
+import 'package:sourin_spike/ui/remote_bridge.dart';
 
 Directory _sandbox() {
   final base = Directory.systemTemp.absolute.path;
@@ -140,6 +141,69 @@ void main() {
   });
 
   setUp(() {
+    /*
+     * ★★★ 掐掉 RemoteBridge 的 5 秒复查定时器（2026-10-10，本文件缺的那一条）
+     * ```text
+     * 红形态：A Timer is still pending even after the widget tree was disposed.
+     *   RemoteBridge._scheduleRecheck (lib/ui/remote_bridge.dart:429)
+     *     → _ensurePolling (lib/ui/remote_bridge.dart:416)
+     * ```
+     *
+     * # 根因链（已逐行核对，不是猜的）
+     * ```text
+     * ① PlayerPage.initState → RemoteBridge.instance.setPlayer(…)
+     *      （lib/ui/player_page.dart:2002）
+     * ② setPlayer → unawaited(_ensurePolling())      （remote_bridge.dart:321）
+     * ③ _ensurePolling 里 `await SourinApi.remoteStatus()`
+     *      —— 测试环境**没有** sourin_core dll ⇒ 它抛
+     * ④ catch 分支（remote_bridge.dart:413-418）→ _scheduleRecheck()
+     * ⑤ _scheduleRecheck 挂一个 **5 秒** 的 Timer（remote_bridge.dart:429）
+     * ⑥ 桥是**进程级单例**（remote_bridge.dart:40-61 / 202-206），
+     *    widget 用例结束时它**不会自己停** ⇒ FakeAsync 在用例收尾时
+     *    判定「树上还有未结束的定时器」⇒ 红
+     * ```
+     *
+     * # ★ 为什么这是**夹具**的问题，而不是产品的缺陷
+     *
+     * `stop()` 本身是对的 —— 它**真的**取消了那个定时器：
+     * ```text
+     * lib/ui/remote_bridge.dart:359-364
+     *   void stop() { _stopped = true; _timer?.cancel(); _timer = null; active.value = false; }
+     * ```
+     * 而且 `_scheduleRecheck` / `_schedule` 第一行都有守卫
+     * `if (_stopped || _timer != null) return;` ⇒ stop() 之后**不会再排**。
+     *
+     * 那个 5 秒复查更是**有意的生产行为**，不是泄漏
+     * （remote_bridge.dart:185-200 记着理由）：原设计「遥控没开就完全不挂定时器」
+     * 会让桥**永久死亡** ⇒ 用户必须重启应用遥控才生效。5 秒复查正是那个
+     * 真 bug 的修法（1 次 IPC / 5 秒，比原版无条件轮询慢 12 倍）。
+     *
+     * 而「widget 树销毁」在真实应用里**不等于**进程退出 —— 桥的生命周期
+     * 与进程一致（remote_bridge.dart:1316-1326 专门写明 dispose 里**故意**
+     * 不停桥，因为 `_stopped` 是终态、停了没人能再唤醒它）。
+     * ⇒ 用例收尾时的「树没了但定时器还在」是**测试夹具**与
+     *   「进程级单例」这个设计之间的落差，不是产品行为错。
+     *
+     * # 本仓既有做法就是必须 stop（31 个测试文件都这么做）
+     * 例如 `test/pc_arrow_keys_test.dart:220-233`：setUp + tearDown **都**调
+     * `RemoteBridge.instance.stop()`。本文件是**漏了**这一条。
+     *
+     * # ★ 为什么放在 setUp（而不只是 tearDown）
+     * `_stopped` 是**终态**，而 `setPlayer()` 并**不**重置它
+     * （只有 `setGlobals()` 会，见 remote_bridge.dart:312）。
+     * ⇒ 先 stop()，之后 PlayerPage.initState 里的 _ensurePolling 会在
+     *   **第一行**（`if (_timer != null || _stopped) return;`）就返回
+     *   ⇒ 那个定时器**根本不会被建出来**。
+     *   tearDown 里再 stop() 一次是给**下一个**用例收尾（幂等）。
+     *
+     * ⚠️ 这不是「为了变绿而掩盖」：断言一条没动（候选条数 == 1、file://、
+     *    err == null 全部保留），(b-0) 用例也没删。改的只是「谁负责把
+     *    进程级单例收干净」。而且这条纪律有**独立门禁**钉住 ——
+     *    `test/zz_cr_remote_bridge_stop_timer_test.dart` 直接验证
+     *    「stop() 之后那个 5 秒定时器真的被取消、且不再重排」。
+     *    本文件不 stop 时它会红，正是本条修复的**反面证据**。
+     */
+    RemoteBridge.instance.stop();
     UiPrefs.debugResetForTest();
     root = Directory(
       '${_sandbox().path}${Platform.pathSeparator}case-${DateTime.now().microsecondsSinceEpoch}',
@@ -179,7 +243,11 @@ void main() {
     debugPrint('LOCAL 夹具就绪 = ${File(videoPath).lengthSync()} 字节');
   });
 
-  tearDown(() => ClipDownloader.debugSetDataDir(null));
+  tearDown(() {
+    // 与 setUp 成对：给**下一个**用例留一个干净的单例（stop() 幂等）
+    RemoteBridge.instance.stop();
+    ClipDownloader.debugSetDataDir(null);
+  });
 
   /*
    * ⚠️ 试过但**不能**用的收尾办法（记下来省得别人再踩）：

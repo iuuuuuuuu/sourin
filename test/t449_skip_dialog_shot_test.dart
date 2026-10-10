@@ -108,7 +108,8 @@ void main() {
 
     final dir = Directory(_outDir);
     if (!dir.existsSync()) dir.createSync(recursive: true);
-    final f = File('$_outDir\\449_dialog.png');
+    final f = File(<String>[_outDir, '449_dialog.png']
+        .join(Platform.pathSeparator));
     f.writeAsBytesSync(png);
     // ignore: avoid_print
     print('T449|saved ${f.path}  ${png.length} B');

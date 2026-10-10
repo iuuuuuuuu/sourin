@@ -18,6 +18,7 @@ import '../../core/app_update/install.dart';
 import '../../core/app_update/release.dart';
 import '../tokens.dart';
 import 'app_toast.dart';
+import 'overlay_motion.dart';
 import 'release_notes.dart';
 
 /// 显示更新对话框。返回 true 表示用户点了「下载」
@@ -27,7 +28,7 @@ Future<bool> showUpdateDialog(
   required UpdatePlatform platform,
 }) async {
   final asset = selectAsset(release, platform);
-  final r = await showDialog<bool>(
+  final r = await showAppDialog<bool>(
     context: context,
     builder: (ctx) => _UpdateDialog(release: release, asset: asset),
   );

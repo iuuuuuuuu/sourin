@@ -40,6 +40,7 @@ import '../app_theme.dart';
 import '../theme/theme_pack.dart';
 import '../tokens.dart';
 import '../widgets/app_toast.dart';
+import '../widgets/overlay_motion.dart';
 import '../widgets/settings_kit.dart';
 import '../widgets/settings_sub_page.dart';
 
@@ -217,7 +218,7 @@ class _ThemeSettingsPageState extends State<ThemeSettingsPage> {
 
   Future<void> _pasteJson(BuildContext context) async {
     final ctl = TextEditingController();
-    final src = await showDialog<String>(
+    final src = await showAppDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('粘贴主题包 JSON'),

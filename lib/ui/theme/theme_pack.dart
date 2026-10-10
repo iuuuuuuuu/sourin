@@ -103,6 +103,12 @@ class ThemePack {
 
   /// 解析。**任何**非法输入都归一到一份可用的主题包 + 一条警告，
   /// 绝不抛异常 —— 一份坏主题包不该让应用起不来。
+  ///
+  /// ⚠️ 2026-10-10（CR-09）字段取值**一律走 [_FieldReader]**。
+  ///    原来的 `root['radius'] as num?` 这类强转，JSON 里类型一对不上
+  ///    就直接抛 TypeError：`parseFile` 不 catch ⇒ `loadAll()` 抛 ⇒
+  ///    `current()` 抛 ⇒ **一个坏文件让整个应用起不来**。
+  ///    「用户会自己手写 JSON」是这个功能的卖点，那么「写错类型」是常规情况。
   static _Parsed parse(String source, {String? idHint, String? path}) {
     final warnings = <String>[];
     Map<String, Object?> root;
@@ -116,41 +122,48 @@ class ThemePack {
       return _Parsed(_fallback(idHint, path), ['JSON 语法错误：$e']);
     }
 
-    final version = (root['version'] as num?)?.toInt() ?? kThemePackVersion;
+    final f = _FieldReader(root, warnings);
+
+    final version = f.number('version')?.toInt() ?? kThemePackVersion;
     if (version > kThemePackVersion) {
       warnings.add('版本 $version 比本应用新（支持到 $kThemePackVersion），'
           '未知的字段已忽略');
     }
 
-    final brightness = switch ((root['brightness'] as String?)?.toLowerCase()) {
+    // ⚠️ brightness 的「值不对」（写成 "purple"）与「类型不对」（写成 123）
+    //    是两回事，必须分别处理：前者提示后按底色推断，后者同样降级但要
+    //    点名说是**类型**不对 —— 否则用户照着提示去改值，改多少都对不上。
+    final rawBrightness = f.text('brightness');
+    final brightness = switch (rawBrightness?.trim().toLowerCase()) {
       'light' => Brightness.light,
       'dark' => Brightness.dark,
       'system' || null => null,
-      var s => () {
-          warnings.add('未知的 brightness「$s」，按跟随系统处理');
+      // ⚠️ 非空的**非白名单**值（含大小写变体之外的一切）⇒ 按跟随系统处理
+      final String v => () {
+          warnings.add('未知的 brightness「$v」，按跟随系统处理');
           return null;
         }(),
     };
     // 解析不出明暗就用这份主题的底色亮度来判（深色底 = 深色主题）
-    final colors = (root['colors'] as Map?)?.cast<String, Object?>();
+    final colors = f.map('colors');
     if (brightness == null && colors != null) {
       final bg = _unhex(colors['background']);
       final b = bg == null
           ? Brightness.dark
           : (bg.computeLuminance() < 0.5 ? Brightness.dark : Brightness.light);
-      return _parseWithBrightness(root, colors, b, warnings, idHint, path);
+      return _parseWithBrightness(colors, b, warnings, idHint, path, f);
     }
-    return _parseWithBrightness(root, colors, brightness ?? Brightness.dark,
-        warnings, idHint, path);
+    return _parseWithBrightness(colors, brightness ?? Brightness.dark, warnings,
+        idHint, path, f);
   }
 
   static _Parsed _parseWithBrightness(
-    Map<String, Object?> root,
     Map<String, Object?>? colors,
     Brightness brightness,
     List<String> warnings,
     String? idHint,
     String? path,
+    _FieldReader f,
   ) {
     final base = brightness == Brightness.dark ? AppPalette.dark : AppPalette.light;
 
@@ -180,16 +193,18 @@ class ThemePack {
       error: pick('error', base.error) ?? base.error,
     );
 
-    final radius = (root['radius'] as num?)?.toDouble();
+    final radius = f.number('radius')?.toDouble();
     if (radius != null && (radius < 0 || radius > 40)) {
       warnings.add('radius=$radius 超出合理范围 [0,40]，已忽略');
     }
 
     EdgeInsets? pad;
-    final bp = (root['buttonPadding'] as Map?)?.cast<String, Object?>();
+    final bp = f.map('buttonPadding');
     if (bp != null) {
-      final h = (bp['horizontal'] as num?)?.toDouble();
-      final v = (bp['vertical'] as num?)?.toDouble();
+      // ⚠️ buttonPadding 内部的 horizontal/vertical 也可能是任意类型
+      //    （{"buttonPadding":{"horizontal":"wide"}}），所以走同一个取值器。
+      final h = f.sub(bp, 'horizontal');
+      final v = f.sub(bp, 'vertical');
       if (h != null && v != null && h >= 0 && v >= 0 && h < 80 && v < 40) {
         pad = EdgeInsets.symmetric(horizontal: h, vertical: v);
       } else {
@@ -199,12 +214,9 @@ class ThemePack {
 
     return _Parsed(
       ThemePack(
-        id: (root['id'] as String?)?.trim().isNotEmpty == true
-            ? (root['id'] as String).trim()
-            : (idHint ?? 'imported'),
-        name: (root['name'] as String?)?.trim().isNotEmpty == true
-            ? (root['name'] as String).trim()
-            : '导入的主题',
+        // ⚠️ id/name 不再强转：类型错 ⇒ 走兜底值，并在上面已记过一条警告。
+        id: _nonBlank(f.text('id')) ?? (idHint ?? 'imported'),
+        name: _nonBlank(f.text('name')) ?? '导入的主题',
         brightness: brightness,
         palette: palette,
         radius: (radius != null && radius >= 0 && radius <= 40) ? radius : null,
@@ -214,6 +226,13 @@ class ThemePack {
       warnings,
     );
   }
+
+  /// trim 后非空的字符串（`null` / 空串 / 全空格都算「没有」）
+  static String? _nonBlank(String? v) {
+    final t = v?.trim();
+    return (t == null || t.isEmpty) ? null : t;
+  }
+
 
   static ThemePack _fallback(String? idHint, String? path) => ThemePack(
         id: idHint ?? 'imported',
@@ -258,6 +277,71 @@ class ThemePack {
         builtin: builtin ?? this.builtin,
         sourcePath: sourcePath ?? this.sourcePath,
       );
+}
+
+/// 类型安全的字段取值器（CR-09）
+///
+/// ★ 存在的唯一理由：**类型不对不许抛，要点名降级**。
+///   ```dart
+///   final v = f.number('radius');   // {"radius":"10"} ⇒ null + 一条警告
+///   ```
+///   三条规则：
+///   1. 字段缺失（`null`）⇒ 返回 `null`，**不记警告** —— 缺字段不是错误；
+///   2. 类型对不上 ⇒ 记一条「字段 X 类型不对（T），已忽略」并返回 `null`；
+///   3. 每次取值只记**一次**警告（同一个 key 重复取值不刷屏）。
+///
+/// ⚠️ 边界：`bool` 在 Dart 里不是 `num`，所以 `{"version":true}` 会降级；
+///    而 `int`/`double` 都 `is num` ⇒ `{"radius":10}` 与 `{"radius":10.5}` 都合法。
+class _FieldReader {
+  _FieldReader(this._root, this._warnings);
+
+  final Map<String, Object?> _root;
+  final List<String> _warnings;
+  final Set<String> _warned = <String>{};
+
+  /// 读 [key] 并按 [T] 校验；类型不对 ⇒ 警告 + `null`。
+  T? take<T>(Map<String, Object?> from, String key) {
+    final v = from[key];
+    if (v == null || v is T) return v as T?;
+    _warn(key, v);
+    return null;
+  }
+
+  double? number(String key) => take<num>(_root, key)?.toDouble();
+
+  String? text(String key) => take<String>(_root, key);
+
+  /// JSON 对象。
+  ///
+  /// ⚠️ 这里**不用** `v.cast<String, Object?>()`：那个 cast 返回的是**惰性**视图，
+  ///    转换失败要等到后面 `colors['background']` 真读的那一刻才抛 ——
+  ///    正好把 CR-09 那个 TypeError 推迟到了更远、更难查的地方。
+  ///    所以改成**当场遍历**复制一份，key 不是 String 就整体当类型错降级。
+  Map<String, Object?>? map(String key) {
+    final v = take<Map>(_root, key);
+    if (v == null) return null;
+    if (v is Map<String, Object?>) return v;
+    final out = <String, Object?>{};
+    for (final e in v.entries) {
+      if (e.key is! String) {
+        // JSON 解出来的对象 key 一定是 String，走不到这里；
+        // 但 `parse` 也可能被直接喂一个 Map（内部调用），所以按类型错兜住。
+        _warn(key, v);
+        return null;
+      }
+      out[e.key as String] = e.value;
+    }
+    return out;
+  }
+
+  /// 从**子对象**里取值（buttonPadding.horizontal 等）
+  double? sub(Map<String, Object?> from, String key) =>
+      take<num>(from, key)?.toDouble();
+
+  void _warn(String key, Object? v) {
+    if (!_warned.add(key)) return; // 同一字段只提示一次
+    _warnings.add('字段 $key 类型不对（${v.runtimeType}），已忽略');
+  }
 }
 
 class _Parsed {

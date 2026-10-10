@@ -417,17 +417,51 @@ ThemeData _shared(ThemeData base, AppPalette c, AppTypeface t) {
       collapsedShape: const Border(),
     ),
 
+    // ★ 开关：两段式（轨道 + 拇指），开态用调色板的「主色对」。
+    //
+    //   改前的三条病灶（业主第二次反馈"还是很难看"）：
+    //   ① 开态拇指与轨道几乎同色 —— 深色下 #FAFAFA 压在 #E5E5E5 上
+    //      （亮度差 0.17），看上去是"一根亮条中间一道缝"；
+    //   ② 浅色开态拇指用了 foreground（近黑 #1E2028）压在蓝底上
+    //      ⇒ "蓝底黑痣"；
+    //   ③ 关态轨道取 secondary，深色 #262626 在 #0A0A0A 上只有 1.31:1、
+    //      浅色 #E8EAF0 在 #EEF0F6 上只有 1.06:1 —— 槽几乎看不见，
+    //      拇指像悬空的一个点；而且 trackOutlineColor 与 trackColor
+    //      取同一个值 ⇒ 描边画了等于没画。
+    //
+    //   现在：开态 = primary 轨道 + primaryForeground 拇指（跟随主题包，
+    //   外部 JSON 换主色也自动跟），关态 = foreground 压 22% 到 background
+    //   上的中性灰（对 6 套内置主题包最差对比度 1.56:1），描边统一用
+    //   mutedForeground（视觉上的"静音边框"角色，且与槽稳定拉开 0.30 亮度）。
+    //   色号全部由 AppPalette 角色算出，没有写死值。
     switchTheme: SwitchThemeData(
-      thumbColor: WidgetStateProperty.resolveWith((s) =>
-          s.contains(WidgetState.disabled) ? c.disable(c.foreground) : c.foreground),
+      thumbColor: WidgetStateProperty.resolveWith((s) {
+        if (s.contains(WidgetState.disabled)) {
+          return c.disable(s.contains(WidgetState.selected)
+              ? c.primaryForeground
+              : c.foreground);
+        }
+        return s.contains(WidgetState.selected) ? c.primaryForeground : c.foreground;
+      }),
       trackColor: WidgetStateProperty.resolveWith((s) {
-        if (s.contains(WidgetState.disabled)) return c.disable(c.secondary);
-        return s.contains(WidgetState.selected) ? c.primary : c.secondary;
+        if (s.contains(WidgetState.disabled)) {
+          return c.disable(s.contains(WidgetState.selected) ? c.primary : c.muted);
+        }
+        // ⚠️ 必须是不透明色：Switch 画拇指时会做
+        //    `Color.alphaBlend(thumb, surface)`，半透明会被"洗白"。
+        return s.contains(WidgetState.selected)
+            ? c.primary
+            : Color.alphaBlend(c.foreground.withValues(alpha: 0.22), c.background);
       }),
+      // 开态轨道自己就是主色，再描一圈边只会显脏 ⇒ 只有关态描边。
+      // 关态用 mutedForeground（比槽亮一档的"静音边框"）：两套明暗都稳。
       trackOutlineColor: WidgetStateProperty.resolveWith((s) {
-        if (s.contains(WidgetState.disabled)) return c.disable(c.secondary);
-        return s.contains(WidgetState.selected) ? c.primary : c.secondary;
+        if (s.contains(WidgetState.selected)) return null;
+        if (s.contains(WidgetState.disabled)) return c.disable(c.mutedForeground);
+        return c.mutedForeground;
       }),
+      // lib/ui 里 25 处 BorderSide 都不写 width（默认 1.0），这里对齐同一档
+      trackOutlineWidth: WidgetStateProperty.all(1.0),
     ),
 
     sliderTheme: SliderThemeData(

@@ -62,6 +62,28 @@ import 'dart:async';
 
 import 'package:material_ui/material_ui.dart';
 import 'package:window_manager/window_manager.dart';
+/*
+ * ★★★ CR-13 勘误：这里**不需要**额外 import foundation。
+ *
+ * # 我一开始以为需要（现已用 analyzer 证伪）
+ * ```text
+ * flutter/lib/widgets.dart:18 确实只放行了两个名字：
+ *     export 'foundation.dart' show Brightness, UniqueKey;
+ * ⇒ 单看这一行，`visibleForTesting` 像是拿不到。
+ *
+ * 但 widgets.dart:64 还 export 了 `src/widgets/framework.dart`，而
+ *   flutter/lib/src/widgets/framework.dart:26-34
+ *     export 'package:flutter/foundation.dart'
+ *         show factory, immutable, mustCallSuper, optionalTypeArgs,
+ *              protected, required, visibleForTesting;   ← ★ 就是这里
+ * ⇒ `@visibleForTesting` 通过 material_ui 这条链**本来就能用**
+ *   （实证：`flutter analyze lib/ui/detail_page.dart` ⇒ No issues found，
+ *    而 detail_page.dart 只用 material_ui，没有 foundation import）。
+ * ```
+ * ⚠️ 显式 import 会让 `flutter analyze` 报
+ *   `info - unnecessary_import`（实测 media_page.dart:78:8）
+ *   ⇒ 删掉，别给别人的 analyze 留噪声。
+ */
 
 // ★ task-11 ②：右侧下载面板的数据源与组件
 import '../core/app_log.dart' show AppLog;
@@ -83,6 +105,45 @@ import 'player_page.dart';
 import 'tokens.dart';
 import 'widgets/download_panel.dart';
 import 'widgets/window_frame.dart' show isWindowFullscreen;
+
+/// ★★★ CR-13 探针接缝：**详情区发出的那个播放请求**（只观测，不改行为）
+///
+/// # 为什么需要它（不是"为了测试而测试"）
+/// ```text
+/// CR-13 的缺陷就发生在"详情区把请求交给播放器"这一步：
+///   MediaPage._onPlayLocalEpisode 造的 PlayRequestData.id 写成了 _contentId
+///   ⇒ 这一集播出来的进度会被写进**进页时那一集**的键。
+///
+/// 而"键"的最终去向是：
+///   _onDetailPlay(req) ⇒ req.id ⇒ MediaSession.applySession(req)
+///     ⇒ player_page.dart:6759 _contentId = req.id
+///     ⇒ player_page.dart:5965-5967 SourinApi.saveProgress(_provider, _contentId, …)
+/// ⇒ **req.id 就是进度主键**。抓住 req 就抓住了缺陷本体。
+/// ```
+///
+/// # 为什么不用"劫持 debugPrint"（原来的做法，已实测失效）
+/// ```text
+/// _onDetailPlay 本来会打一行 '[MEDIA] 详情区请求播放 ⇒ …'，
+/// 但 flutter_test 的 FlutterError.onError 会在**第二条**异常到来时执行
+///   binding.dart:1771-1796  debugPrint = debugPrintOverride;
+/// ⇒ 测试装的劫持被**永久丢掉**，之后所有 debugPrint 直写真控制台。
+/// 本用例里 media_kit 没初始化必然抛异常（环境噪声，见 dart_test.yaml）
+/// ⇒ 那行日志**永远**进不了测试的捕获列表 ⇒ 原用例退化成假门禁。
+/// ```
+///
+/// # 生产路径零影响
+/// 为 null 时（生产恒为 null）连一次判空都不会改变任何行为 ——
+/// 下面调用它的地方就是一行 `if (f != null) f(req);`。
+/// ★ 与 `lib/ui/detail_page.dart:514` 的 CR-12 接缝（`debugLocalOriginRecords`）
+///   完全同款：顶层可变变量 + `@visibleForTesting` setter。
+@visibleForTesting
+void Function(PlayRequestData req)? debugOnDetailPlayForward;
+
+/// 注册/注销上面的探针（测试在 addTearDown 里复位为 null）
+@visibleForTesting
+void debugSetOnDetailPlayForward(void Function(PlayRequestData req)? f) {
+  debugOnDetailPlayForward = f;
+}
 
 /// 合并页 —— 上播放器 + 下详情
 class MediaPage extends StatefulWidget {
@@ -128,6 +189,8 @@ class MediaPage extends StatefulWidget {
      */
     this.localPath,
     this.localMeta,
+    this.originProvider,
+    this.originMediaId,
   });
 
   final String provider;
@@ -155,6 +218,28 @@ class MediaPage extends StatefulWidget {
   /// ⇒ 由 `shell._openCachedWork` 一次性从扫盘结果原样传下来，
   ///   本页**不自己再扫一次盘**（两份扫描必然出现两处不一致）。
   final CachedWork? localMeta;
+
+  /// ★★★ OPS-13（反馈 C）：这一集**原本来自哪个站点**（provider + 站点内容 id）
+  ///
+  /// # Owner 原话（逐字）
+  /// ```text
+  /// > 续播进度,我希望的是我缓存这集了,但是如果我在线看,他还能记得我看过
+  /// > 而不是 本地和线上的就彻底分开了,你懂不
+  /// ```
+  ///
+  /// # 它们**不是**主键（主键永远是 [provider]/[id]）
+  /// ```text
+  /// provider 恒为 'local'（续播命名空间，见 cache_page.dart:722-734）——
+  /// 本字段是**镜像的目标**：本地看完一集后，再把进度补写一条到
+  /// (originProvider, originMediaId) 上，在线打开同一集时就能续上。
+  /// ⇒ 主键与镜像**分开存**，与 CachedPlayRequest 的做法逐字一致
+  ///   （cache_page.dart:754-768 的「一个当主键用，一个当文案用」那段）。
+  /// ```
+  ///
+  /// ⚠️ 全部可空：老下载 / 手拷进来的目录**没有**旁文件 ⇒ 不镜像、不猜
+  ///    （那正是「宁可没有来源，也不要错的来源」）。
+  final String? originProvider;
+  final String? originMediaId;
 
   @override
   State<MediaPage> createState() => _MediaPageState();
@@ -559,6 +644,16 @@ class _MediaPageState extends State<MediaPage> with WindowListener {
     debugPrint('[MEDIA] 详情区请求播放 ⇒ 转发给当前播放器 '
         '(${req.provider}:${req.id} ep=${req.episodeId ?? "(无)"} '
         'src=${req.sourceCode ?? "(默认)"})');
+    /*
+     * ★★★ CR-13 探针（只观测）：这里是**唯一**一处"详情区的请求离开本页"，
+     *   而 req.id 就是播放器接下来用来存进度的那个键
+     *   （player_page.dart:6759 _contentId = req.id ⇒ :5965 saveProgress(_provider, _contentId)）。
+     *   放在 applySession **之前**：这样即使播放器没挂上/applySession 抛异常，
+     *   判据仍然拿得到"这次请求发的是什么 id"。
+     * ⚠️ 生产恒为 null ⇒ 零行为差异。
+     */
+    final probe = debugOnDetailPlayForward;
+    if (probe != null) probe(req);
     await s.applySession(req);
   }
 
@@ -1072,9 +1167,49 @@ class _MediaPageState extends State<MediaPage> with WindowListener {
   /// ⚠️ localPath 传的是**这一集**的绝对路径（不是 widget.localPath）——
   ///    否则"点第 2 集"会回到进来时那一集（见 [_onDetailPlay] 里那条警告）。
   void _onPlayLocalEpisode(LocalEpisodeRef ref) {
+    /*
+     * ══════════════════════════════════════════════════════════════════════
+     * ★★★ 2026-10-10 CR-13：这里原来写的是 `id: _contentId`
+     * ══════════════════════════════════════════════════════════════════════
+     *
+     * # 那是「本地集的进度全挤在一个键上」的根因（CodeRabbit [Major]）
+     *
+     * ```text
+     * `_contentId` 是**进页时那一集**的 id（media_page.dart:223-224
+     * `late String _contentId = widget.id;`）⇒ 点「已下载」里**任何**一集，
+     * 发出去的 id 都是**同一串**（进页那一集的键）。
+     * ```
+     *
+     * # 键的去向（后果为什么是数据损坏级）
+     *
+     * ```text
+     * _onDetailPlay(req) ⇒ req.id
+     *   ⇒ MediaSession.applySession(req) ⇒ player_page.dart:6758-6759
+     *        _provider = req.provider; _contentId = req.id;
+     *   ⇒ player_page.dart:5965-5967
+     *        SourinApi.saveProgress(_provider, _contentId, …)
+     * ```
+     * ⇒ 看第 2 集播一分钟，进度被写进**第 1 集**那个键：
+     *   · 第 1 集的续播位置被第 2 集顶掉（续播串集）；
+     *   · 第 2 集永远显示 0%（`_watchRatioOf` 查不到自己那一条）。
+     *
+     * # 本地进度键的约定
+     *
+     * ```text
+     * (kLocalProvider, canonicalLocalPath(文件绝对路径))
+     * ```
+     * ★ 邻居 [_onPlayDownloaded] 一直是对的：它传 `id: req.mediaId`，
+     *   而 `buildLocalPlayRequest` 里 `mediaId = canonicalLocalPath(绝对路径)`
+     *   （cache_page.dart:944-972）。本函数是唯一走岔的那条路。
+     *
+     * ★ `ref.absolutePath` 与 [_localEpisodeRefs] 里算 `watchRatio` 用的
+     *   `req.mediaId` 是**同一个路径拼法**（`work.path + sep + fileName`），
+     *   所以 `canonicalLocalPath(ref.absolutePath)` 恒等于那个 `mediaId`
+     *   ⇒ 读进度（`_localProgress[mediaId]`）与写进度（这里）落在**同一个键**上。
+     */
     _onDetailPlay(PlayRequestData(
       provider: _provider,
-      id: _contentId,
+      id: canonicalLocalPath(ref.absolutePath),
       title: _detailTitleForDownloads,
       episodeId: ref.fileName,
       episodeTitle: ref.episodeTitle,
@@ -1289,6 +1424,19 @@ class _MediaPageState extends State<MediaPage> with WindowListener {
        *     episodes/episodeIndex/isTv/isTouchOnly；另加本页自算的 key 与 hasRightDetailBar）。
        */
       localPath: widget.localPath,
+      /*
+       * ★★★ OPS-13（反馈 C）：原来源（站点 provider + 站点内容 id）转发给播放器。
+       *
+       * # 为什么这一层必须转发
+       * ```text
+       * 调用链：shell._openCachedWork -> MediaPage(...) -> :1378 构造 PlayerPage(...)
+       * PlayerPage 是**本页造的**，不是 shell 造的 ⇒ 本层不转发 = 恒为 null
+       * ⇒ 播放器永远不知道该把本地进度镜像到哪个站点键（同 task-12 的链条断点）。
+       * ```
+       * ⚠️ 与 [localPath] 同一条纪律：**原样转发**，本页不判、不猜。
+       */
+      originProvider: widget.originProvider,
+      originMediaId: widget.originMediaId,
       // ★ task-2【④】：右侧详情栏此刻是否真的可见（见 hasRightDetail 的注释）
       hasRightDetailBar: hasRightDetail,
     );
@@ -1554,7 +1702,38 @@ class _MediaPageState extends State<MediaPage> with WindowListener {
               //   在那里加圆角会变成"窗口边缘上的一个黑色缺口"（像渲染瑕疵）
               bottomRight: const Radius.circular(0),
             ),
-            child: detailOrDownloads,
+            /*
+             * ★★ 内容必须自己铺底 —— 这是「22px 黑带」缺陷的根因所在。
+             *
+             * 上面那条 Positioned(width: Radii.lg, child: ColoredBox(Colors.black))
+             * 是**故意**铺的：让面板朝视频那一侧的圆角「从黑里挖出来」才看得见
+             * （task-68 的诉求，test/t61_panel_radius_test.dart 守着它）。
+             *
+             * 但 Stack **按序绘制** ⇒ 黑底能不能被盖住，**完全取决于内容透不透明**：
+             *   · 右侧是 DetailPage ⇒ 它自己铺了 ColoredBox(colors.surface)
+             *     （lib/ui/detail_page.dart:2513）⇒ 黑被盖住 ⇒ 圆角外干干净净 ✅
+             *   · 右侧是 DownloadPanel ⇒ 那块控件**一处背景都没画**
+             *     ⇒ 黑直接透出来 ⇒ 面板左沿整条 22px 竖带全黑 ❌
+             *
+             * 这正是业主 ③ 报的「右侧不知为啥出现崩坏」：
+             *   截图实测 视频右边缘 1010、面板左边缘 1033 ⇒ x∈[1011,1032] 全黑。
+             *   它与「第二次进来」这个**次数**无关：
+             *   只要右侧渲染的是下载面板，黑带就在。
+             *   业主说的「第一次进来还是正常的」，最可能就是那一次右侧还是详情区
+             *   （还没下过这集 ⇒ _downloadedItems 空 ⇒ 走 :1550 的 return detail）。
+             *   ★ 判据由 test/zz_cr_panel_notch_test.dart 成对钉住：
+             *     同页面、只换右侧 widget ⇒ 下载面板 849 行黑 / 详情区 0 行黑。
+             *
+             * ⚠️ 修法**不是**把黑底删掉 / 改成只在详情支才铺：
+             *   那样 DownloadPanel 的圆角会退化成直角
+             *   ⇒ 退回 Owner 投诉过的「直角看起来不协调」。
+             * ✅ 正确修法 = 由**本页**保证「内容永远不透明」：
+             *   包一层同色 ColoredBox。它被上面的 ClipRRect 一起裁掉 ⇒
+             *   圆角缺口露出的仍是黑（圆角照样可见），
+             *   缺口之外则被这层盖住 ⇒ 黑带消失。
+             *   ⇒ 以后右侧换**任何** widget 都不会再退化。
+             */
+            child: ColoredBox(color: surface, child: detailOrDownloads),
           ),
         ],
       ),

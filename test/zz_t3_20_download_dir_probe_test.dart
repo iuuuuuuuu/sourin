@@ -17,7 +17,8 @@
 // .github/workflows/build.yml 跑的是裸 \`flutter test\`，没有设 USERPROFILE
 // ⇒ ⓪ 必然红（Expected: true / Actual: false），把 Windows 与 macOS 两个 job
 //    一起带下去。而文件头注释里引用的 \`tools/run_tests.sh\`（说它负责设
-//    隔离环境）**在仓库里根本不存在** —— 那条引用是悬空的。
+//    隔离环境）**在仓库里根本不存在** —— 那条引用是悬空的（该脚本在本仓库
+//    从未存在过；T320 已把引用改成下面那套可直接执行的 PowerShell 命令）。
 // ```
 //
 // # 所以标上标签，默认跳过（与本仓 native-media 同一套办法，见 dart_test.yaml）
@@ -47,8 +48,9 @@ import 'dart:io';
 //    并 `create(recursive:true)` 于 `Videos\源影` ⇒ 真的在用户目录里建了目录。
 //    （`setConfiguredDir` 只影响「用户指定目录」这一层，管不到默认兜底。）
 //
-//    修法：本文件**要求以隔离的 USERPROFILE 运行**（见文件末尾的说明与
-//    `tools/run_tests.sh` 里的调用）⇒ 默认兜底落在临时盘。
+//    修法：本文件**要求以隔离的 USERPROFILE 运行**（见文件头「手动跑」那
+//    段命令）⇒ 默认兜底落在临时盘。（历史上这里写的是 `tools/run_tests.sh`
+//    里的调用，而该脚本在本仓库**从未存在** —— T320 已改为指向真实命令。）
 //    ⚠️ 不能在测试里改 `Platform.environment['USERPROFILE']` —— 它在
 //    `flutter_test` 里是**只读**的（实测 `Unsupported operation: Cannot
 //    modify unmodifiable map`），所以隔离必须由**进程环境**提供。
@@ -123,7 +125,7 @@ void main() {
   });
 
   test('② 配置了有效目录 ⇒ root() 真的返回它，且被创建出来', () async {
-    final target = Directory('${tmp.path}\\my-custom')..createSync(recursive: true);
+    final target = Directory('${tmp.path}${Platform.pathSeparator}my-custom')..createSync(recursive: true);
     DownloadDir.setConfiguredDir(target.path);
     expect(DownloadDir.configuredDir, target.path);
 
@@ -140,7 +142,8 @@ void main() {
      *   断言"此刻还不存在"在跨用例时不稳定（第一版就是这么挂的：Expected false,
      *   Actual true）。真正要验的是**改完之后**目录被建出来了。
      */
-    final target = '${tmp.path}\\case3-only\\not-yet-made\\deep';
+    final target = '${tmp.path}${Platform.pathSeparator}case3-only'
+        '${Platform.pathSeparator}not-yet-made${Platform.pathSeparator}deep';
     DownloadDir.setConfiguredDir(target);
     final r = await DownloadDir.root();
     debugPrint('DIR[自动建] = $r');
@@ -149,8 +152,12 @@ void main() {
   });
 
   test('④ ★★ 配置了**建不出来**的目录（非法路径）⇒ 必须退回默认，不许整体失败', () async {
-    // Windows 上 NUL 关键字 + 空字符做路径，create 必失败
-    DownloadDir.setConfiguredDir('\u0000bad\\u0000path');
+    // ★ 2026-10-10 T320 实测：这条**必须**用真 NUL（\u0000），不能用字面文本
+    //   「反斜杠 + u0000」—— 后者在 Windows 上靠「反斜杠被当成根解析」才失败，
+    //   而反斜杠在 POSIX 上只是普通文件名字符 ⇒ 整条会变成**合法**路径、假绿。
+    //   真 NUL 在 Windows 与 POSIX 上**都**非法（POSIX 内核拒绝含 \0 的路径），
+    //   所以中间的分隔符也用 Platform.pathSeparator，两边都保证 create 必失败。
+    DownloadDir.setConfiguredDir('\u0000bad${Platform.pathSeparator}\u0000path');
     final r = await DownloadDir.root();
     debugPrint('DIR[非法路径退回] = $r');
     expect(r, isNot(contains('bad')), reason: '★ 不能用那个非法路径');
@@ -158,7 +165,7 @@ void main() {
   });
 
   test('⑤ 清空配置 ⇒ 立刻回到默认（_cached 必须被清掉）', () async {
-    final target = Directory('${tmp.path}\\custom2')..createSync(recursive: true);
+    final target = Directory('${tmp.path}${Platform.pathSeparator}custom2')..createSync(recursive: true);
     DownloadDir.setConfiguredDir(target.path);
     final withCustom = await DownloadDir.root();
     expect(withCustom, target.path);
@@ -172,7 +179,7 @@ void main() {
   });
 
   test('⑥ forWork：剧名进子目录，且路径落在自定义根下', () async {
-    final target = Directory('${tmp.path}\\root6')..createSync(recursive: true);
+    final target = Directory('${tmp.path}${Platform.pathSeparator}root6')..createSync(recursive: true);
     DownloadDir.setConfiguredDir(target.path);
     final work = await DownloadDir.forWork('我的剧');
     debugPrint('DIR[forWork] = $work');

@@ -449,6 +449,19 @@ class SourinCore {
    */
   static NativeCallable<_CallbackC>? _callable;
   static final Map<int, _PendingCall> _pending = {};
+  /// ★ CR-03：所有兜底计时器的**登记表**（与 [_pending] 分开）
+  ///
+  /// # 为什么不能只数 [_pending] 里的 active 计时器
+  ///
+  /// [_deliverResult] 是「先 `_pending.remove(id)`、**后** `timer.cancel()`」，
+  /// 两者之间没有任何观察点。于是注入口若数 `_pending` 的 active 计时器，
+  /// 表项一移出计数就归零 —— **计时器有没有被 cancel 完全测不出来**：
+  /// 实测把 `pending.timer.cancel()` 注释掉后，CR-03 的三条判据**照样全绿**
+  /// （exit 0）—— 那就是 CR-03 骂的同一种假测试。
+  ///
+  /// 改成：新建时登记（[_newFallbackTimer]）、取消时销账（[_cancelFallback]），
+  /// 「表项还在不在」与「计时器还活着吗」于是成为两件互相独立可观测的事。
+  static final Set<Timer> _fallbackTimers = <Timer>{};
   static int _nextId = 1;
 
   /// 建回调（只做一次）
@@ -462,13 +475,48 @@ class SourinCore {
 
   /// 原生回调入口 —— 运行在创建 [_callable] 的那个 isolate 上
   static void _onNativeResult(Pointer<Utf8> resultPtr, Pointer<Void> userData) {
+    /*
+     * ★ 读 + free 必须**原子**（[_readStringAndFree] 一次做完）：Rust 分配的
+     *   内存只能还给 Rust 的 free，中间不能夹任何可能抛异常的代码。
+     *   而「完成这条请求」与「字符串从哪来」无关，抽到 [_deliverResult]。
+     */
+    final text = _readStringAndFree(resultPtr);
     // userData 里放的是请求 id（C 里用 Size 传）
-    final id = userData.address;
+    _deliverResult(userData.address, text);
+  }
+
+  /// 完成一条在途请求（[text] = 原生返回体；`null` / 空串 = 空返回）
+  ///
+  /// # 为什么单独抽出来（而不是留在 [_onNativeResult] 里）
+  ///
+  /// CR-01 的缺陷（`jsonDecode` 无保护 ⇒ completer 永不完成 ⇒ 调用方
+  /// **永久挂起**）只可能被「Rust 回了一段非法 JSON」触发 —— 而测试里没法
+  /// 让真 dll 吐一段非法 JSON。把「取字符串」（FFI 的活）与「完成请求」
+  /// （纯逻辑）分开之后，测试用 [debugFeedNativeResult] 把任意字符串喂进来，
+  /// 走的是**同一条**完成路径，不是复刻品。
+  /// 新建一个**会被记账**的兜底计时器（见 [_fallbackTimers] 的说明）
+  static Timer _newFallbackTimer(Duration d, void Function() fn) {
+    final t = _ffiSafeTimer(d, fn);
+    _fallbackTimers.add(t);
+    return t;
+  }
+
+  /// 取消一个兜底计时器**并销账** —— 所有 `cancel()` 都必须走这里
+  ///
+  /// ⚠️ 直接写 `p.timer.cancel()` 会让 [_fallbackTimers] 里留下一条
+  ///    `isActive == false` 的死账。它不计入 [_fallbackTimers] 的 active 计数，
+  ///    所以不影响断言，但会让登记表演化成垃圾堆 —— 一律走这个函数。
+  static void _cancelFallback(Timer t) {
+    t.cancel();
+    _fallbackTimers.remove(t);
+  }
+
+  static void _deliverResult(int id, String? text) {
     final pending = _pending.remove(id);
     if (pending == null) return; // 已被取消/超时，忽略
 
     // ★ 先拆掉超时计时器（见 [_PendingCall] 的说明）
-    pending.timer.cancel();
+    _cancelFallback(pending.timer);
     final completer = pending.completer;
 
     /*
@@ -512,8 +560,6 @@ class SourinCore {
      * ⇒ 这条路径的代价（UI 线程上多十几毫秒的 `jsonDecode`）**可接受**：
      * 换来的是「整页加载不出来」这个量级的故障被彻底消除。
      */
-    final text = _readStringAndFree(resultPtr);
-
     void completeWith(dynamic value) {
       if (completer.isCompleted) return;
       if (value is Map && value['error'] != null) {
@@ -533,7 +579,46 @@ class SourinCore {
       return;
     }
 
-    completeWith(jsonDecode(text));
+    /*
+     * ★★★ CR-01：`jsonDecode` 必须**被保护**（2026-10-10 修）
+     *
+     * # 这个 try/catch 为什么是**必须的**，不是防御性冗余
+     *
+     * 走到这里时，下面这些**已经全部发生了**：
+     * ```dart
+     * final pending = _pending.remove(id);   // 表项没了
+     * pending.timer.cancel();                // 120 秒兜底也没了
+     * ```
+     * 而 [completeWith] 是 `jsonDecode` 之后**才**会被调用的。
+     * ⇒ 一旦解码抛 `FormatException`，`completer` **永远不会被完成**，
+     *   兜底计时器也已经取消 ⇒ [callAsync] 返回的 Future **永久挂起**。
+     *
+     * 用户看到的就是「设置页整页一直转圈、什么都不发生」，而且**没有任何报错**。
+     *
+     * # 触发条件不是理论上的
+     *
+     * Rust 侧回了一段**被截断的字符串**（写入端缓冲被打满 / 编解码出错 /
+     * 磁盘写了一半）时，`jsonDecode` 就会抛。用户**永远**看不到错误提示 ——
+     * 因为根本没有错误产生，只有"永远等不到"。
+     *
+     * # 为什么用 `catch (e)` 而不是 `catch (FormatException)`
+     *
+     * `jsonDecode` 理论上只抛 `FormatException`，但 `StackOverflowError` /
+     * `RangeError`（深层嵌套）这些也在 `Object` 范围内。这里要保证的是
+     * **"任何解码失败都不许让调用方挂起"** 这条不变量，而不是复述某一类异常。
+     */
+    dynamic decoded;
+    try {
+      decoded = jsonDecode(text);
+    } catch (e) {
+      if (!completer.isCompleted) {
+        completer.completeError(
+          SourinCoreException('核心返回了非法 JSON: $e', 'other'),
+        );
+      }
+      return;
+    }
+    completeWith(decoded);
   }
 
   /// ★★ 保留这个常量**只为记录当初的门槛**，解码路径已不再分大小
@@ -557,7 +642,7 @@ class SourinCore {
     final id = _nextId++;
     final completer = Completer<dynamic>();
     // 超时兜底：万一 Rust 侧永远不回调（不该发生），至少不让 UI 无限等下去
-    final timer = _ffiSafeTimer(const Duration(seconds: 120), () {
+    final timer = _newFallbackTimer(const Duration(seconds: 120), () {
       if (_pending.remove(id) == null) return;
       completer.completeError(
         SourinCoreException('命令 $cmd 超时（120 秒）', 'network'),
@@ -575,7 +660,7 @@ class SourinCore {
     } catch (e) {
       // 进不到原生 ⇒ 拆掉计时器，否则它会悬空 120 秒
       final pending = _pending.remove(id);
-      pending?.timer.cancel();
+      if (pending != null) _cancelFallback(pending.timer);
       return Future.error(e);
     } finally {
       malloc.free(req);
@@ -718,7 +803,7 @@ class SourinCore {
     final completer = Completer<void>();
     // 超时兜底：与 callAsync 同理（自己持有并在所有出口 cancel），
     // 不用 `future.timeout` —— 那样会在调用方提前放弃时留下悬空计时器。
-    final timer = _ffiSafeTimer(const Duration(seconds: 180), () {
+    final timer = _newFallbackTimer(const Duration(seconds: 180), () {
       if (!completer.isCompleted) {
         _cancelStreamFn!(token);
         _streamHandlers.remove(token);
@@ -746,13 +831,13 @@ class SourinCore {
 
       if (kind == 'done') {
         _streamHandlers.remove(token);
-        timer.cancel();
+        _cancelFallback(timer);
         completer.complete();
         return;
       }
       if (kind == 'error') {
         _streamHandlers.remove(token);
-        timer.cancel();
+        _cancelFallback(timer);
         completer.completeError(
           SourinCoreException(
             (ev is Map ? ev['error'] : null)?.toString() ?? '流式命令失败',
@@ -769,7 +854,7 @@ class SourinCore {
         // 业务回调抛异常 → 取消并让 Future 失败
         _cancelStreamFn!(token);
         _streamHandlers.remove(token);
-        timer.cancel();
+        _cancelFallback(timer);
         completer.completeError(e);
         return;
       }
@@ -801,7 +886,7 @@ class SourinCore {
       );
     } catch (e) {
       _streamHandlers.remove(token);
-      timer.cancel();
+      _cancelFallback(timer);
       return Future.error(e);
     } finally {
       malloc.free(req);
@@ -820,6 +905,76 @@ class SourinCore {
     _cancelStreamFn?.call(token);
     _streamHandlers.remove(token);
   }
+
+  /// 测试注入口：造一条「已在途、原生还没回调」的请求，返回它的 id
+  ///
+  /// # 为什么需要它（而不是让测试去调真 `callAsync`）
+  ///
+  /// [callAsync] 头两行是 `_ensureBound()` / `_ensureCallbackReady()` ——
+  /// 没有真 dll 就直接抛，测试**永远到不了**「表项已入 _pending」这个状态。
+  /// 于是历史上这条缺陷链**根本没法在不依赖 dll 的前提下测**，
+  /// 才退化成 CR-03 骂的那两条假测试。
+  ///
+  /// 这里复刻的只是 [callAsync] 里**与 dll 无关**的那部分：
+  /// 建 Completer ⇒ 建兜底计时器 ⇒ 放进 [_pending]。
+  /// 之后由回调侧（[debugFeedNativeResult]）走 [_deliverResult] 收尾。
+  ///
+  /// ⚠️ 计时器用 [_ffiSafeTimer]（与 [callAsync] 同一条），**不是** `Timer` ——
+  ///    否则测试结束时 `FakeAsync` 会把它判成悬空计时器（见该函数说明）。
+  ///
+  /// [duration] 给短一点，让「等它真的超时」这类用例不必等 120 秒。
+  @visibleForTesting
+  static int debugOpenPendingCall(
+    String cmd, {
+    Duration duration = const Duration(seconds: 120),
+  }) {
+    final id = _nextId++;
+    final completer = Completer<dynamic>();
+    final timer = _newFallbackTimer(duration, () {
+      if (_pending.remove(id) == null) return;
+      completer.completeError(
+        SourinCoreException('命令 $cmd 超时' + '（' + duration.inSeconds.toString() + ' 秒）', 'network'),
+      );
+    });
+    _pending[id] = _PendingCall(completer, timer);
+    return id;
+  }
+
+  /// 测试注入口：取回某条在途请求的 Future（用来等它结算）
+  ///
+  /// `null` = 该 id 不在 [_pending] 里（已结算或从未存在）。
+  @visibleForTesting
+  static Future<dynamic>? debugPendingFuture(int id) =>
+      _pending[id]?.completer.future;
+
+  /// 测试注入口：把一段**任意**返回体喂给某条在途请求的完成路径
+  ///
+  /// # 为什么要它（CR-01 的回归测试需要）
+  ///
+  /// CR-01 那个缺陷的触发条件是「Rust 回了一段非法 JSON」——
+  /// 而**测试里没法让真 dll 吐一段非法 JSON**。历史上正是因为测不了，
+  /// 才退化成用 `expect(r, isA<Object?>())` 这种恒真断言糊弄过去（CR-03）。
+  ///
+  /// 这里走的是 [_deliverResult] —— 与 [_onNativeResult] **同一条**路径
+  /// （后者只是多一步「从 Rust 内存里读出字符串」）。不是复刻品。
+  ///
+  /// [text] 传 `null` 表示「原生返回空指针」（等同空返回）。
+  @visibleForTesting
+  static void debugFeedNativeResult(int id, String? text) =>
+      _deliverResult(id, text);
+
+  /// 测试用：当前**活着**的兜底计时器数（登记在 [_fallbackTimers] 里）
+  ///
+  /// # 为什么必须有这个计数
+  ///
+  /// 它统计 [_fallbackTimers]（**活着的兜底计时器登记表**），不统计 [_pending]。
+  /// [_pending] 在结果送达的第一行就被移出了，拿它算「计时器有没有被 cancel」
+  /// **恒为 0** —— 实测把 `pending.timer.cancel()` 注释掉后下面的判据照样全绿。
+  /// 有了它，测试才能断言「命令结束后没有活着的兜底计时器」——
+  /// 撤掉任意一处 `cancel()` 都会立刻变红（已在 CR-03 上实测验证）。
+  @visibleForTesting
+  static int get debugPendingTimerCount =>
+      _fallbackTimers.where((t) => t.isActive).length;
 
   /// 测试收尾用：拆掉所有**仍在途**调用的兜底计时器
   ///
@@ -842,8 +997,15 @@ class SourinCore {
   @visibleForTesting
   static void debugCancelPendingCalls() {
     for (final p in _pending.values) {
-      p.timer.cancel();
+      _cancelFallback(p.timer);
     }
     _pending.clear();
+    // ⚠ [_pending] 只是「在途请求表」：结果送达时表项就被移出了，
+    //   那些计时器的生命周期更长。所以收尾必须**再**按计时器登记表清一遍，
+    //   否则登记表会攒下上一批用例的漏网计时器，把计数带进下一条用例。
+    for (final t in _fallbackTimers.toList()) {
+      t.cancel();
+    }
+    _fallbackTimers.clear();
   }
 }
