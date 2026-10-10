@@ -342,6 +342,87 @@ String clipDirOpenStrategy({
 @visibleForTesting
 double videoZoomToMpv(double pct) => math.log(pct / 100) / math.ln2;
 
+/// ★★★ task-33（Owner 第 1009 批 F1 后半）：顶栏站名该拿**哪个 id** 去查
+///
+/// # 缺陷（Owner 原话）
+///
+/// ```text
+/// 已缓存的也要显示原来的封面,点击进去的播放也要显示出来原来源,而不是local
+/// ```
+/// 本地会话的 `provider` 恒等于 [kProgressLocalProvider]（`'local'`）——
+/// 它是**续播的命名空间**（进度键 `local:<规范化路径>`，见
+/// `progress_origin.dart`），**不是站点**。于是 `providerDisplayName('local')`
+/// 只能把 id 原样吐回来，顶栏就挂出一枚写着 `local` 的胶囊
+/// （真机复现见 `.probe/ops/_f1b1_repro_raw.txt`）。
+///
+/// # 判据（三种输入 → 三种输出）
+///
+/// ```text
+/// provider 不是 local                        → provider
+///   （在线会话，原行为一个字不动）
+/// provider 是 local 且 originProvider 非空白 → originProvider
+///   （本地会话认回“当初从哪个站下的”，来源由 cache_page 的旁文件带下来）
+/// provider 是 local 且来源空白 / 就是 local  → null
+///   （真不知道 ⇒ 调用方用 [kLocalSessionSourceLabel] 兜底，**绝不显示 `local`**）
+/// ```
+///
+/// `null` 的含义是“没有**站点**可查”，**不是**“显示空字符串” —— 与
+/// `detail_page.dart::_loadLocalOrigin`（`:1521-1550`）同一口径：认不回来时
+/// **如实写「本地」**，既不空着、也不冒充任何站点。详情页那半的常量是
+/// `detail_page.dart:530 kLocalSourceLabel`，而本文件**不 import** 详情页
+/// （两页之间没有依赖）⇒ 这里自带一枚同值常量 [kLocalSessionSourceLabel]，
+/// 并由 `test/zz_cr_local_session_player_test.dart` 钉住两者**必须相等**。
+///
+/// ⚠️ 只决定**显示**：`_provider` 本身一个字都不许改（换源判据 / 续播键 /
+///    路由全靠它）。
+@visibleForTesting
+String? providerNameLookupId({
+  required String provider,
+  required String? originProvider,
+}) {
+  if (provider != kProgressLocalProvider) return provider;
+  final o = originProvider?.trim() ?? '';
+  if (o.isEmpty || o == kProgressLocalProvider) return null;
+  return o;
+}
+
+/// ★★★ task-33（F1 后半）：本地会话**认不回来源**时，顶栏如实写这一枚。
+///
+/// # 为什么不是空、也不是 `local`
+/// Owner：「点击进去的播放也要显示出来原来源,而不是local」。
+/// 认不回来（旁文件缺失）时**如实写「本地」** —— 不空着（用户会以为名字没加载
+/// 出来）、也**绝不**把 [kProgressLocalProvider] 那个**续播命名空间**的 id
+/// （`'local'`）当站点名挂出去（那才是 Owner 说的“而不是local”）。
+///
+/// ⚠️ 与 `detail_page.dart:530 kLocalSourceLabel`（`'本地'`）**必须逐字相等**：
+///    同一件事在详情页与播放页是两个说法，就是在制造新的不一致。两者之间
+///    没有依赖（本文件不 import 详情页）⇒ 相等性由门禁
+///    `test/zz_cr_local_session_player_test.dart` 直接读两个文件钉住。
+const String kLocalSessionSourceLabel = '本地';
+
+/// ★★★ task-33（B①）：这个 provider 是不是「本地文件会话」
+///
+/// # 缺陷（Owner 原话）
+///
+/// ```text
+/// 这个好像是概率性的,缓存到本地就不要显示换源按钮了
+/// ```
+/// 详情页那一半（本地行上那枚「换源」）已经关掉了，**播放器「更多」里
+/// 还有第二枚**，而且它没有任何门控 ⇒ 本地文件播到一半点「换源」，
+/// 弹层里搜出来的全是**别的站点**的同一部剧，而这一集在磁盘上就有，
+/// 换源无处可落。
+///
+/// # 为什么判据是 `_provider` 而不是 `widget.localPath`
+///
+/// `widget.localPath` 是**页面级**不可变量，而 `applySession`（原地换源 /
+/// 换集）会把 `_provider` 换成在线站点 ⇒ 用静态判据的话，“本地页里切到
+/// 在线源”之后换源会被**永久藏起来**。`_provider == 'local'` 是唯一
+/// **跟着会话走**的判据，而且它跟续播命名空间是同一个（改它等于把旧进度
+/// 全丢，见 `cache_page.dart` 的裁决）。
+@visibleForTesting
+bool isLocalSessionProvider(String provider) =>
+    provider == kProgressLocalProvider;
+
 /// 播放页
 class PlayerPage extends StatefulWidget {
   const PlayerPage({
@@ -1879,6 +1960,14 @@ class _PlayerPageState extends State<PlayerPage>
 
   bool get _isLive => _liveChannelId != null;
 
+  /// ★★★ task-33（B①）：当前会话是不是**本地文件**（判据与理由见顶层
+  /// [isLocalSessionProvider]）。
+  ///
+  /// ⚠️ 必须**跟着 `_provider` 走**：`applySession` 原地换到在线源之后
+  ///    这一项要变回 false（换源重新可用），所以不能写成
+  ///    `widget.localPath != null`。
+  bool get _isLocalSession => isLocalSessionProvider(_provider);
+
   @override
   void initState() {
     super.initState();
@@ -2300,15 +2389,41 @@ class _PlayerPageState extends State<PlayerPage>
   /// 取当前站点的显示名（task-32）
   ///
   /// ⚠️ 换源后会再次调用（`_provider` 变了）—— 见 `_switchSource`。
+  ///
+  /// ★★★ task-33（F1 后半）：查名字的 id 交给顶层 [providerNameLookupId]
+  ///    现算 —— 本地会话（`_provider == 'local'`）要么认回 [originProvider]
+  ///    那个**真站点**，要么用 [kLocalSessionSourceLabel]（「本地」）兜底。
+  ///
+  ///    改前是 `providerDisplayName(_provider)` 一把梭 ⇒ 本地会话把
+  ///    `'local'` 原样挂到顶栏（Owner 看到的「而不是local」）。
   Future<void> _loadProviderName() async {
-    final id = _provider;
-    final n = await providerDisplayName(id);
+    /*
+     * 判据在**发起时**算一次，并且与代次保护用**同一个**值 ——
+     * 否则「本地页里换到在线源」这类切换会让两次比较的基准不一致。
+     */
+    final id = providerNameLookupId(
+      provider: _provider,
+      originProvider: widget.originProvider,
+    );
+    /*
+     * 没有**站点**可查（本地会话且没有旁文件）⇒ 顶栏如实写「本地」
+     * （[kLocalSessionSourceLabel]），**绝不**把 `_provider` 那个续播
+     * 命名空间（`'local'`）当名字挂出去 —— 那正是 Owner 说的“而不是local”。
+     */
+    final n = await providerDisplayName(id ?? kLocalSessionSourceLabel);
     /*
      * ★ 代次保护：换源是**异步**的，两次调用可能乱序返回。
-     *   用"发起时的 id 是否仍是当前 id"作判据 —— 过期的那次直接丢弃，
+     *   用「发起时的 id 是否仍是当前 id」作判据 —— 过期的那次直接丢弃，
      *   否则顶栏可能停在旧站名（本项目在 `_seekAfterReady` 踩过同类坑）。
      */
-    if (!mounted || id != _provider) return;
+    if (!mounted) return;
+    if (id !=
+        providerNameLookupId(
+          provider: _provider,
+          originProvider: widget.originProvider,
+        )) {
+      return;
+    }
     setState(() => _providerName = n);
   }
 
@@ -4272,11 +4387,27 @@ class _PlayerPageState extends State<PlayerPage>
             icon: Icons.search,
             onTap: () => _openSubtitlePanel(),
           ),
-        MoreMenuEntry(
-          label: '换源',
-          icon: Icons.travel_explore,
-          onTap: () => unawaited(_openSwitchSource()),
-        ),
+        /*
+         * ★★★ task-33（B①，Owner 原话「缓存到本地就不要显示换源按钮了」）：
+         *
+         * 本地文件会话**不画**这一项 —— 这一集就在磁盘上，弹层里搜出来的
+         * 全是别的站点的同一部剧，换源无处可落。
+         *
+         * 判据用 `_isLocalSession`（跟着 `_provider` 走）而不是
+         * `widget.localPath != null`：后者是页面级不可变量，原地换到在线源
+         * 之后会把换源**永久藏起来**（理由见顶层 `isLocalSessionProvider`）。
+         *
+         * ⚠️ 必须留在「播放」那个分组自己的列表字面量**内部**（不要搬去别处）——
+         *    两条既有源码门禁（`t68_android_adapt_test.dart` 的 E③ 与
+         *    `zz_cr_next_dup_more_menu_test.dart` 的解析器）都靠这一项还在
+         *    这一组里，判据是「入口可以门控，功能不许删」。
+         */
+        if (!_isLocalSession)
+          MoreMenuEntry(
+            label: '换源',
+            icon: Icons.travel_explore,
+            onTap: () => unawaited(_openSwitchSource()),
+          ),
       ]),
       MoreMenuGroup('弹幕', [
         MoreMenuEntry(
