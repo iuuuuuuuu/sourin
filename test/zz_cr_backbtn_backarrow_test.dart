@@ -141,14 +141,50 @@ _Arrow _readArrow(WidgetTester t) {
 /// 底栏是否挂在树上（真实观察点：`PlayerBottomBar` 是**公开类**，测试可 import）
 int _bottomBarCount() => find.byType(PlayerBottomBar).evaluate().length;
 
+/// 依赖真播放器的 libmpv 夹具（与 `test/t61_panel_radius_test.dart` 的
+/// `_requireLibmpv()` 同一形状）。
+///
+/// ★ 为什么缺件时**默认跳过**而不是 `fail`（2026-10-10，task-37 / T11 裁决）：
+///   `@Tags(['native-media'])` 让本文件在 CI 上根本不跑（CI 是裸 `flutter test`），
+///   而本文件里还有**静态**判据（读 `lib/ui/player_page.dart` 源码），
+///   完全不需要 libmpv ⇒ 让整个文件在「合法地没有夹具」的机器上红，既拦不住
+///   CI 的回归，又把本机 `--run-skipped --tags native-media` 的例行 sweep 变成
+///   假红。缺件是**环境事实**，不是被测代码的缺陷。
+///   需要严格时用 `SOURIN_REQUIRE_LIBMPV=1` 一键要回硬失败。
+final File _libmpvDll = File('build/windows/x64/libmpv/libmpv-2.dll');
+
+/// 依赖真播放器的用例开头调用：`if (!_requireLibmpv()) return;`
+///
+/// 返回 `true` = 夹具就绪可继续；`false` = **已标记跳过，调用方必须 return**
+/// （`markTestSkipped` 只打标记，**不会**中断当前函数 —— 本地实测：标记之后的
+/// 代码照常执行，所以必须紧跟 `return`）。
+///
+/// 硬失败开关：环境变量 `SOURIN_REQUIRE_LIBMPV=1` ⇒ 缺件时 `fail(...)`。
+bool _requireLibmpv() {
+  if (_libmpvDll.existsSync()) return true;
+  if (Platform.environment['SOURIN_REQUIRE_LIBMPV'] == '1') {
+    fail(
+      'libmpv 夹具缺失：${_libmpvDll.absolute.path} 不存在'
+      '（被 SOURIN_REQUIRE_LIBMPV=1 要求为硬失败）',
+    );
+  }
+  markTestSkipped(
+    'libmpv 夹具缺失：${_libmpvDll.absolute.path} 不存在'
+    ' ⇒ 依赖播放器的用例无从断言。'
+    '手动跑：先 `flutter build windows` 生成该夹具；'
+    '要把缺件当失败跑：设 SOURIN_REQUIRE_LIBMPV=1',
+  );
+  return false;
+}
+
 void main() {
   setUpAll(() {
-    final dll = File('build/windows/x64/libmpv/libmpv-2.dll');
+    final dll = _libmpvDll;
     if (dll.existsSync()) {
       MediaKit.ensureInitialized(libmpv: dll.absolute.path);
-    } else {
-      fail('libmpv 夹具缺失：${dll.absolute.path} 不存在');
     }
+    // else：夹具缺失 ⇒ **不 fail、不初始化**；守卫下沉到 `_requireLibmpv()`，
+    // 由每个**依赖播放器**的用例自己调（静态判据照常跑）。
   });
   setUp(() => RemoteBridge.instance.stop());
   tearDown(() => RemoteBridge.instance.stop());
@@ -156,6 +192,7 @@ void main() {
   group('★ 控制条收起后，左上角返回箭头必须跟着消失', () {
     testWidgets('① 错误态：自动隐藏跑到底 ⇒ gone == true 且不参与命中测试',
         (t) async {
+      if (!_requireLibmpv()) return;
       await _mount(t);
 
       // 先把 flutter_tester 天然的「起播失败」清掉，再复现业主那条路径：
@@ -224,6 +261,7 @@ void main() {
     });
 
     testWidgets('② 对照：鼠标一动，箭头必须立刻回来（不许被我一并修掉）', (t) async {
+      if (!_requireLibmpv()) return;
       await _mount(t);
       expect(debugPlayerForceBarsForShot(), isTrue);
       await _settleMotion(t);
@@ -254,6 +292,7 @@ void main() {
     });
 
     testWidgets('③ 对照：无错误路径的「收起即消失」不许回归', (t) async {
+      if (!_requireLibmpv()) return;
       await _mount(t);
       expect(debugPlayerForceBarsForShot(), isTrue);
       await _settleMotion(t);

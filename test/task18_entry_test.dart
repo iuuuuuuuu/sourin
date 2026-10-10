@@ -268,9 +268,42 @@ void main() {
   final dataDir = Directory('.probe/t18e_data');
 
   setUpAll(() async {
-    // ★ 环境前提不成立 ⇒ 直接返回（用例都带 `skip:`，不会真跑）
+    /*
+     * ★★★ T10（task-35）2026-10-10 改：DLL 不在 = **另一种被测环境**，不再跳过
+     *
+     * ```text
+     * 旧版：`if (!_dllReady) return;` + 每个用例 `skip: !_dllReady`
+     *       ⇒ CI 上（测试步骤跑在构建**之前**、core dll 还没产出）整个文件
+     *         只打印 `+0 ~5: All tests skipped.` 并且 **exit 0** —— 假绿：
+     *         门禁看起来在跑，其实一条断言都没执行过。
+     * 新版：`_dllReady` 只当**环境判别器**。缺件态照样把一级页/二级页真渲染、
+     *       真点击、真断言（缺件态有自己的可断言契约，见 A 组与 B/C 组）。
+     * ```
+     *
+     * ★ 为什么缺件态**先** `UiPrefs.debugResetForTest()` 再返回：
+     *   B/C 两个用例只读 `ClipDownloader` / `PlayerGestures` / `UiPrefs`
+     *   这些**纯 Dart 静态**，DLL 在不在都不影响它们真跑；而它们的确定性
+     *   依赖「偏好从空开始」这条前置。
+     */
     if (!_dllReady) {
-      log('★★ $_dllRel 不存在 ⇒ 跳过（先构建 Windows 版再跑本守卫）');
+      log('★★ T10 缺件态：$_dllRel 不存在 —— **不跳过**，改跑缺件态契约'
+          '（一级页/二级页真渲染 + 版本行降级文案 + B/C 纯静态门禁）');
+      UiPrefs.debugResetForTest();
+      /*
+       * ★★ 两态前置必须**对齐**（否则不是在测产品，是在测仪器）。
+       *
+       * `PlaybackSettingsPage._refreshEnv()`（`playback_page.dart:466-474`）
+       * 走 `_envFields()` ⇒ `ClipDownloader.dataDir()`（`clip_download.dart:531-554`）。
+       * 在位态下它命中 `_dataDirCache`（下面 `debugSetDataDir` 灌进去的）
+       * ⇒ 微任务内就返回；缺件态若不灌，它会去走
+       * `Platform.environment['APPDATA']` + `Directory.create()` —— **真磁盘 I/O**，
+       * 而 widget 测试跑在 fake async 区里，那个 future 永远不会完成
+       * ⇒ 「环境信息」卡片永远停在「读取中…」（实测踩到：
+       * `Expected: <1> Actual: <0>`，而在位态同一条是绿的）。
+       * ⇒ 缺件态也把数据目录指到隔离目录，两态只差
+       *   「核心加载了没有」这**一个**变量。
+       */
+      ClipDownloader.debugSetDataDir(dataDir.absolute.path);
       return;
     }
     _preloadCoreDll();
@@ -398,6 +431,52 @@ void main() {
       expect(clipW.max, 8,
           reason: '$tag| ★ 这个滑杆必须真的是片段那个（档位 0..8）');
 
+      /*
+       * ★★★ T10（task-35）2026-10-10 新增：**缺件态**下这一页也必须有一条
+       *   真能红的契约 —— 否则 CI 上整个文件是空转（旧版 `+0 ~5 skipped`）。
+       *
+       * 缺件态下 `SourinApi.version` ⇒ `SourinCore.version` ⇒ `_ensureBound()`
+       * 抛 `Invalid argument(s): Failed to load dynamic library
+       * 'sourin_core.dll': The specified module could not be found.
+       * (error code: 126)`，被 `playback_page.dart:433-439` 的 catch 接住
+       * ⇒「版本」那一行的值必须以「读不到（核心未加载：」开头。
+       * 在位态下这一行必须是真版本号 ⇒ 反过来断言它**不**是降级文案。
+       * 两种环境下这条都会红（改降级文案 / 改 catch 分支 / 让 version 不再抛）。
+       *
+       * ★ 值在 `SelectableText` 里（`settings_kit.dart:693-700`），
+       *   不是 `Text` —— 用 `find.text` 找值会永远找不到（假红）。
+       *
+       * ★★ 为什么必须先 `_scrollTo`：这一页是高于 900px 的
+       *   `CustomScrollView`（`settings_sub_page.dart`），「环境信息」卡片在底部
+       *   ⇒ 不滚的话它根本没被建出来。第一次插进去时就是
+       *   这么假红的（实测 `Expected: <1> Actual: <0>`）—— 工具问题，
+       *   不是产品问题。先滚到它可见再读。
+       */
+      final verRow = find.ancestor(
+        of: find.text('版本'),
+        matching: find.byType(SettingsInfoRow),
+      );
+      await _scrollTo(tester, verRow);
+      expect(_count(verRow), 1,
+          reason: '$tag| ★ 二级页「环境信息」里必须有「版本」那一行');
+      final verText = tester
+          .widget<SelectableText>(find.descendant(
+            of: verRow,
+            matching: find.byType(SelectableText),
+          ))
+          .data!;
+      log('$tag| 版本行 = $verText');
+      if (!_dllReady) {
+        expect(verText, startsWith('读不到（核心未加载：'),
+            reason: '$tag| ★★ 缺件态：核心版本必须**如实降级**成'
+                '「读不到（核心未加载：…）」，不许编一个版本号出来');
+        expect(verText, contains('sourin_core.dll'),
+            reason: '$tag| ★ 降级文案里必须带上是哪个库没加载');
+      } else {
+        expect(verText, isNot(startsWith('读不到')),
+            reason: '$tag| ★★ 在位态：核心已加载，版本行不该再是降级文案');
+      }
+
       // 返回一级页（闭环：入口可达 ⇒ 也能回来）
       await _tapAndSettle(tester, find.text('返回设置'), '$tag|back1');
       final f2 = await _pumpUntilGone(tester, find.byType(PlaybackSettingsPage));
@@ -461,7 +540,7 @@ void main() {
           reason: '$tag| 返回后必须回到一级页');
 
       await _teardownTree(tester, tag);
-    }, timeout: kTimeout, skip: !_dllReady);
+    }, timeout: kTimeout);
   }
 
   // ═══════════════════════════════════════════════════════════════════
@@ -542,7 +621,7 @@ void main() {
     expect(ClipDownloader.concurrency, 8, reason: 'B| 静态字段自己夹到 0..8');
 
     await _teardownTree(tester, 'B');
-  }, timeout: kTimeout, skip: !_dllReady);
+  }, timeout: kTimeout);
 
   // ═══════════════════════════════════════════════════════════════════
   //  C. 二级页「播放手势」：标题陷阱 + 档位齐 + 双击步长真的落盘
@@ -611,7 +690,7 @@ void main() {
         reason: 'C| ★ 关掉之后档位整段收起（证明这条 if 分支是真渲染的）');
 
     await _teardownTree(tester, 'C');
-  }, timeout: kTimeout, skip: !_dllReady);
+  }, timeout: kTimeout);
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -684,4 +763,63 @@ void main() {
 // [T18E] B| 真拖拽 -300px：8 -> 2（偏好 = 2）
 // [T18E] C| 点「30 秒」后 doubleTapSeconds=30  偏好=30
 // [T18E] C| 关掉双击开关后 doubleTapEnabled=false  「30 秒」= 0  偏好=0
+// ```
+
+// ═══════════════════════════════════════════════════════════════════════
+//  T10（task-35）两态门禁改造记录 —— 2026-10-10
+// ═══════════════════════════════════════════════════════════════════════
+//
+// # 改了什么（为什么必须改）
+// ```text
+// CI 的测试步骤跑在**构建之前** ⇒ `sourin_core.dll` 还不存在 ⇒ `_dllReady=false`
+// ⇒ 旧版本文件打印 `+0 ~5: All tests skipped.` 且 **exit 0** —— 门禁看着在跑，
+//   实际一条断言都没执行（假绿）。
+// 现在：`_dllReady` 只当**环境判别器**。两个环境都真渲染、真点击、真断言。
+// ```
+//
+// # 两态原始读数（同一台机器，只切 dll 在不在）
+// ```text
+// 在位态（dll 在）：      flutter test test/task18_entry_test.dart ⇒ 00:11 +5: All tests passed!  exit=0
+// 缺件态（改名 .hold）：  同命令                                ⇒ 00:12 +5: All tests passed!  exit=0
+// 缺件态版本行读数：
+//   [T18E] A.desktop|  版本行 = 读不到（核心未加载：Invalid argument(s): Failed to load dynamic library 'sourin_core.dll': The specified module could not be found.
+//   [T18E] A.touchOnly| 版本行 = （同上）
+//   [T18E] A.tv|        版本行 = （同上）
+// ```
+//
+// # 缺件态为什么能读到「版本」行（踩过的坑，别踩第二遍）
+// ```text
+// `PlaybackSettingsPage._refreshEnv()`（playback_page.dart:466-474）走
+// `_envFields()` ⇒ `ClipDownloader.dataDir()`（clip_download.dart:531-554）。
+// 在位态它命中 setUpAll 灌进去的 `_dataDirCache`，微任务内就返回；
+// 缺件态若**不**灌，它会去走 `Platform.environment['APPDATA']` +
+// `Directory.create()` —— 真磁盘 I/O，而 widget 测试跑在 fake async 区里，
+// 那个 future 永远不会完成 ⇒ 卡片永远停在「读取中…」⇒ 断言 `Expected: <1> Actual: <0>`
+// （实测踩到，且在位态同一条是绿的 ⇒ 两态前置必须对齐）。
+// 修法：缺件态也 `ClipDownloader.debugSetDataDir(dataDir.absolute.path)`。
+// 另一个坑：这一页高于 900px，「环境信息」卡片在底部 ⇒ 读之前必须先 `_scrollTo`。
+// ```
+//
+// # 阳性对照（改产品代码 ⇒ 必红 ⇒ 逐字节还原）
+// ```text
+// 口径：把 dll 改名 ⇒ 跑缺件态 ⇒ 改**一处**源码 ⇒ 跑 ⇒ 原字节写回 ⇒ 核 sha256[:16]
+// | # | 变异点 | 冻结 sha16 → 还原后 | 红在哪行 | Expected/Actual |
+// |---|---|---|---|---|
+// | PC1 | `playback_page.dart` 降级文案 `version = '读不到（…'` 前加 `X` | E203F5864E0474AE → 同 ✔ | :470 | a string starting with '读不到（核心未加载：' / 'X读不到（… |
+// | PC2 | `settings_page.dart:2657` 空态文案加 `X` | （另一文件，见 t53s 记录） | t53s:734 | 1 / 0 |
+// | PC3 | `settings_page.dart:2546` `kCoreVersionFallbackLabel` 加 `X` | （同上） | t53s:540 | '核心未加载 · 架构与设备信息' / '核心未X加载 · …' |
+// ⇒ PC1 三个端形态**同时**红（A.desktop / A.touchOnly / A.tv），exit=1。
+// ⇒ 还原后 `lib/ui/settings/playback_page.dart` = e203f5864e0474ae（与冻结值逐字节相同）。
+// ```
+//
+// # 本文件仍然**测不到**的（诚实标注，免得读者高估覆盖）
+// ```text
+// · 缺件态与在位态的差异**只有一处**：核心库加载与否。三端形态（DeviceKind）
+//   在缺件态下也只影响布局矩形，不影响入口是否存在（与在位态同一条限制）。
+// · 「版本」行只断言**前缀**（缺件态）与「不是降级文案」（在位态），
+//   不断言版本号具体值 —— 版本号由 Rust 侧决定，钉死它会变成"改版本就红"。
+// · 缺件态下 `SourinApi.start()` 从未被调用 ⇒ 任何依赖已启动核心的契约
+//   （provider 列表、插件、直播分组）在本文件里**缺件态一律没测到**。
+// · 首屏 `CircularProgressIndicator` 只在**在位态**为 1（缺件态 `loadAll()`
+//   很快失败 ⇒ 首帧可能已经是 0）⇒ 该断言未放进两态公共路径。
 // ```

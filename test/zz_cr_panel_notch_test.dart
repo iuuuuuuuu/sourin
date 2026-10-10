@@ -131,6 +131,12 @@ void _prepareLibmpvFixture() {
 
 bool _requireLibmpv() {
   if (_libmpv != null) return true;
+  if (Platform.environment['SOURIN_REQUIRE_LIBMPV'] == '1') {
+    fail(
+      'libmpv 夹具缺失：${File(_libmpvCandidates().first).absolute.path} 不存在'
+      '（被 SOURIN_REQUIRE_LIBMPV=1 要求为硬失败）',
+    );
+  }
   markTestSkipped('libmpv 夹具缺失 ⇒ MediaPage 建不起来，本条无从断言。'
       '手动跑：先 flutter build windows；候选路径 = '
       + _libmpvCandidates().toString());

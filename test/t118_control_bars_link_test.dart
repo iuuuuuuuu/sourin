@@ -147,20 +147,57 @@ String _stripComments(String src) {
   return out.toString();
 }
 
+/// 依赖真播放器的 libmpv 夹具（与 `test/t61_panel_radius_test.dart` 的
+/// `_requireLibmpv()` 同一形状）。
+///
+/// ★ 为什么缺件时**默认跳过**而不是 `fail`（2026-10-10，task-37 / T11 裁决）：
+///   `@Tags(['native-media'])` 让本文件在 CI 上根本不跑（CI 是裸 `flutter test`），
+///   而本文件里还有**静态**判据（读 `lib/ui/player_page.dart` 源码），
+///   完全不需要 libmpv ⇒ 让整个文件在「合法地没有夹具」的机器上红，既拦不住
+///   CI 的回归，又把本机 `--run-skipped --tags native-media` 的例行 sweep 变成
+///   假红。缺件是**环境事实**，不是被测代码的缺陷。
+///   需要严格时用 `SOURIN_REQUIRE_LIBMPV=1` 一键要回硬失败。
+final File _libmpvDll = File('build/windows/x64/libmpv/libmpv-2.dll');
+
+/// 依赖真播放器的用例开头调用：`if (!_requireLibmpv()) return;`
+///
+/// 返回 `true` = 夹具就绪可继续；`false` = **已标记跳过，调用方必须 return**
+/// （`markTestSkipped` 只打标记，**不会**中断当前函数 —— 本地实测：标记之后的
+/// 代码照常执行，所以必须紧跟 `return`）。
+///
+/// 硬失败开关：环境变量 `SOURIN_REQUIRE_LIBMPV=1` ⇒ 缺件时 `fail(...)`。
+bool _requireLibmpv() {
+  if (_libmpvDll.existsSync()) return true;
+  if (Platform.environment['SOURIN_REQUIRE_LIBMPV'] == '1') {
+    fail(
+      'libmpv 夹具缺失：${_libmpvDll.absolute.path} 不存在'
+      '（被 SOURIN_REQUIRE_LIBMPV=1 要求为硬失败）',
+    );
+  }
+  markTestSkipped(
+    'libmpv 夹具缺失：${_libmpvDll.absolute.path} 不存在'
+    ' ⇒ 依赖播放器的用例无从断言。'
+    '手动跑：先 `flutter build windows` 生成该夹具；'
+    '要把缺件当失败跑：设 SOURIN_REQUIRE_LIBMPV=1',
+  );
+  return false;
+}
+
 void main() {
   setUpAll(() {
-    final dll = File('build/windows/x64/libmpv/libmpv-2.dll');
+    final dll = _libmpvDll;
     if (dll.existsSync()) {
       MediaKit.ensureInitialized(libmpv: dll.absolute.path);
-    } else {
-      fail('libmpv 夹具缺失：${dll.absolute.path} 不存在');
     }
+    // else：夹具缺失 ⇒ **不 fail、不初始化**；守卫下沉到 `_requireLibmpv()`，
+    // 由每个**依赖播放器**的用例自己调（静态判据照常跑）。
   });
   setUp(() => RemoteBridge.instance.stop());
   tearDown(() => RemoteBridge.instance.stop());
 
   group('★ 顶栏 / 底栏 显隐联动', () {
     testWidgets('① 两条控制条读的是**同一个**动画值（结构性联动）', (t) async {
+      if (!_requireLibmpv()) return;
       await _mount(t);
       final o = debugPlayerControlBarsOpacity();
       expect(o, isNotNull, reason: '★ 没有播放页 ⇒ 探针拿不到读数');
@@ -175,6 +212,7 @@ void main() {
     });
 
     testWidgets('② 触发隐藏条件 ⇒ 顶栏与底栏**一起**淡到 0', (t) async {
+      if (!_requireLibmpv()) return;
       await _mount(t);
       expect(debugPlayerControlBarsOpacity()!.$1, 1.0, reason: '前提：先完全显示');
 
@@ -194,6 +232,7 @@ void main() {
     });
 
     testWidgets('③ 触发显示条件 ⇒ 两条**一起**回到 1', (t) async {
+      if (!_requireLibmpv()) return;
       await _mount(t);
       debugPlayerAutoHideControlsForProbe();
       await _settleMotion(t);
@@ -209,6 +248,7 @@ void main() {
     });
 
     testWidgets('④ 来回切换多轮：两条的读数**每一帧都相等**', (t) async {
+      if (!_requireLibmpv()) return;
       await _mount(t);
       for (var round = 0; round < 3; round++) {
         debugPlayerAutoHideControlsForProbe();
@@ -239,6 +279,7 @@ void main() {
     });
 
     testWidgets('⑤ 联动是**动画**不是硬切（存在中间帧）', (t) async {
+      if (!_requireLibmpv()) return;
       await _mount(t);
       debugPlayerAutoHideControlsForProbe();
       /*
@@ -453,6 +494,7 @@ void main() {
     });
 
     testWidgets('⑥ 静止鼠标**不再**让控制条复活（原缺陷：hover 每帧续命）', (t) async {
+      if (!_requireLibmpv()) return;
       await _mount(t);
       debugPlayerAutoHideControlsForProbe();
       await _settleMotion(t);
