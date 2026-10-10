@@ -1,0 +1,69 @@
+# ═══════════════════════════════════════════════════════════════════════
+#  源影 · PR 规模门禁
+# ═══════════════════════════════════════════════════════════════════════
+#
+#  ★ 它是 CI 的 job（会挡住合并），**不是** 必需检查（required check）。
+#    两者区别很要紧：
+#      · 必需检查 = 挡「这个 PR 能不能合」，被 skipped 时**也**要过；
+#      · job      = 自己跑、自己判红绿，你想合并就点按钮，GitHub 记一条日志。
+#    门禁的规矩是「超了必须拆」，但 owner 仍然有权「这次先合、并且写明理由」
+#    （就像分支保护里「破坏性回滚要临时放开保护，改完记得改回来」）。
+#    ⇒ 做成必需检查会把「这次先合」这条路也堵死，那不是我们想要的。
+#
+#  触发：pull_request（开 PR / 推新 commit 都会跑）。
+#  例外：owner 可以在 PR 上打 size/exempt 标签跳过门禁，
+#        理由照旧写进 PR 描述 —— 「豁免」也要留痕。
+#
+#  阈值与 CONTRIBUTING.md「★★★ PR 规模」一节同源：
+#    目标 ≤600 行 / ≤30 文件（超了提醒）
+#    硬上限 ≤1200 行 / ≤60 文件（超了 exit 1）
+
+name: PR 规模
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  pr_size:
+    name: PR 规模
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          # ★ 必须拿全部历史：门禁要算 merge-base 到 PR head 的完整 diff。
+          #   浅克隆（depth:1）下 merge-base 会算错，读数偏小 ⇒ 假绿。
+          fetch-depth: 0
+
+      - name: 判规模
+        id: size
+        shell: bash
+        run: |
+          set -euo pipefail
+          node tools/pr_size.mjs --base "origin/${{ github.base_ref }}"
+
+      - name: 查豁免标签
+        id: label
+        # ★ 门禁 job 自己不能给自己发标签，所以只能读。
+        #   pull-requests: read 是读 PR 元数据；labels 需要 issues: read
+        #   （GitHub 把 PR 的标签算在 issues 命名空间下 —— 这是个常见坑）。
+        uses: actions/github-script@v7
+        env:
+          PR: ${{ github.event.pull_request.number }}
+        with:
+          script: |
+            const labels = (context.payload.pull_request.labels || []).map(l => l.name);
+            core.info('PR 标签：' + (labels.join(', ') || '(无)'));
+            core.setOutput('exempt', labels.includes('size/exempt') ? 'yes' : 'no');
+
+      - name: 按标签处理（豁免则改判）
+        if: failure() && steps.label.outputs.exempt == 'yes'
+        shell: bash
+        run: |
+          echo "::notice::本 PR 带了 size/exempt 标签 ⇒ 规模门禁不阻塞。";
+          echo "请确认 PR 描述里写明了「为什么这次不拆」—— 规矩见 CONTRIBUTING.md「★★★ PR 规模」。";
+          exit 0
