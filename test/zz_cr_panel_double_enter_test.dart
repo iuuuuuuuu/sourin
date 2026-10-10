@@ -128,6 +128,101 @@ List<String> _dumpRenderTree(RenderObject root,
   return out;
 }
 
+// ══════════════════════════════════════════════════════════════════════════
+//  libmpv 夹具：跨平台探测 + 缺夹具时**跳过**（不是假红、更不是假绿）
+// ══════════════════════════════════════════════════════════════════════════
+//
+// 与 t61_panel_radius_test.dart:167-242 / t72_jank_test.dart:186-219 /
+// zz_cr_panel_notch_test.dart:83-144 同一手法（本仓既有约定）：
+// MediaPage 的第 0 个 child 是 PlayerPage，它 initState 里就 Player()
+// ⇒ MediaKit 未就绪会抛 MediaKit.ensureInitialized must be called…，
+//   而播放器子树会被 ErrorWidget 整个顶替 ⇒ 下面的六项指纹会「自己等于自己」。
+//
+// ★ 为什么缺夹具是 **skip** 而不是 fail：`build/` 被 .gitignore 忽略、从不入库，
+//   而 CI 的 flutter test 排在 flutter build windows|macos **之前** ⇒ 没跑过构建的
+//   机器上夹具**必然缺席**。那是环境前提，不是本文件的缺陷。
+// ⚠️ **不能**改成 @Tags(['native-media'])：dart_test.yaml 把该标签默认 skip
+//   ⇒ 本门禁会从默认套件里**整个消失** —— 那是移除覆盖，不是加守卫。
+// ══════════════════════════════════════════════════════════════════════════
+
+/// libmpv 的候选路径（**跨平台** —— 别只写 Windows 那一条）
+List<String> _libmpvCandidates() {
+  if (Platform.isWindows) {
+    return <String>[
+      r'build\windows\x64\libmpv\libmpv-2.dll',
+      r'build\windows\x64\runner\Release\libmpv-2.dll',
+    ];
+  }
+  if (Platform.isMacOS) {
+    final out = <String>[
+      // pod 的 vendored framework（pod install 之后）
+      'macos/Pods/media_kit_libs_macos_video/Frameworks/'
+          'Mpv.xcframework/macos-arm64_x86_64/libmpv-2.dylib',
+      'macos/Pods/media_kit_libs_macos_video/Frameworks/'
+          'Mpv.xcframework/macos-arm64/libmpv-2.dylib',
+    ];
+    // flutter build macos 之后 libmpv 就在 app 包里
+    // （★ app 名不一定是 sourin_spike —— 发布版是中文「源影」⇒ 扫目录）
+    for (final cfg in const <String>['Release', 'Debug', 'Profile']) {
+      final dir = Directory('build/macos/Build/Products/$cfg');
+      if (!dir.existsSync()) continue;
+      for (final e in dir.listSync()) {
+        if (e is Directory && e.path.endsWith('.app')) {
+          out.add('${e.path}/Contents/Frameworks/libmpv-2.dylib');
+        }
+      }
+    }
+    return out;
+  }
+  // Linux / 其它：libmpv 由系统包管理器提供
+  return <String>[
+    '/usr/lib/x86_64-linux-gnu/libmpv.so.2',
+    '/usr/lib/libmpv.so.2',
+  ];
+}
+
+/// 探测到的 libmpv **绝对**路径；`null` = 夹具缺失
+String? _libmpv;
+
+/// 夹具准备（`setUpAll` 用）：探到就初始化 MediaKit，探不到**什么都不做**。
+///
+/// ⚠️ 探不到时这里**绝不 fail** —— 守卫下沉到 `_requireLibmpv()`，
+///   由依赖播放器的用例自己调（本文件 1 条用例，全都依赖播放器）。
+void _prepareLibmpvFixture() {
+  for (final rel in _libmpvCandidates()) {
+    final f = File(rel);
+    if (f.existsSync()) {
+      _libmpv = f.absolute.path;
+      MediaKit.ensureInitialized(libmpv: _libmpv);
+      // ignore: avoid_print
+      print('[CR-DOUBLE-ENTER] libmpv 夹具 = $_libmpv');
+      return;
+    }
+  }
+  // ignore: avoid_print
+  print('[CR-DOUBLE-ENTER] libmpv 夹具**缺失** ⇒ 依赖播放器的用例将 markTestSkipped；'
+      '候选 = ${_libmpvCandidates()}');
+}
+
+/// 依赖播放器的用例开头调用：`if (!_requireLibmpv()) return;`
+///
+/// 返回 `true` = 夹具就绪可继续；`false` = **已标记跳过，调用方必须 return**
+/// （`markTestSkipped` 只打标记，**不会**中断当前函数 —— 本地实测：标记之后
+/// 的代码照常执行，所以必须紧跟 `return`）。
+bool _requireLibmpv() {
+  if (_libmpv != null) return true;
+  if (Platform.environment['SOURIN_REQUIRE_LIBMPV'] == '1') {
+    fail(
+      'libmpv 夹具缺失：${File(_libmpvCandidates().first).absolute.path} 不存在'
+      '（被 SOURIN_REQUIRE_LIBMPV=1 要求为硬失败）',
+    );
+  }
+  markTestSkipped('libmpv 夹具缺失 ⇒ 播放器建不起来，本条无从断言。'
+      '手动跑：先 `flutter build windows`（或 macOS 上 `flutter build macos`）'
+      '；候选路径 = ${_libmpvCandidates()}');
+  return false;
+}
+
 void main() {
   late Directory root;
   late Directory workDir;
@@ -135,13 +230,14 @@ void main() {
   late CachedPlayRequest req;
 
   setUpAll(loadRealFonts);
+  setUpAll(_prepareLibmpvFixture);
 
   setUp(() {
-    // ⚠️ MediaKit 必须在**任何** Player 被构造前初始化
-    final dll = File('build/windows/x64/libmpv/libmpv-2.dll');
-    if (dll.existsSync()) {
-      MediaKit.ensureInitialized(libmpv: dll.absolute.path);
-    }
+    // ⚠️ MediaKit 的初始化已上移到 `setUpAll(_prepareLibmpvFixture)`：
+    //    那里用**跨平台**候选表探测。原来这里只认
+    //    `build/windows/x64/libmpv/libmpv-2.dll` 一条路径 ⇒ macOS 上即使
+    //    崩坏引擎真的在也永远探不到。MediaKit.ensureInitialized
+    //    幂等（_initialized 为真就直接 return），此处不再重复。
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(
       const MethodChannel('com.alexmercerind/media_kit_video'),
@@ -267,6 +363,7 @@ void main() {
   }
 
   testWidgets('两次进入同一部本地影片：右侧面板布局读数必须逐项一致', (t) async {
+    if (!_requireLibmpv()) return;
     await setShotViewport(t, const Size(1440, 900));
 
     final r1 = await enter(t, '第一次');
@@ -301,5 +398,31 @@ void main() {
     debugPrint('★★★ 不一致项数 = ${diffs.length} / ${f1.length}');
     expect(diffs, isEmpty,
         reason: '★★★ 第二次进入的布局读数必须与第一次完全一致（同一套度量两次对比）');
+
+    // ★★★ 异常面（T14 审计：本文件曾是「唯一的真·假绿」）★★★
+    //
+    // 上面六项指纹全是「布局读数」——播放器子树一旦被 ErrorWidget 顶替，
+    // 六项会**自己等于自己**（两次都崩成同一形状）⇒ 不读异常面就会放行。
+    // 本地实测（CI 形状：三个崩坏引擎都缺席）：本文件曾打出
+    //   `00:05 +1: All tests passed!`（exit 0）
+    // 而日志里同时有 `_Exception: MediaKit.ensureInitialized must be called…`
+    // （media_page.dart:1765 ← player_page.dart:2187）—— 那次「绿」是假的。
+    // ⇒ 进入期抛出的异常必须为 0；非 0 时把原文打进失败理由，别让人再猜。
+    final allErrors = <String>[...r1.errors, ...r2.errors];
+    for (final e in allErrors.take(6)) {
+      debugPrint('★★★ 进入期异常 ✗ ${e.split('\n').take(4).join(' ⏎ ')}');
+    }
+    debugPrint('★★★ 进入期异常条数 = ${allErrors.length}');
+    final firstErr = allErrors.isEmpty
+        ? '无'
+        : allErrors.first.split('\n').take(4).join(' ⏎ ');
+    expect(
+      allErrors,
+      isEmpty,
+      reason: '★★★ 进入播放页期间框架不得抛出任何异常'
+          '（第一次 ${r1.errors.length} 条 / 第二次 ${r2.errors.length} 条）。'
+          '播放器子树被 ErrorWidget 顶替时，上面六项布局指纹会「自己等于自己」'
+          '⇒ 只有这一条能把它抓住。首条异常 = $firstErr',
+    );
   });
 }
