@@ -337,7 +337,56 @@ void main() {  // ════════════════════�
       expect(body.contains('_danmakuLoading = true;'), isTrue);
       expect(body.contains('_danmakuLoading = false;'), isTrue);
       expect(body.contains('_danmakuComments = r.comments;'), isTrue);
-      expect(body.contains('_danmakuStatus = r.summary;'), isTrue);
+      /*
+       * ★★★ OPS-10 B（业主 1009 B②「还是显示 没收到凭证」）的刻意修复：
+       *   三处状态文案都加了**来源前缀**（player_page.dart:4733 dandanplay 前缀 /
+       *   :5468 与 :5510 B 站前缀）—— 用户要能分清这批弹幕是哪个源给的
+       *   （B 站不要凭证、dandanplay 要，这正是他排错时要分清的那件事）。
+       *   ⇒ 旧针 `_danmakuStatus = r.summary;` 在 lib 里已**不存在**。
+       *
+       * ⚠️ 这一针钉的是**两条**语义，比旧针更严：
+       *   ① 赋值右边必须仍是 `r.summary`（不能换字段、不能写死字符串）；
+       *   ② 左边必须带「B 站 · 」前缀（不能退回无前缀形态）。
+       *   用 r"..." 原串是为了让 `${r.summary}` 里的 `$` 保持字面量。
+       */
+      expect(body.contains(r"_danmakuStatus = 'B 站 · ${r.summary}';"), isTrue,
+          reason: '★★ OPS-10 B：B 站这一支的状态文案必须带来源前缀 —— '
+              '业主 1009 B② 要求能分清弹幕来自哪个源');
+
+      /*
+       * ★★★ OPS-10 B 补钉：5489 与 5543 这两条**面板读数**此前没人钉 ——
+       *   同一个 2600 窗口里有**两条**同形串（5489 属 _loadBiliDanmaku，
+       *   5543 属 _biliApplyComments），所以「窗口里 contains 一次」是弱钉法：
+       *   命中一条就绿，退回另一条照样绿 ⇒ 等于只钉住一半。
+       *   这里改成：先用带**后文上下文**的唯一串各钉一条，再断言窗口内该形态
+       *   恰好 2 次（两条都在）。
+       *   ⚠️ 两处的**上文完全相同**（都是 _danmakuSettings.copyWith(... clearError: true,），
+       *      能分开它们的只有后文：5489 之后是 _biliCid = cid;，
+       *      5543 之后是 _biliCid = r.cid;（各自全文件唯一，实测见
+       *      .probe/ops/BSTATUS-report.md §2）。
+       *   ⚠️ 针头必须写成 r"..." 原串：针里的 ${r.summary} 是**源码字面量**，
+       *      普通字面量会被 Dart 当插值 ⇒ 针永远找不到（假红）。
+       *      换行只能用 '...\n...' 拼（raw string 里的 \n 是两个字符）。
+       *   ⚠️ 两条独立针写在**计数断言之前**：退回某一条时失败信息才能点名是
+       *      5489 还是 5543（计数断言先跑的话只会说「实测 1 次」）。
+       */
+      const panelPinHead = r"status: 'B 站 · ${r.summary}',";
+      // 针身用**插值**拼接：相邻字面量接不了标识符，而 '+' 拼串会被
+      // prefer_interpolation_to_compose_strings 报 lint（const 也不允许 '+'）。
+      const pin5489 = '$panelPinHead\n      );\n    });\n    _biliCid = cid;';
+      const pin5543 = '$panelPinHead\n      );\n    });\n    _biliCid = r.cid;';
+      expect(body.contains(pin5489), isTrue,
+          reason: '★★ 5489（_loadBiliDanmaku 收尾）的面板读数必须带「B 站 · 」前缀，'
+              '且后面紧跟 _biliCid = cid; —— 退回 status: r.summary, 当场红');
+      expect(body.contains(pin5543), isTrue,
+          reason: '★★ 5543（_biliApplyComments 收尾）的面板读数必须带「B 站 · 」前缀，'
+              '且后面紧跟 _biliCid = r.cid; —— 退回 status: r.summary, 当场红');
+      indexOfExactly(body, panelPinHead, want: 2,
+          why: '★★ 5489 与 5543 是两条独立的面板读数，这个窗口里必须**两条都在**；'
+              '只写一次 contains 的话退回其中一条照样绿（= 只钉住一半）');
+      // ignore: avoid_print
+      print('[BSTATUS] i0=$i0 窗口长=${body.length} / 5489 针 rel=${body.indexOf(pin5489)}'
+          ' / 5543 针 rel=${body.indexOf(pin5543)}');
       expect(body.contains('markBiliSynced();'), isTrue,
           reason: '★ 同步时间要记，否则自动更新永远认为缓存还新鲜');
     });
