@@ -1,3 +1,20 @@
+@Tags(['needs-shot-dir'])
+//
+// ★ 必须设 SOURIN_SHOT_DIR（2026-10-10 CI 修复）。
+//
+// # 为什么
+// 本文件是**截图自查工具**：渲染真页面、真存 PNG，像素好不好看靠人读图。
+// 末尾那条用例就是「输出目录已指定」的前提自检 —— 不设环境变量时它红，
+// 而且在此之前截图会落到 ui_shot.dart 的缺省目录（系统临时目录/sourin-shots），
+// 也就是说**断言本该拦住的那件事已经发生了**，只是报出来的位置不对。
+//
+// # 手动跑
+// ```powershell
+//   $env:SOURIN_SHOT_DIR = '.probe\shots-1009'
+//   flutter test test/t1009_polish_shots_test.dart --run-skipped \
+//     --tags needs-shot-dir --concurrency=1
+// ```
+import 'dart:io';
 // 头部截图自查（polish 区域：外壳 / 首页 / 追更 / 浏览 / 直播）
 //
 // 为什么要有这个文件：本区域每次改版都要"看一眼再交付"，
@@ -6,7 +23,6 @@
 // ⚠️ 它是**自查工具**，不是断言文件：只断言"截图落盘了"，
 //    像素好不好看靠人（agent）读 PNG —— 把"好不好看"写成断言
 //    只会得到一条恒真的断言。
-import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:material_ui/material_ui.dart';

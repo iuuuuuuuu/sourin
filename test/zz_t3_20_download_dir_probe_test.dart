@@ -1,3 +1,34 @@
+@Tags(['needs-isolated-userprofile'])
+//
+// ★ 必须以隔离的 USERPROFILE 运行（2026-10-10 CI 修复）。
+//
+// # 为什么
+// ```text
+// 本文件要真碰文件系统（DownloadDir 的语义全在 create(recursive:true) 上）。
+// 而默认兜底根目录 = $USERPROFILE\Videos\源影 —— 不隔离就会在用户真实目录里
+// 建目录。Platform.environment 在 flutter_test 里是**只读**的，改不了，
+// 所以隔离只能由**进程环境**提供。
+//
+// 用例 ⓪ 就是这条前提的自检：不满足就红，而不是默默写真实目录。
+// ```
+//
+// # CI 为什么不满足
+// ```text
+// .github/workflows/build.yml 跑的是裸 \`flutter test\`，没有设 USERPROFILE
+// ⇒ ⓪ 必然红（Expected: true / Actual: false），把 Windows 与 macOS 两个 job
+//    一起带下去。而文件头注释里引用的 \`tools/run_tests.sh\`（说它负责设
+//    隔离环境）**在仓库里根本不存在** —— 那条引用是悬空的。
+// ```
+//
+// # 所以标上标签，默认跳过（与本仓 native-media 同一套办法，见 dart_test.yaml）
+// ```powershell
+// 默认（CI）：跳过
+// 手动跑：
+//   $env:USERPROFILE = "$env:TEMP\sourin-isolated-home"
+//   flutter test test/zz_t3_20_download_dir_probe_test.dart --run-skipped \
+//     --tags needs-isolated-userprofile --concurrency=1
+// ```
+import 'dart:io';
 // ═══════════════════════════════════════════════════════════════════════
 //  ⑳ 下载目录可配置 —— **真实读写文件系统**的探针
 // ═══════════════════════════════════════════════════════════════════════
@@ -22,7 +53,6 @@
 //    `flutter_test` 里是**只读**的（实测 `Unsupported operation: Cannot
 //    modify unmodifiable map`），所以隔离必须由**进程环境**提供。
 //    用例 ⓪ 是这条前提的自检：前提不成立时它直接红，而不是默默写真实目录。
-import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
